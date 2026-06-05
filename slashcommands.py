@@ -232,8 +232,7 @@ def register(tree: app_commands.CommandTree, loop_getter):
         if not interaction.user.voice:
             return await interaction.response.send_message("❌ กรุณาเข้า Voice Channel ก่อนนะ!", ephemeral=True)
 
-        await interaction.response.send_message(f"🔍 กำลังค้นหา **{query}** ...")
-        searching_msg = await interaction.original_response()
+        await interaction.response.defer()
 
         voice_channel = interaction.user.voice.channel
         vc = interaction.guild.voice_client
@@ -245,11 +244,6 @@ def register(tree: app_commands.CommandTree, loop_getter):
         url, title, duration = await asyncio.to_thread(fetch_track, query)
         requester = interaction.user
         track = (url, title, duration, requester)
-
-        try:
-            await searching_msg.delete()
-        except Exception:
-            pass
 
         queue = get_queue(interaction.guild.id)
         if vc.is_playing() or vc.is_paused():
