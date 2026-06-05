@@ -230,35 +230,87 @@ def register(tree: app_commands.CommandTree, loop_getter):
     @app_commands.describe(query="ชื่อเพลง หรือ URL YouTube")
     async def slash_play(interaction: discord.Interaction, query: str):
         if not interaction.user.voice:
-            return await interaction.response.send_message("❌ กรุณาเข้า Voice Channel ก่อนนะ!", ephemeral=True)
+            return await interaction.response.send_message(
+                "❌ กรุณาเข้า Voice Channel ก่อนนะ!",
+                ephemeral=True
+            )
 
-        await interaction.response.defer()
+        await interaction.response.defer(thinking=True)
 
-        voice_channel = interaction.user.voice.channel
-        vc = interaction.guild.voice_client
-        if not vc:
-            vc = await voice_channel.connect()
-        elif vc.channel != voice_channel:
-            await vc.move_to(voice_channel)
+        try:
+            voice_channel = interaction.user.voice.channel
+            vc = interaction.guild.voice_client
 
-        url, title, duration = await asyncio.to_thread(fetch_track, query)
-        requester = interaction.user
-        track = (url, title, duration, requester)
+            if not vc:
+                vc = await voice_channel.connect()
+            elif vc.channel != voice_channel:
+                await vc.move_to(voice_channel)
 
-        queue = get_queue(interaction.guild.id)
-        if vc.is_playing() or vc.is_paused():
-            queue.append(track)
-            await interaction.channel.send(f"📋 เพิ่มใน Queue: **{title}** (ตำแหน่ง #{len(queue)})")
-        else:
-            source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=DEFAULT_VOLUME)
-            view = PlayerView(interaction.guild, interaction.channel, loop_getter(), current_track=track)
-            active_views[interaction.guild.id] = view
-            vc.play(source, after=lambda e: asyncio.run_coroutine_threadsafe(
-                play_next(interaction.guild, interaction.channel, loop_getter(), current_track=track), loop_getter()
-            ))
-            embed = make_now_playing_embed(title, duration, requester)
-            msg = await interaction.channel.send(embed=embed, view=view)
-            view.now_playing_msg = msg
+            url, title, duration = await asyncio.to_thread(fetch_track, query)
+            requester = interaction.user
+            track = (url, title, duration, requester)
+
+            queue = get_queue(interaction.guild.id)
+
+            if vc.is_playing() or vc.is_paused():
+                queue.append(track)
+
+                await interaction.followup.send(
+                    f"📋 เพิ่มใน Queue: **{title}** (ตำแหน่ง #{len(queue)})"
+                )
+
+            else:
+                source = discord.PCMVolumeTransformer(
+                    discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS),
+                    volume=DEFAULT_VOLUME
+                )
+
+                view = PlayerView(
+                    interaction.guild,
+                    interaction.channel,
+                    loop_getter(),
+                    current_track=track
+                )
+
+                active_views[interaction.guild.id] = view
+
+                vc.play(
+                    source,
+                    after=lambda e: asyncio.run_coroutine_threadsafe(
+                        play_next(
+                            interaction.guild,
+                            interaction.channel,
+                            loop_getter(),
+                            current_track=track
+                        ),
+                        loop_getter()
+                    )
+                )
+
+                embed = make_now_playing_embed(
+                    title,
+                    duration,
+                    requester
+                )
+
+                msg = await interaction.followup.send(
+                    embed=embed,
+                    view=view,
+                    wait=True
+                )
+
+                view.now_playing_msg = msg
+
+        except Exception as e:
+            print(f"PLAY ERROR: {e}")
+
+            try:
+                await interaction.followup.send(
+                    f"❌ เกิดข้อผิดพลาด: {e}",
+                    ephemeral=True
+                )
+            except Exception:
+                pass
 
     @tree.command(name="skip", description="ข้ามเพลงปัจจุบัน")
     async def slash_skip(interaction: discord.Interaction):

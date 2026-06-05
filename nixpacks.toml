@@ -2,4 +2,4 @@
 nixPkgs = ["ffmpeg", "libsodium"]
 
 [phases.install]
-cmds = ["pip install -U \"discord.py[voice]\" PyNaCl"]
+cmds = ["pip install -U discord.py[voice] PyNaCl --break-system-packages"]
