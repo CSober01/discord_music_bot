@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 import slashcommands
 
 load_dotenv()
-BOT_TOKEN = os.getenv("DISCORD_TOKEN")
+BOT_TOKEN = os.getenv("DISCORD_TOKEN", "").strip().strip('"')
 PREFIX = "!"
 
 intents = discord.Intents.default()
