@@ -18,7 +18,7 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 # ผูก slash commands จาก slashcommands.py
 slashcommands.register(bot.tree, lambda: bot.loop)
 
-YDL_OPTIONS = slashcommands.YDL_OPTIONS
+get_ydl_options = slashcommands.get_ydl_options
 FFMPEG_OPTIONS = slashcommands.FFMPEG_OPTIONS
 DEFAULT_VOLUME = slashcommands.DEFAULT_VOLUME
 get_queue = slashcommands.get_queue

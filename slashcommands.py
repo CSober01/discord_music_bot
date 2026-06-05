@@ -7,14 +7,9 @@ import discord
 from discord import app_commands
 import yt_dlp
 import asyncio
-
-YDL_OPTIONS = {
-    "format": "bestaudio/best",
-    "noplaylist": True,
-    "quiet": True,
-    "default_search": "ytsearch",
-    "source_address": "0.0.0.0",
-}
+import base64
+import tempfile
+import os
 
 FFMPEG_OPTIONS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
@@ -42,8 +37,25 @@ def get_history(guild_id: int) -> list:
     return histories[guild_id]
 
 
+def get_ydl_options():
+    options = {
+        "format": "bestaudio/best",
+        "noplaylist": True,
+        "quiet": True,
+        "default_search": "ytsearch",
+        "source_address": "0.0.0.0",
+    }
+    cookies_b64 = os.getenv("YOUTUBE_COOKIES", "").strip().strip('"').strip('\ufeff').encode('ascii', 'ignore').decode('ascii')
+    if cookies_b64:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="wb")
+        tmp.write(base64.b64decode(cookies_b64))
+        tmp.close()
+        options["cookiefile"] = tmp.name
+    return options
+
+
 def fetch_track(query: str):
-    with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+    with yt_dlp.YoutubeDL(get_ydl_options()) as ydl:
         info = ydl.extract_info(query, download=False)
         if "entries" in info:
             info = info["entries"][0]
