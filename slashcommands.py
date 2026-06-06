@@ -23,6 +23,7 @@ histories: dict[int, list] = {}
 
 # เก็บ PlayerView ที่กำลังเล่นอยู่ต่อ guild
 active_views: dict[int, "PlayerView"] = {}
+queue_done_msgs: dict[int, object] = {}  # เก็บ message "เล่นครบแล้ว" ต่อ guild
 
 
 def get_queue(guild_id: int) -> list:
@@ -66,16 +67,159 @@ def fetch_track(query: str):
 
 
 def make_now_playing_embed(title: str, duration: str, requester: discord.Member = None) -> discord.Embed:
+    requester_str = requester.mention if requester else ""
     embed = discord.Embed(
         title="🎵 Now Playing",
         description=f"**{title}**",
         color=discord.Color.dark_blue(),
     )
-    embed.add_field(name="ความยาว", value=duration, inline=True)
-    if requester:
-        embed.add_field(name="ขอโดย", value=requester.mention, inline=True)
+    embed.set_author(name="▶  Now Playing")
+    embed.set_footer(text="SEa Music  •  ใช้ปุ่มด้านล่างเพื่อควบคุม")
     return embed
 
+
+async def safe_respond(interaction: discord.Interaction, content=None, embed=None, view=None, ephemeral=False, wait=False):
+    """ส่ง response โดยไม่สนว่า interaction ถูก acknowledge แล้วหรือยัง"""
+    kwargs = {"ephemeral": ephemeral}
+    if content:
+        kwargs["content"] = content
+    if embed:
+        kwargs["embed"] = embed
+    if view:
+        kwargs["view"] = view
+
+    try:
+        if interaction.response.is_done():
+            if wait:
+                return await interaction.followup.send(**kwargs, wait=True)
+            else:
+                return await interaction.followup.send(**kwargs)
+        else:
+            await interaction.response.send_message(**kwargs)
+            return None
+    except discord.errors.HTTPException:
+        try:
+            if wait:
+                return await interaction.followup.send(**kwargs, wait=True)
+            else:
+                await interaction.followup.send(**kwargs)
+        except Exception:
+            pass
+    return None
+
+
+
+# ─────────────────────────────────────────────
+#  Volume Modal
+# ─────────────────────────────────────────────
+
+class VolumeModal(discord.ui.Modal, title="🔊 ปรับระดับเสียง"):
+    vol_input = discord.ui.TextInput(
+        label="ระดับเสียง (0-100)",
+        placeholder="เช่น 50",
+        min_length=1,
+        max_length=3,
+    )
+
+    def __init__(self, vc, player_view):
+        super().__init__()
+        self.vc = vc
+        self.player_view = player_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            vol = int(str(self.vol_input))
+            if not 0 <= vol <= 100:
+                raise ValueError
+        except ValueError:
+            return await interaction.response.send_message("❌ กรอกตัวเลข 0-100", ephemeral=True)
+        self.player_view.volume_level = vol / 100
+        if self.vc.source:
+            self.vc.source.volume = vol / 100
+        await interaction.response.send_message(f"🔊 ระดับเสียง: **{vol}%**", ephemeral=True)
+
+
+# ─────────────────────────────────────────────
+#  Search Modal
+# ─────────────────────────────────────────────
+
+class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
+    query = discord.ui.TextInput(
+        label="ชื่อเพลงหรือศิลปิน",
+        placeholder="เช่น Bryan Adams Heaven",
+        min_length=1,
+        max_length=100,
+    )
+
+    def __init__(self, guild, channel, loop, loop_getter):
+        super().__init__()
+        self.guild = guild
+        self.channel = channel
+        self.loop = loop
+        self.loop_getter = loop_getter
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            results = await asyncio.to_thread(search_tracks, str(self.query))
+            if not results:
+                return await interaction.followup.send("❌ ไม่พบเพลง", ephemeral=True)
+            view = SearchResultView(results, self.guild, self.channel, self.loop, self.loop_getter)
+            lines = [f"`{i+1}.` {r['title']} `{r['duration']}`" for i, r in enumerate(results)]
+            embed = discord.Embed(
+                title="🔍 ผลการค้นหา",
+                description="\n".join(lines),
+                color=0x1a1a2e,
+            )
+            embed.set_footer(text="เลือกเพลงที่ต้องการเพิ่มใน Queue")
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ เกิดข้อผิดพลาด กรุณาลองใหม่", ephemeral=True)
+
+
+class SearchResultView(discord.ui.View):
+    def __init__(self, results, guild, channel, loop, loop_getter):
+        super().__init__(timeout=60)
+        self.results = results
+        self.guild = guild
+        self.channel = channel
+        self.loop = loop
+        self.loop_getter = loop_getter
+        options = [
+            discord.SelectOption(label=r["title"][:100], value=str(i), description=f"⏱ {r['duration']}")
+            for i, r in enumerate(results)
+        ]
+        select = discord.ui.Select(placeholder="เลือกเพลง...", options=options)
+        select.callback = self.select_callback
+        self.add_item(select)
+
+    async def select_callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        idx = int(interaction.data["values"][0])
+        r = self.results[idx]
+        vc = self.guild.voice_client
+        if not vc:
+            if not interaction.user.voice:
+                return await interaction.followup.send("❌ กรุณาเข้า Voice Channel ก่อน", ephemeral=True)
+            vc = await interaction.user.voice.channel.connect()
+        track = (r["url"], r["title"], r["duration"], interaction.user, r.get("thumbnail"))
+        queue = get_queue(self.guild.id)
+        if vc.is_playing() or vc.is_paused():
+            queue.append(track)
+            await interaction.followup.send(
+                embed=discord.Embed(description=f"📋 เพิ่มใน Queue: **{r['title']}** (ตำแหน่ง #{len(queue)})", color=0x1a1a2e),
+                ephemeral=True
+            )
+        else:
+            source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(r["url"], **FFMPEG_OPTIONS), volume=DEFAULT_VOLUME)
+            view = PlayerView(self.guild, self.channel, self.loop_getter(), current_track=track)
+            active_views[self.guild.id] = view
+            _guild, _channel, _loop, _track = self.guild, self.channel, self.loop_getter(), track
+            vc.play(source, after=lambda e, g=_guild, ch=_channel, lp=_loop, t=_track: asyncio.run_coroutine_threadsafe(play_next(g, ch, lp, current_track=t), lp))
+            embed = make_now_playing_embed(r["title"], r["duration"], interaction.user, r.get("thumbnail"))
+            msg = await self.channel.send(embed=embed, view=view)
+            view.now_playing_msg = msg
+            await interaction.followup.send("▶️ เริ่มเล่นเพลงแล้ว!", ephemeral=True)
 
 # ─────────────────────────────────────────────
 #  Player Buttons View
@@ -154,20 +298,34 @@ class PlayerView(discord.ui.View):
         else:
             await interaction.response.send_message("❌ ไม่มีเพลงที่กำลังเล่นอยู่", ephemeral=True)
 
-    @discord.ui.button(emoji="📋", style=discord.ButtonStyle.primary)
+    @discord.ui.button(emoji="🟰", style=discord.ButtonStyle.primary, row=1)
     async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
         queue = get_queue(self.guild.id)
         if not queue:
-            return await interaction.response.send_message("📋 Queue ว่างเปล่า", ephemeral=True)
-        lines = [f"`{i+1}.` {title}" for i, (_, title, *_rest) in enumerate(queue)]
+            return await safe_respond(interaction, "📋 Queue ว่างเปล่า", ephemeral=True)
+        lines = [f"`{i+1}.` {t[1]}" for i, t in enumerate(queue)]
         embed = discord.Embed(
             title="📋 Queue เพลง",
             description="\n".join(lines),
             color=discord.Color.blurple(),
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await safe_respond(interaction, embed=embed, ephemeral=True)
 
-    @discord.ui.button(emoji="⏹", style=discord.ButtonStyle.danger)
+    @discord.ui.button(emoji="🔍", style=discord.ButtonStyle.secondary, row=1)
+    async def search(self, interaction: discord.Interaction, button: discord.ui.Button):
+        loop = self.loop if self.loop else asyncio.get_event_loop()
+        modal = SearchModal(self.guild, self.channel, loop, lambda: loop)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
+    async def volume_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = self.guild.voice_client
+        if not vc or not vc.source:
+            return await safe_respond(interaction, "❌ ไม่มีเพลงที่กำลังเล่นอยู่", ephemeral=True)
+        modal = VolumeModal(vc, self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(emoji="⏹", style=discord.ButtonStyle.danger, row=0)
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = self.guild.voice_client
         if vc:
@@ -183,6 +341,33 @@ class PlayerView(discord.ui.View):
         else:
             await interaction.response.send_message("❌ บอทไม่ได้อยู่ใน Voice Channel", ephemeral=True)
 
+    @discord.ui.button(emoji="🔍", style=discord.ButtonStyle.secondary, row=1)
+    async def search(self, interaction: discord.Interaction, button: discord.ui.Button):
+        loop = self.loop if self.loop else asyncio.get_event_loop()
+        modal = SearchModal(self.guild, self.channel, loop, lambda: loop)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(emoji="📋", style=discord.ButtonStyle.primary, row=1)
+    async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        queue = get_queue(self.guild.id)
+        if not queue:
+            return await safe_respond(interaction, "📋 Queue ว่างเปล่า", ephemeral=True)
+        lines = [f"`{i+1}.` {t[1]}" for i, t in enumerate(queue)]
+        embed = discord.Embed(
+            title="📋 Queue เพลง",
+            description="\n".join(lines),
+            color=discord.Color.blurple(),
+        )
+        await safe_respond(interaction, embed=embed, ephemeral=True)
+
+    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
+    async def volume_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        vc = self.guild.voice_client
+        if not vc or not vc.source:
+            return await safe_respond(interaction, "❌ ไม่มีเพลงที่กำลังเล่นอยู่", ephemeral=True)
+        modal = VolumeModal(vc, self)
+        await interaction.response.send_modal(modal)
+
 
 # ─────────────────────────────────────────────
 #  play_next
@@ -193,6 +378,13 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop, cu
     old_view = active_views.pop(guild.id, None)
     if old_view:
         await old_view.delete_now_playing()
+
+    # ลบข้อความ "เพิ่มใน Queue" ทั้งหมด
+    for msg in queue_add_msgs.pop(guild.id, []):
+        try:
+            await msg.delete()
+        except Exception:
+            pass
 
     if current_track:
         history = get_history(guild.id)
@@ -254,11 +446,7 @@ def register(tree: app_commands.CommandTree, loop_getter):
 
             if vc.is_playing() or vc.is_paused():
                 queue.append(track)
-
-                await interaction.followup.send(
-                    f"📋 เพิ่มใน Queue: **{title}** (ตำแหน่ง #{len(queue)})"
-                )
-
+                await interaction.edit_original_response(content=None, embed=discord.Embed(description=f"📋 เพิ่มใน Queue: **{title}** (ตำแหน่ง #{len(queue)})", color=discord.Color.blurple()))
             else:
                 source = discord.PCMVolumeTransformer(
                     discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS),
