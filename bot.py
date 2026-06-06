@@ -15,7 +15,6 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 
-# ผูก slash commands จาก slashcommands.py
 slashcommands.register(bot.tree, lambda: bot.loop)
 
 get_ydl_options = slashcommands.get_ydl_options
@@ -32,8 +31,9 @@ async def play_next_ctx(ctx: commands.Context, current_track=None, prev_view=Non
 
     queue = get_queue(ctx.guild.id)
     if queue:
-        url, title, duration, requester = queue.pop(0)
-        track = (url, title, duration, requester)
+        url, title, duration, requester, *_thumb = queue.pop(0)
+        thumbnail = _thumb[0] if _thumb else None
+        track = (url, title, duration, requester, thumbnail)
         source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=DEFAULT_VOLUME)
         view = slashcommands.PlayerView(ctx.guild, ctx.channel, bot.loop, current_track=track)
         ctx.voice_client.play(
@@ -42,7 +42,7 @@ async def play_next_ctx(ctx: commands.Context, current_track=None, prev_view=Non
                 play_next_ctx(ctx, current_track=track, prev_view=view), bot.loop
             ),
         )
-        embed = slashcommands.make_now_playing_embed(title, duration, requester)
+        embed = slashcommands.make_now_playing_embed(title, duration, requester, thumbnail)
         msg = await ctx.send(embed=embed, view=view)
         view.now_playing_msg = msg
     else:
@@ -71,8 +71,7 @@ async def play(ctx: commands.Context, *, query: str):
         await ctx.voice_client.move_to(voice_channel)
 
     searching_msg = await ctx.send(f"🔍 กำลังค้นหา **{query}** ...")
-
-    url, title, duration = await asyncio.to_thread(fetch_track, query)
+    url, title, duration, thumbnail = await asyncio.to_thread(fetch_track, query)
 
     try:
         await searching_msg.delete()
@@ -80,7 +79,7 @@ async def play(ctx: commands.Context, *, query: str):
         pass
 
     requester = ctx.author
-    track = (url, title, duration, requester)
+    track = (url, title, duration, requester, thumbnail)
     queue = get_queue(ctx.guild.id)
     if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
         queue.append(track)
@@ -94,7 +93,7 @@ async def play(ctx: commands.Context, *, query: str):
                 play_next_ctx(ctx, current_track=track, prev_view=view), bot.loop
             ),
         )
-        embed = slashcommands.make_now_playing_embed(title, duration, requester)
+        embed = slashcommands.make_now_playing_embed(title, duration, requester, thumbnail)
         msg = await ctx.send(embed=embed, view=view)
         view.now_playing_msg = msg
 
@@ -131,7 +130,7 @@ async def queue_list(ctx: commands.Context):
     queue = get_queue(ctx.guild.id)
     if not queue:
         return await ctx.send("📋 Queue ว่างเปล่า")
-    lines = [f"`{i+1}.` {title}" for i, (_, title, *_rest) in enumerate(queue)]
+    lines = [f"`{i+1}.` {t[1]}" for i, t in enumerate(queue)]
     embed = discord.Embed(title="📋 Queue เพลง", description="\n".join(lines), color=discord.Color.blurple())
     await ctx.send(embed=embed)
 
@@ -154,17 +153,6 @@ async def now_playing(ctx: commands.Context):
         await ctx.send("🎵 กำลังเล่นเพลงอยู่! ใช้ `!queue` เพื่อดูรายการถัดไป")
     else:
         await ctx.send("❌ ไม่มีเพลงที่กำลังเล่นอยู่")
-
-
-@bot.command(name="volume", aliases=["vol"])
-async def volume(ctx: commands.Context, vol: int):
-    if not ctx.voice_client:
-        return await ctx.send("❌ บอทไม่ได้อยู่ใน Voice Channel")
-    if not 0 <= vol <= 100:
-        return await ctx.send("❌ ระดับเสียงต้องอยู่ระหว่าง 0-100")
-    if ctx.voice_client.source:
-        ctx.voice_client.source = discord.PCMVolumeTransformer(ctx.voice_client.source, volume=vol / 100)
-        await ctx.send(f"🔊 ระดับเสียง: {vol}%")
 
 
 @bot.event
