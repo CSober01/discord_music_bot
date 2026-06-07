@@ -25,28 +25,10 @@ fetch_track = slashcommands.fetch_track
 queues = slashcommands.queues
 
 
-async def play_next_ctx(ctx: commands.Context, current_track=None, prev_view=None):
+async def play_next_ctx(ctx: commands.Context, prev_view=None):
     if prev_view:
         await prev_view.delete_now_playing()
-
-    queue = get_queue(ctx.guild.id)
-    if queue:
-        url, title, duration, requester, *_thumb = queue.pop(0)
-        thumbnail = _thumb[0] if _thumb else None
-        track = (url, title, duration, requester, thumbnail)
-        source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=DEFAULT_VOLUME)
-        view = slashcommands.PlayerView(ctx.guild, ctx.channel, bot.loop, current_track=track)
-        ctx.voice_client.play(
-            source,
-            after=lambda e: asyncio.run_coroutine_threadsafe(
-                play_next_ctx(ctx, current_track=track, prev_view=view), bot.loop
-            ),
-        )
-        embed = slashcommands.make_now_playing_embed(title, duration, requester, thumbnail)
-        msg = await ctx.send(embed=embed, view=view)
-        view.now_playing_msg = msg
-    else:
-        await ctx.send("เล่นเพลงครบ Queue แล้ว!")
+    await slashcommands.play_next(ctx.guild, ctx.channel, bot.loop)
 
 
 @bot.event
@@ -55,12 +37,12 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.listening,
-            name=f"{PREFIX}play | /play 🎵",
+            name=f"{PREFIX}p | /play 🎵",
         )
     )
 
 
-@bot.command(name="play", aliases=["p"])
+@bot.command(name="p")
 async def play(ctx: commands.Context, *, query: str):
     if not ctx.author.voice:
         return await ctx.send("❌ กรุณาเข้า Voice Channel ก่อนนะ!")
@@ -70,6 +52,10 @@ async def play(ctx: commands.Context, *, query: str):
     elif ctx.voice_client.channel != voice_channel:
         await ctx.voice_client.move_to(voice_channel)
 
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
     searching_msg = await ctx.send(f"🔍 กำลังค้นหา **{query}** ...")
     url, title, duration, thumbnail = await asyncio.to_thread(fetch_track, query)
 
@@ -81,16 +67,19 @@ async def play(ctx: commands.Context, *, query: str):
     requester = ctx.author
     track = (url, title, duration, requester, thumbnail)
     queue = get_queue(ctx.guild.id)
+    queue.append(track)
     if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-        queue.append(track)
-        await ctx.send(f"📋 เพิ่มใน Queue: **{title}** (ตำแหน่ง #{len(queue)})")
+        await ctx.send(f"📋 เพิ่มใน Queue #{len(queue)}: **{title}** by {ctx.author.mention}")
     else:
+        q_idx = len(queue) - 1
+        slashcommands.set_index(ctx.guild.id, q_idx)
         source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=DEFAULT_VOLUME)
-        view = slashcommands.PlayerView(ctx.guild, ctx.channel, bot.loop, current_track=track)
+        view = slashcommands.PlayerView(ctx.guild, ctx.channel, bot.loop, current_index=q_idx)
+        slashcommands.active_views[ctx.guild.id] = view
         ctx.voice_client.play(
             source,
             after=lambda e: asyncio.run_coroutine_threadsafe(
-                play_next_ctx(ctx, current_track=track, prev_view=view), bot.loop
+                play_next_ctx(ctx), bot.loop
             ),
         )
         embed = slashcommands.make_now_playing_embed(title, duration, requester, thumbnail)
@@ -127,19 +116,14 @@ async def resume(ctx: commands.Context):
 
 @bot.command(name="queue", aliases=["q"])
 async def queue_list(ctx: commands.Context):
-    queue = get_queue(ctx.guild.id)
-    if not queue:
-        return await ctx.send("📋 Queue ว่างเปล่า")
-    lines = [f"`{i+1}.` {t[1]}" for i, t in enumerate(queue)]
-    embed = discord.Embed(title="📋 Queue เพลง", description="\n".join(lines), color=discord.Color.blurple())
+    embed = slashcommands.make_queue_embed(ctx.guild.id)
     await ctx.send(embed=embed)
 
 
 @bot.command(name="stop")
 async def stop(ctx: commands.Context):
     if ctx.voice_client:
-        queues[ctx.guild.id] = []
-        slashcommands.histories[ctx.guild.id] = []
+        slashcommands.clear_guild(ctx.guild.id)
         ctx.voice_client.stop()
         await ctx.voice_client.disconnect()
         await ctx.send("⏹️ หยุดเพลงและออกจาก Voice Channel แล้ว")
