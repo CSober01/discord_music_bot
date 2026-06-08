@@ -25,6 +25,7 @@ active_views: dict[int, "PlayerView"] = {}
 queue_done_msgs: dict[int, object] = {}
 queue_add_msgs: dict[int, list] = {}
 guild_stopped: set[int] = set()  # guilds ที่ถูก stop intentionally
+guild_skip_once: set[int] = set()  # guilds ที่ _play_at_idx กำลัง stop เพื่อเปลี่ยนเพลง (play_next ต้อง skip 1 ครั้ง)
 
 MAX_QUEUE = 20
 
@@ -322,7 +323,7 @@ async def _add_and_play(vc, guild, channel, loop_getter, track, interaction=None
 
     if vc.is_playing() or vc.is_paused():
         # มีเพลงเล่นอยู่ → แสดง "เพิ่มใน Queue"
-        pos = track_idx - get_now_idx(guild.id)  # ตำแหน่งถัดจากปัจจุบัน
+        pos = track_idx - get_now_idx(guild.id) + 1  # ตำแหน่งถัดจากปัจจุบัน (นับ 1-based รวมเพลงที่กำลังเล่น)
         pub_msg = await channel.send(
             embed=discord.Embed(
                 description=f"📋 เพิ่มใน Queue ตำแหน่ง #{pos}: **{title}** by {requester.mention}",
@@ -384,9 +385,9 @@ class PlayerView(discord.ui.View):
         source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=DEFAULT_VOLUME)
         new_view = PlayerView(self.guild, self.channel, self.loop, current_track=track, current_idx=idx)
         active_views[self.guild.id] = new_view
-        guild_stopped.add(self.guild.id)  # ป้องกัน after= callback เดิม trigger play_next
+        guild_skip_once.add(self.guild.id)  # บอก play_next ว่า after= callback ตัวเก่าต้อง skip ไป
         vc.stop()
-        guild_stopped.discard(self.guild.id)  # เคลียร์ทันทีหลัง stop
+        # ไม่ discard ที่นี่ — ให้ play_next เป็นคน discard เมื่อถูกเรียก (ป้องกัน race condition กับ after= thread)
         vc.play(source, after=lambda e, _idx=idx: asyncio.run_coroutine_threadsafe(
             play_next(self.guild, self.channel, self.loop, current_idx=_idx), self.loop
         ))
@@ -494,7 +495,7 @@ class PlayerView(discord.ui.View):
 
     @discord.ui.button(emoji="📋", style=discord.ButtonStyle.primary, row=1)
     async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = make_queue_embed(self.guild.id, current_idx=self.current_idx)
+        embed = make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id))
         await safe_respond(interaction, embed=embed, ephemeral=True)
 
     @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
@@ -514,6 +515,11 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop, cu
     # ถ้าหยุดจงใจ ไม่ต้องทำอะไร
     if guild.id in guild_stopped:
         guild_stopped.discard(guild.id)
+        return
+
+    # ถ้า _play_at_idx สั่ง stop เพื่อเปลี่ยนเพลง → callback ตัวเก่านี้ควร skip ไปเฉยๆ (เพลงใหม่ถูก play แล้ว)
+    if guild.id in guild_skip_once:
+        guild_skip_once.discard(guild.id)
         return
 
     old_view = active_views.pop(guild.id, None)
@@ -575,7 +581,7 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop, cu
 
             await asyncio.sleep(300)
             vc = guild.voice_client
-            if vc and not vc.is_playing() and next_idx >= len(get_full_queue(guild.id)):
+            if vc and not vc.is_playing() and not vc.is_paused() and next_idx >= len(get_full_queue(guild.id)):
                 await vc.disconnect()
                 clear_guild(guild.id)
                 done_msg = queue_done_msgs.pop(guild.id, None)
