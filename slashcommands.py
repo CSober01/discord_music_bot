@@ -89,22 +89,43 @@ def fetch_track(query: str):
 
 def search_tracks(query: str, limit: int = 5):
     opts = get_ydl_options()
-    opts["extract_flat"] = False
+    opts["extract_flat"] = "in_playlist"
     opts["default_search"] = "ytsearch5"
     results = []
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(query, download=False)
         entries = info.get("entries", [info]) if "entries" in info else [info]
         for entry in entries[:limit]:
-            duration = entry.get("duration", 0) or 0
-            m, s = divmod(int(duration), 60)
+            duration = entry.get("duration")
+            if duration is not None:
+                m, s = divmod(int(duration), 60)
+                duration = f"{m}:{s:02d}"
             results.append({
-                "url": entry.get("url") or entry.get("webpage_url"),
+                "id": entry.get("id"),
                 "title": entry.get("title", "Unknown"),
-                "duration": f"{m}:{s:02d}",
-                "thumbnail": entry.get("thumbnail"),
+                "duration": duration,
             })
     return results
+
+async def send_search_results(results, guild, channel, loop, loop_getter, requester,
+                              done_msg_ref=None):
+    lines = []
+    for i, r in enumerate(results):
+        line = f"`{i+1}.` {_trunc(r['title'], 55)}"
+        duration = r.get("duration")
+        if duration:
+            line += f" | `{duration}`"
+        lines.append(line)
+    embed = discord.Embed(title="🔍 ผลการค้นหา", description="\n".join(lines), color=0x1a1a2e)
+    embed.set_footer(text=f"กำลังรอ {requester.display_name} เลือกเพลง • หมดเวลาใน 2 นาที")
+    search_view = SearchResultView(results, guild, channel, loop, loop_getter,
+                                   requester=requester, done_msg_ref=done_msg_ref)
+    pub_msg = await channel.send(
+        content=f"🎵 {requester.mention} กำลังเลือกเพลง", embed=embed, view=search_view)
+    search_view.message = pub_msg
+    search_result_msgs.setdefault(guild.id, []).append(pub_msg)
+    return pub_msg
+
 
 def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queue_pos=None):
     requester_str = f"ขอโดย: {requester.mention}" if requester else ""
@@ -127,8 +148,8 @@ def make_done_embed():
         color=discord.Color.green()
     )
 
-_QUEUE_TITLE_NORMAL  = 40
-_QUEUE_TITLE_PLAYING = 28
+_QUEUE_TITLE_NORMAL  = 60
+_QUEUE_TITLE_PLAYING = 48
 
 def make_queue_embed(guild_id: int, current_idx: int = None):
     q = get_full_queue(guild_id)
@@ -235,6 +256,7 @@ class QueueDoneView(discord.ui.View):
 
     @discord.ui.button(emoji="⏹", label="หยุดและออก", style=discord.ButtonStyle.danger)
     async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        log("⏹ STOP", interaction, "Queue done stop")
         vc = self.guild.voice_client
         if vc:
             await _delete_search_result_msgs(self.guild.id)
@@ -355,16 +377,9 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
             await _ack_done()
             await self._delete_done_msg()
 
-            lines = [f"`{i+1}.` {r['title']} `{r['duration']}`" for i, r in enumerate(results)]
-            embed = discord.Embed(title="🔍 ผลการค้นหา", description="\n".join(lines), color=0x1a1a2e)
-            embed.set_footer(text=f"กำลังรอ {interaction.user.display_name} เลือกเพลง • หมดเวลาใน 2 นาที")
-            search_view = SearchResultView(results, self.guild, self.channel, self.loop,
-                                           self.loop_getter, requester=interaction.user,
-                                           done_msg_ref=self.done_msg_ref)
-            pub_msg = await self.channel.send(
-                content=f"🎵 {interaction.user.mention} กำลังเลือกเพลง", embed=embed, view=search_view)
-            search_view.message = pub_msg
-            search_result_msgs.setdefault(self.guild.id, []).append(pub_msg)
+            await send_search_results(results, self.guild, self.channel, self.loop,
+                                      self.loop_getter, interaction.user,
+                                      done_msg_ref=self.done_msg_ref)
 
         except Exception:
             await _ack_done()
@@ -395,9 +410,16 @@ class SearchResultView(discord.ui.View):
         self.add_item(self._select_item)
 
     def _build_options(self):
-        return [discord.SelectOption(label=r["title"][:100], value=str(i),
-                                     description=f"⏱ {r['duration']}")
-                for i, r in enumerate(self.results) if i not in self._selected]
+        options = []
+        for i, r in enumerate(self.results):
+            if i in self._selected:
+                continue
+            description = None
+            duration = r.get("duration")
+            if duration:
+                description = f"⏱ {duration}"
+            options.append(discord.SelectOption(label=_trunc(r["title"], 60), value=str(i), description=description))
+        return options
 
     async def _check_requester(self, interaction):
         if self.requester and interaction.user.id != self.requester.id:
@@ -511,14 +533,21 @@ class SearchResultView(discord.ui.View):
         except Exception: pass
         self._selecting = False
 
+    async def on_timeout(self):
+        await self._close_message()
+
 
 # ─────────────────────────────────────────────
 #  Helper: เพิ่มเพลงและเล่น/queue
 # ─────────────────────────────────────────────
 
 def fetch_track_from_result(r: dict):
-    """ดึงข้อมูลจาก search result dict โดยตรง ไม่ re-fetch"""
-    return r["url"], r["title"], r["duration"], r.get("thumbnail")
+    """ดึงข้อมูลจาก search result dict เมื่อเลือกเพลงเท่านั้น"""
+    video_id = r.get("id")
+    if not video_id:
+        raise ValueError("Missing video id")
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    return fetch_track(url)
 
 _play_locks: dict[int, asyncio.Lock] = {}
 
@@ -926,16 +955,8 @@ def register(tree: app_commands.CommandTree, loop_getter):
                     return await interaction.followup.send(embed=discord.Embed(
                         description="❌ ไม่พบเพลง", color=discord.Color.red()), ephemeral=True)
                 await _del_search()
-                lines = [f"`{i+1}.` {r['title']} `{r['duration']}`" for i, r in enumerate(results)]
-                embed = discord.Embed(title="🔍 ผลการค้นหา", description="\n".join(lines), color=0x1a1a2e)
-                embed.set_footer(
-                    text=f"กำลังรอ {interaction.user.display_name} เลือกเพลง • หมดเวลาใน 2 นาที")
-                search_view = SearchResultView(results, interaction.guild, interaction.channel,
-                                               loop_getter(), loop_getter, requester=interaction.user)
-                pub_msg = await interaction.channel.send(
-                    content=f"🎵 {interaction.user.mention} กำลังเลือกเพลง", embed=embed, view=search_view)
-                search_view.message = pub_msg
-                search_result_msgs.setdefault(interaction.guild.id, []).append(pub_msg)
+                await send_search_results(results, interaction.guild, interaction.channel,
+                                          loop_getter(), loop_getter, interaction.user)
 
         except Exception as e:
             err = str(e)
