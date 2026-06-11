@@ -79,32 +79,50 @@ def get_ydl_options():
     }
 
 def fetch_track(query: str):
-    with yt_dlp.YoutubeDL(get_ydl_options()) as ydl:
-        info = ydl.extract_info(query, download=False)
-        if "entries" in info:
-            info = info["entries"][0]
-        duration = info.get("duration", 0)
-        minutes, seconds = divmod(int(duration), 60)
-        return info["url"], info.get("title", "Unknown"), f"{minutes}:{seconds:02d}", info.get("thumbnail")
+    opts = get_ydl_options()
+    opts["socket_timeout"] = 30
+    opts["retries"] = 5
+    opts["fragment_retries"] = 5
+    
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(query, download=False)
+            if "entries" in info:
+                info = info["entries"][0]
+            duration = info.get("duration", 0)
+            minutes, seconds = divmod(int(duration), 60)
+            return info["url"], info.get("title", "Unknown"), f"{minutes}:{seconds:02d}", info.get("thumbnail")
+    except Exception as e:
+        print(f"Fetch track error: {str(e)}")
+        raise
 
 def search_tracks(query: str, limit: int = 5):
     opts = get_ydl_options()
     opts["extract_flat"] = "in_playlist"
     opts["default_search"] = "ytsearch5"
+    opts["socket_timeout"] = 30
+    opts["retries"] = 5
+    opts["fragment_retries"] = 5
     results = []
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(query, download=False)
-        entries = info.get("entries", [info]) if "entries" in info else [info]
-        for entry in entries[:limit]:
-            duration = entry.get("duration")
-            if duration is not None:
-                m, s = divmod(int(duration), 60)
-                duration = f"{m}:{s:02d}"
-            results.append({
-                "id": entry.get("id"),
-                "title": entry.get("title", "Unknown"),
-                "duration": duration,
-            })
+    
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(query, download=False)
+            entries = info.get("entries", [info]) if "entries" in info else [info]
+            for entry in entries[:limit]:
+                if entry.get("id") and entry.get("title"):  # Skip incomplete entries
+                    duration = entry.get("duration")
+                    if duration is not None:
+                        m, s = divmod(int(duration), 60)
+                        duration = f"{m}:{s:02d}"
+                    results.append({
+                        "id": entry.get("id"),
+                        "title": entry.get("title", "Unknown"),
+                        "duration": duration,
+                    })
+    except Exception as e:
+        print(f"Search error: {str(e)}")
+    
     return results
 
 async def send_search_results(results, guild, channel, loop, loop_getter, requester,
@@ -117,7 +135,7 @@ async def send_search_results(results, guild, channel, loop, loop_getter, reques
             line += f" | `{duration}`"
         lines.append(line)
     embed = discord.Embed(title="🔍 ผลการค้นหา", description="\n".join(lines), color=0x1a1a2e)
-    embed.set_footer(text=f"กำลังรอ {requester.display_name} เลือกเพลง • หมดเวลาใน 2 นาที")
+    embed.set_footer(text=f"กำลังรอ {requester.display_name} เลือกเพลง • หมดเวลาใน 30 วินาที")
     search_view = SearchResultView(results, guild, channel, loop, loop_getter,
                                    requester=requester, done_msg_ref=done_msg_ref)
     pub_msg = await channel.send(
@@ -175,9 +193,15 @@ def _trunc(text: str, n: int = MAX_TITLE_LOG) -> str:
 
 def log(action: str, interaction: discord.Interaction, extra: str = ""):
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {action:<12} | {_trunc(interaction.guild.name,20)} ({interaction.guild.id}) | "
-          f"#{_trunc(interaction.channel.name,16)} | {_trunc(interaction.user.display_name,20)} ({interaction.user.id})"
-          + (f" | {extra}" if extra else ""))
+    line = (
+        f"[{ts}]{action}|"
+        f"{_trunc(interaction.guild.name,20)}({interaction.guild.id})|"
+        f"#{_trunc(interaction.channel.name,16)}|"
+        f"{_trunc(interaction.user.display_name,20)}({interaction.user.id})"
+    )
+    if extra:
+        line += f"|{extra}"
+    print(line)
 
 async def check_in_voice(interaction: discord.Interaction) -> bool:
     vc = interaction.guild.voice_client
@@ -283,7 +307,8 @@ class QueueDoneView(discord.ui.View):
 
 class VolumeModal(discord.ui.Modal, title="🔊 ปรับระดับเสียง"):
     vol_input = discord.ui.TextInput(
-        label="ระดับเสียง (0-100)", placeholder="ค่าเริ่มต้น: 10",
+        label="ระดับเสียง (0-100)",
+        placeholder="ค่าเริ่มต้น: 10",
         min_length=1, max_length=3)
 
     def __init__(self, vc, player_view):
@@ -311,7 +336,8 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
     query = discord.ui.TextInput(
         label="ค้นหาเพลง หรือวาง URL YouTube",
         placeholder="ระบุชื่อเพลง หรือวาง URL YouTube ที่นี่",
-        min_length=1, max_length=100)
+        min_length=1, 
+        max_length=100)
 
     def __init__(self, guild, channel, loop, loop_getter, done_msg_ref: list = None):
         super().__init__()
@@ -393,7 +419,7 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
 class SearchResultView(discord.ui.View):
     def __init__(self, results, guild, channel, loop, loop_getter,
                  requester=None, done_msg_ref=None):
-        super().__init__(timeout=120)
+        super().__init__(timeout=30)
         self.results = results
         self.guild = guild
         self.channel = channel
@@ -470,7 +496,9 @@ class SearchResultView(discord.ui.View):
             vc = await interaction.user.voice.channel.connect()
 
         await self._clear_done()
-        for r in self.results:
+        for i, r in enumerate(self.results):
+            if i in self._selected:
+                continue  # ข้ามเพลงที่เลือกแล้ว
             try:
                 url, title, duration, thumbnail = await asyncio.to_thread(fetch_track_from_result, r)
                 track = (url, title, duration, interaction.user, thumbnail)
