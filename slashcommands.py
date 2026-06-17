@@ -9,6 +9,10 @@ import yt_dlp
 import asyncio
 import datetime
 import logging
+import os
+import re
+import json
+import requests
 
 logging.getLogger("discord.player").setLevel(logging.ERROR)
 logging.getLogger("discord.voice_state").setLevel(logging.WARNING)
@@ -69,17 +73,266 @@ def _queue_pos_str(guild_id: int, idx: int) -> str:
     q = get_full_queue(guild_id)
     return f"กำลังเล่น #{idx + 1} จาก {len(q)} เพลง"
 
-def get_ydl_options():
-    return {
+def get_ydl_options(include_playlist: bool = False) -> dict:
+    opts = {
         "format": "bestaudio/best",
-        "noplaylist": True,
         "quiet": True,
         "default_search": "ytsearch",
         "source_address": "0.0.0.0",
     }
+    # ถ้า include_playlist เป็น True จะดึง playlist ทั้งหมด
+    opts["noplaylist"] = not include_playlist
+    return opts
+
+# ─────────────────────────────────────────────
+#  Spotify — ดึงข้อมูลจากหน้า embed สาธารณะ ไม่ใช้ Web API
+#  (ไม่ต้องมี Client ID/Secret และไม่ต้องมี Spotify Premium)
+# ─────────────────────────────────────────────
+
+_SPOTIFY_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+}
+
+def extract_spotify_id(url: str, kind: str) -> str:
+    """ดึง ID จาก Spotify URL เช่น .../track/<id> หรือ .../playlist/<id>?si=..."""
+    match = re.search(rf"spotify\.com/{kind}/([a-zA-Z0-9]+)", url)
+    return match.group(1) if match else None
+
+def extract_spotify_track_id(url: str) -> str:
+    return extract_spotify_id(url, "track")
+
+def extract_spotify_playlist_id(url: str) -> str:
+    """รองรับทั้ง playlist และ album"""
+    return extract_spotify_id(url, "playlist") or extract_spotify_id(url, "album")
+
+def _fetch_spotify_entity(spotify_id: str, kind: str) -> dict:
+    """ดึงข้อมูล track/playlist/album จากหน้า embed ของ Spotify (เพจสาธารณะ ไม่ต้อง login/credentials)"""
+    url = f"https://open.spotify.com/embed/{kind}/{spotify_id}"
+    try:
+        resp = requests.get(url, headers=_SPOTIFY_HEADERS, timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"Spotify embed fetch error: {str(e)}")
+        return None
+
+    match = re.search(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', resp.text, re.DOTALL)
+    if not match:
+        return None
+
+    try:
+        data = json.loads(match.group(1))
+        return data["props"]["pageProps"]["state"]["data"]["entity"]
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return None
+
+def get_spotify_track_info(track_id: str) -> dict:
+    """ดึงข้อมูล track เดี่ยวจากหน้า Spotify (ไม่ใช้ API)
+    ใช้ <title> tag เป็นหลัก เพราะ Spotify render รูปแบบนี้เสมอ:
+    "<ชื่อเพลง> - song and lyrics by <ศิลปิน> | Spotify"
+    """
+    url = f"https://open.spotify.com/track/{track_id}"
+    try:
+        resp = requests.get(url, headers=_SPOTIFY_HEADERS, timeout=15)
+        resp.raise_for_status()
+        html = resp.text
+    except Exception as e:
+        print(f"Spotify track fetch error: {str(e)}")
+        html = None
+
+    if html:
+        match = re.search(r"<title>(.*?)\s*-\s*song(?:s)? and lyrics by\s*(.*?)\s*\|\s*Spotify</title>",
+                          html, re.IGNORECASE)
+        if match:
+            title = _html_unescape(match.group(1))
+            artist = _html_unescape(match.group(2))
+            if title and artist:
+                return {"title": title, "artist": artist, "duration": 0}
+
+    # Fallback: ลองดึงจาก __NEXT_DATA__ JSON
+    entity = _fetch_spotify_entity(track_id, "track")
+    if not entity:
+        return None
+
+    title = entity.get("name") or entity.get("title")
+    if not title:
+        return None
+
+    artists = entity.get("artists") or []
+    artist = ", ".join(a.get("name", "") for a in artists) if artists else entity.get("subtitle", "")
+
+    return {
+        "title": title,
+        "artist": artist,
+        "duration": (entity.get("duration") or 0) // 1000,
+    }
+
+def _html_unescape(text: str) -> str:
+    import html as _html
+    return _html.unescape(text).strip()
+
+def _scrape_spotify_playlist_html(playlist_id: str, kind: str, max_tracks: int = 20) -> list:
+    """Fallback: ดึง track+artist จากหน้า playlist/album ปกติด้วย regex
+    เผื่อโครงสร้าง __NEXT_DATA__ เปลี่ยนไป
+    """
+    url = f"https://open.spotify.com/{kind}/{playlist_id}"
+    try:
+        resp = requests.get(url, headers=_SPOTIFY_HEADERS, timeout=15)
+        resp.raise_for_status()
+        html = resp.text
+    except Exception as e:
+        print(f"Spotify {kind} HTML fetch error: {str(e)}")
+        return None
+
+    track_pattern = re.compile(r'<a[^>]+href="/track/([a-zA-Z0-9]+)"[^>]*>([^<]+)</a>')
+    artist_pattern = re.compile(r'<a[^>]+href="/artist/[a-zA-Z0-9]+"[^>]*>([^<]+)</a>')
+
+    matches = list(track_pattern.finditer(html))
+    if not matches:
+        return None
+
+    tracks = []
+    for i, m in enumerate(matches[:max_tracks]):
+        title = _html_unescape(m.group(2))
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(html)
+        segment = html[start:end]
+        artists = [_html_unescape(a) for a in artist_pattern.findall(segment)]
+        tracks.append({"title": title, "artist": ", ".join(artists)})
+
+    return tracks
+
+def get_spotify_playlist_tracks(playlist_id: str, max_tracks: int = 20) -> list:
+    """ดึง tracks จาก Spotify playlist/album ผ่านหน้าเว็บสาธารณะ (ไม่ใช้ API)
+    Returns: list of dicts with keys: title, artist
+    """
+    for kind in ("playlist", "album"):
+        entity = _fetch_spotify_entity(playlist_id, kind)
+        if entity:
+            track_list = entity.get("trackList") or []
+            if track_list:
+                tracks = []
+                for item in track_list[:max_tracks]:
+                    tracks.append({
+                        "title": item.get("title", "Unknown"),
+                        "artist": item.get("subtitle", ""),
+                    })
+                return tracks
+
+    # Fallback: parse จากหน้าเว็บปกติด้วย regex
+    for kind in ("playlist", "album"):
+        tracks = _scrape_spotify_playlist_html(playlist_id, kind, max_tracks)
+        if tracks:
+            return tracks
+
+    return None
+
+def is_playlist_url(query: str) -> bool:
+    """ตรวจสอบว่า URL เป็น playlist หรือไม่"""
+    query_lower = query.lower()
+    # YouTube Playlist
+    if "youtube.com" in query_lower or "youtu.be" in query_lower:
+        return "list=" in query or "playlist" in query_lower
+    # Spotify Playlist/Album
+    if "spotify.com" in query_lower:
+        return "playlist" in query_lower or "album" in query_lower
+    return False
+
+def fetch_playlist_tracks(query: str, max_tracks: int = 20) -> list:
+    """ดึง tracks จาก playlist (YouTube/Spotify) - สูงสุด 20 เพลงต่อ playlist
+    Returns: list of dicts with keys: id, title, duration, url (ถ้าเป็น YouTube)
+             หรือ title, artist (ถ้าเป็น Spotify)
+    """
+    # ตรวจสอบ Spotify Playlist/Album URL — ดึงรายชื่อเพลงจากหน้า embed (ไม่ใช้ API)
+    if "spotify.com/playlist/" in query or "spotify.com/album/" in query:
+        playlist_id = extract_spotify_playlist_id(query)
+        if not playlist_id:
+            raise ValueError("SPOTIFY_SCRAPE_ERROR")
+
+        tracks = get_spotify_playlist_tracks(playlist_id, max_tracks)
+        if not tracks:
+            raise ValueError("SPOTIFY_SCRAPE_ERROR")
+
+        return tracks
+    
+    # Spotify URL รูปแบบอื่นที่ไม่รองรับ
+    if "spotify.com" in query.lower():
+        raise ValueError("SPOTIFY_DRM_ERROR")
+    
+    opts = get_ydl_options(include_playlist=True)
+    opts["socket_timeout"] = 30
+    opts["retries"] = 5
+    opts["fragment_retries"] = 5
+    opts["playlistend"] = max_tracks
+    opts["extract_flat"] = "in_playlist"
+    
+    tracks = []
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(query, download=False)
+            entries = info.get("entries", [])
+            
+            for entry in entries[:max_tracks]:
+                if not entry or not entry.get("id"):
+                    continue
+                
+                track_info = {
+                    "id": entry.get("id"),
+                    "title": entry.get("title", "Unknown"),
+                    "duration": entry.get("duration"),
+                }
+                
+                # ถ้าเป็น YouTube URL ให้เพิ่ม URL ด้วย
+                if "youtube" in query.lower():
+                    track_info["url"] = f"https://www.youtube.com/watch?v={entry.get('id')}"
+                
+                tracks.append(track_info)
+    except Exception as e:
+        print(f"Fetch playlist error: {str(e)}")
+        raise
+    
+    return tracks
 
 def fetch_track(query: str):
-    opts = get_ydl_options()
+    """ดึงข้อมูล single track
+    รองรับ: YouTube URLs, Spotify Track URLs, Search queries
+    """
+    # ตรวจสอบ Spotify Track URL
+    if "spotify.com/track/" in query:
+        track_id = extract_spotify_track_id(query)
+        if track_id:
+            track_info = get_spotify_track_info(track_id)
+            if track_info:
+                # ค้นหา track จาก YouTube ด้วย title + artist
+                search_query = f"{track_info['title']} {track_info['artist']}"
+                print(f"🎵 Spotify → YouTube: {search_query}")
+                
+                opts = get_ydl_options(include_playlist=False)
+                opts["socket_timeout"] = 30
+                opts["retries"] = 5
+                opts["fragment_retries"] = 5
+                
+                try:
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        info = ydl.extract_info(search_query, download=False)
+                        if "entries" in info:
+                            info = info["entries"][0]
+                        duration = info.get("duration", 0)
+                        minutes, seconds = divmod(int(duration), 60)
+                        return info["url"], info.get("title", "Unknown"), f"{minutes}:{seconds:02d}", info.get("thumbnail")
+                except Exception as e:
+                    print(f"YouTube search error: {str(e)}")
+                    raise ValueError("SPOTIFY_NO_YOUTUBE_MATCH")
+            else:
+                raise ValueError("SPOTIFY_SCRAPE_ERROR")
+    
+    # ตรวจสอบว่าเป็น playlist หรือไม่ (YouTube)
+    if is_playlist_url(query):
+        raise ValueError("PLAYLIST_DETECTED")
+    
+    opts = get_ydl_options(include_playlist=False)
     opts["socket_timeout"] = 30
     opts["retries"] = 5
     opts["fragment_retries"] = 5
@@ -92,12 +345,17 @@ def fetch_track(query: str):
             duration = info.get("duration", 0)
             minutes, seconds = divmod(int(duration), 60)
             return info["url"], info.get("title", "Unknown"), f"{minutes}:{seconds:02d}", info.get("thumbnail")
+    except ValueError as e:
+        if str(e) in ("PLAYLIST_DETECTED", "SPOTIFY_SCRAPE_ERROR", "SPOTIFY_NO_YOUTUBE_MATCH"):
+            raise
+        print(f"Fetch track error: {str(e)}")
+        raise
     except Exception as e:
         print(f"Fetch track error: {str(e)}")
         raise
 
 def search_tracks(query: str, limit: int = 5):
-    opts = get_ydl_options()
+    opts = get_ydl_options(include_playlist=False)
     opts["extract_flat"] = "in_playlist"
     opts["default_search"] = "ytsearch5"
     opts["socket_timeout"] = 30
@@ -386,14 +644,107 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                     return
                 vc = await interaction.user.voice.channel.connect()
 
-            if query_str.startswith("http://") or query_str.startswith("https://"):
-                url, title, duration, thumbnail = await asyncio.to_thread(fetch_track, query_str)
+            # ตรวจสอบว่าเป็น URL หรือไม่
+            is_url = query_str.startswith("http://") or query_str.startswith("https://")
+
+            # ตรวจสอบว่าเป็น playlist หรือไม่
+            if is_url and is_playlist_url(query_str):
+                # Handle playlist
+                try:
+                    playlist_tracks = await asyncio.to_thread(fetch_playlist_tracks, query_str)
+                    if not playlist_tracks:
+                        await _ack_done()
+                        await _send_error("❌ ไม่พบเพลงในเพลย์ลิสต์")
+                        return
+                    
+                    await _ack_done()
+                    await self._delete_done_msg()
+                    
+                    # เพิ่มเพลงทั้งหมดจาก playlist
+                    added_count = 0
+                    for track_info in playlist_tracks:
+                        try:
+                            # สำหรับ YouTube playlist (มี url key)
+                            if "url" in track_info:
+                                url, title, duration, thumbnail = await asyncio.to_thread(
+                                    fetch_track, track_info["url"])
+                            # สำหรับ Spotify playlist (มี title + artist)
+                            elif "artist" in track_info:
+                                search_query = f"{track_info['title']} {track_info['artist']}"
+                                print(f"🎵 Spotify Playlist → YouTube: {search_query}")
+                                
+                                opts = get_ydl_options(include_playlist=False)
+                                opts["socket_timeout"] = 30
+                                opts["retries"] = 5
+                                opts["fragment_retries"] = 5
+                                
+                                with yt_dlp.YoutubeDL(opts) as ydl:
+                                    info = ydl.extract_info(search_query, download=False)
+                                    if "entries" in info:
+                                        info = info["entries"][0]
+                                    duration = info.get("duration", 0)
+                                    minutes, seconds = divmod(int(duration), 60)
+                                    url = info["url"]
+                                    title = info.get("title", "Unknown")
+                                    duration = f"{minutes}:{seconds:02d}"
+                                    thumbnail = info.get("thumbnail")
+                            else:
+                                continue
+                            
+                            track = (url, title, duration, interaction.user, thumbnail)
+                            await _add_and_play(vc, self.guild, self.channel, self.loop_getter, track)
+                            added_count += 1
+                        except Exception as e:
+                            print(f"Error adding track from playlist: {str(e)}")
+                            continue
+                    
+                    if added_count > 0:
+                        try:
+                            await interaction.followup.send(
+                                embed=discord.Embed(
+                                    description=f"✅ เพิ่มเพลง {added_count} อันจากเพลย์ลิสต์",
+                                    color=discord.Color.green()),
+                                ephemeral=True, wait=True)
+                        except Exception: pass
+                    return
+                    
+                except ValueError as e:
+                    error_msg = str(e)
+                    await _ack_done()
+                    
+                    if error_msg == "SPOTIFY_DRM_ERROR":
+                        await _send_error("❌ Spotify ไม่สามารถเล่นได้ (DRM)\n💡 ค้นหาด้วยชื่อเพลงแทน")
+                    elif error_msg == "SPOTIFY_SCRAPE_ERROR":
+                        await _send_error("❌ ไม่สามารถดึงข้อมูลจาก Spotify ได้\n💡 ลองอีกครั้ง หรือค้นหาด้วยชื่อเพลงแทน")
+                    else:
+                        await _send_error("❌ ไม่สามารถโหลดเพลย์ลิสต์")
+                    return
+
+            # Handle single track URL
+            if is_url:
+                try:
+                    url, title, duration, thumbnail = await asyncio.to_thread(fetch_track, query_str)
+                except ValueError as e:
+                    error_msg = str(e)
+                    await _ack_done()
+                    
+                    if error_msg == "PLAYLIST_DETECTED":
+                        await _send_error("❌ นี่คือเพลย์ลิสต์ ใช้เพื่อเพิ่มเพลงทั้งหมด")
+                    elif error_msg == "SPOTIFY_SCRAPE_ERROR":
+                        await _send_error("❌ ไม่สามารถดึงข้อมูลจาก Spotify ได้\n💡 ลองอีกครั้ง หรือค้นหาด้วยชื่อเพลงแทน")
+                    elif error_msg == "SPOTIFY_NO_YOUTUBE_MATCH":
+                        await _send_error("❌ ไม่พบบน YouTube\n💡 ลองค้นหาด้วยชื่อเพลง")
+                    else:
+                        await _send_error("❌ เกิดข้อผิดพลาด")
+                    return
+                
                 await self._delete_done_msg()
                 track = (url, title, duration, interaction.user, thumbnail)
                 await _add_and_play(vc, self.guild, self.channel, self.loop_getter, track)
                 await _ack_done()
                 return
 
+            # Search mode (not a URL)
             results = await asyncio.to_thread(search_tracks, query_str)
             if not results:
                 await _ack_done()
@@ -936,8 +1287,8 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
 
 def register(tree: app_commands.CommandTree, loop_getter):
 
-    @tree.command(name="play", description="เล่นเพลงจาก YouTube")
-    @app_commands.describe(query="ระบุชื่อเพลง หรือวาง URL YouTube ที่นี่")
+    @tree.command(name="play", description="เล่นเพลง YouTube/Spotify หรือ Playlist")
+    @app_commands.describe(query="ชื่อเพลง URL YouTube/Spotify/Playlist Link")
     async def slash_play(interaction: discord.Interaction, query: str):
         if not interaction.user.voice:
             return await safe_respond(interaction, embed=discord.Embed(
@@ -970,21 +1321,122 @@ def register(tree: app_commands.CommandTree, loop_getter):
                 await vc.move_to(voice_channel)
 
             is_url = query.strip().startswith("http://") or query.strip().startswith("https://")
-
-            if is_url:
-                url, title, duration, thumbnail = await asyncio.to_thread(fetch_track, query)
-                track = (url, title, duration, interaction.user, thumbnail)
-                await _del_search()
-                await _add_and_play(vc, interaction.guild, interaction.channel, loop_getter, track)
-            else:
-                results = await asyncio.to_thread(search_tracks, query)
-                if not results:
+            
+            # ตรวจสอบว่าเป็น playlist หรือไม่
+            if is_url and is_playlist_url(query):
+                # Handle Playlist
+                try:
+                    playlist_tracks = await asyncio.to_thread(fetch_playlist_tracks, query)
+                    if not playlist_tracks:
+                        await _del_search()
+                        return await interaction.followup.send(embed=discord.Embed(
+                            description="❌ ไม่พบเพลงในเพลย์ลิสต์", color=discord.Color.red()), ephemeral=True)
+                    
+                    added_count = 0
+                    for track_info in playlist_tracks:
+                        try:
+                            # สำหรับ YouTube playlist (มี url key)
+                            if "url" in track_info:
+                                url, title, duration, thumbnail = await asyncio.to_thread(
+                                    fetch_track, track_info["url"])
+                            # สำหรับ Spotify playlist (มี title + artist)
+                            elif "artist" in track_info:
+                                search_query = f"{track_info['title']} {track_info['artist']}"
+                                print(f"🎵 Spotify Playlist → YouTube: {search_query}")
+                                
+                                opts = get_ydl_options(include_playlist=False)
+                                opts["socket_timeout"] = 30
+                                opts["retries"] = 5
+                                opts["fragment_retries"] = 5
+                                
+                                with yt_dlp.YoutubeDL(opts) as ydl:
+                                    info = ydl.extract_info(search_query, download=False)
+                                    if "entries" in info:
+                                        info = info["entries"][0]
+                                    duration = info.get("duration", 0)
+                                    minutes, seconds = divmod(int(duration), 60)
+                                    url = info["url"]
+                                    title = info.get("title", "Unknown")
+                                    duration = f"{minutes}:{seconds:02d}"
+                                    thumbnail = info.get("thumbnail")
+                            else:
+                                continue
+                            
+                            track = (url, title, duration, interaction.user, thumbnail)
+                            await _add_and_play(vc, interaction.guild, interaction.channel, loop_getter, track)
+                            added_count += 1
+                        except Exception as e:
+                            print(f"Error adding track: {str(e)}")
+                            continue
+                    
+                    await _del_search()
+                    if added_count > 0:
+                        try:
+                            await interaction.followup.send(embed=discord.Embed(
+                                description=f"✅ เพิ่มเพลง {added_count} อันจากเพลย์ลิสต์",
+                                color=discord.Color.green()), ephemeral=True)
+                        except Exception: pass
+                    return
+                    
+                except ValueError as e:
+                    error_msg = str(e)
+                    await _del_search()
+                    
+                    if error_msg == "SPOTIFY_DRM_ERROR":
+                        return await interaction.followup.send(embed=discord.Embed(
+                            description="❌ Spotify Playlist ไม่สามารถเล่นได้ (DRM Protection)\n\n💡 วิธีแก้: ค้นหาเพลงด้วยชื่อแทน เช่น `/play รักเธอขอบคุณทุกช่วงเวลา`",
+                            color=discord.Color.red()), ephemeral=True)
+                    elif error_msg == "SPOTIFY_SCRAPE_ERROR":
+                        return await interaction.followup.send(embed=discord.Embed(
+                            description="❌ ไม่สามารถดึงข้อมูลจาก Spotify ได้\n\n💡 ลองอีกครั้ง หรือค้นหาเพลงด้วยชื่อแทน",
+                            color=discord.Color.red()), ephemeral=True)
+                    else:
+                        return await interaction.followup.send(embed=discord.Embed(
+                            description="❌ ไม่สามารถโหลดเพลย์ลิสต์", color=discord.Color.red()), ephemeral=True)
+                    
+                except Exception as e:
+                    print(f"Playlist error: {str(e)}")
                     await _del_search()
                     return await interaction.followup.send(embed=discord.Embed(
-                        description="❌ ไม่พบเพลง", color=discord.Color.red()), ephemeral=True)
+                        description="❌ ไม่สามารถโหลดเพลย์ลิสต์", color=discord.Color.red()), ephemeral=True)
+
+            # Handle Single Track URL or Spotify Track
+            if is_url:
+                try:
+                    url, title, duration, thumbnail = await asyncio.to_thread(fetch_track, query)
+                except ValueError as e:
+                    error_msg = str(e)
+                    await _del_search()
+                    
+                    if error_msg == "PLAYLIST_DETECTED":
+                        return await interaction.followup.send(embed=discord.Embed(
+                            description="❌ นี่คือเพลย์ลิสต์ โปรแกรมจะเพิ่มเพลงทั้งหมดสำหรับคุณ",
+                            color=discord.Color.red()), ephemeral=True)
+                    elif error_msg == "SPOTIFY_SCRAPE_ERROR":
+                        return await interaction.followup.send(embed=discord.Embed(
+                            description="❌ ไม่สามารถดึงข้อมูลจาก Spotify ได้\n\n💡 ลองอีกครั้ง หรือค้นหาด้วยชื่อเพลงแทน",
+                            color=discord.Color.red()), ephemeral=True)
+                    elif error_msg == "SPOTIFY_NO_YOUTUBE_MATCH":
+                        return await interaction.followup.send(embed=discord.Embed(
+                            description="❌ ไม่พบเพลง Spotify บน YouTube\n\n💡 ลองค้นหาด้วยชื่อเพลงแทน",
+                            color=discord.Color.red()), ephemeral=True)
+                    else:
+                        raise
+                
+                track = (url, title, duration, interaction.user, thumbnail)
+                await _add_and_play(vc, interaction.guild, interaction.channel, loop_getter, track)
                 await _del_search()
-                await send_search_results(results, interaction.guild, interaction.channel,
-                                          loop_getter(), loop_getter, interaction.user)
+                return
+            
+            # Search Mode
+            results = await asyncio.to_thread(search_tracks, query)
+            if not results:
+                await _del_search()
+                return await interaction.followup.send(embed=discord.Embed(
+                    description="❌ ไม่พบเพลง", color=discord.Color.red()), ephemeral=True)
+            await _del_search()
+            await send_search_results(results, interaction.guild, interaction.channel,
+                                      loop_getter(), loop_getter, interaction.user)
 
         except Exception as e:
             err = str(e)
