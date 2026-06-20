@@ -38,6 +38,11 @@ queue_add_msgs: dict[int, dict[int, object]] = {}
 queue_view_msgs: dict[int, object] = {}
 search_result_msgs: dict[int, list] = {}
 
+# guild_volumes = ระดับเสียงที่ผู้ใช้ตั้งไว้ต่อ server (guild)
+# จำไว้ตราบใดที่บอทยังอยู่ใน Voice Channel (ไม่ว่าเพลงจะเปลี่ยนกี่รอบ)
+# จะถูกล้างกลับเป็นค่า default ทุกครั้งที่บอท disconnect ออกจาก VC (ดู clear_guild)
+guild_volumes: dict[int, float] = {}
+
 # guild_stopped  = หยุดจงใจ (⏹ stop / /stop) → play_next ต้องหยุด
 # guild_changing = กำลัง skip/prev → play_next callback เก่าต้องข้ามไป
 guild_stopped:  set[int] = set()
@@ -57,6 +62,12 @@ def get_now_idx(guild_id: int) -> int:
 def set_now_idx(guild_id: int, idx: int):
     now_playing_idx[guild_id] = idx
 
+def get_guild_volume(guild_id: int) -> float:
+    return guild_volumes.get(guild_id, DEFAULT_VOLUME)
+
+def set_guild_volume(guild_id: int, vol: float):
+    guild_volumes[guild_id] = vol
+
 def get_seq_offset(guild_id: int) -> int:
     return queue_seq_offset.get(guild_id, 0)
 
@@ -64,27 +75,49 @@ def display_no(guild_id: int, idx: int) -> int:
     """แปลง list-index เป็นเลขลำดับสะสมที่จะแสดงให้ผู้ใช้เห็น (ไม่รีเซ็ตเมื่อตัดเพลงเก่า)"""
     return idx + 1 + get_seq_offset(guild_id)
 
+def _trim_queue(guild_id: int):
+    """ตัดเพลงเก่าออกจากบนสุดของคิว ถ้าคิวยาวเกิน MAX_QUEUE
+    ตัดได้มากสุดเท่าที่ไม่กระทบเพลงที่กำลังเล่นอยู่ (now_idx) — ถ้าตัดได้ไม่ครบ
+    ที่เหลือจะถูกตัดในรอบหลัง (ตอนเพลงเปลี่ยน/now_idx ขยับสูงขึ้น) แทน
+    เลขลำดับที่แสดงผล (display_no) ยังนับสะสมต่อเนื่องเสมอ ไม่รีเซ็ต
+    """
+    q = get_full_queue(guild_id)
+    if len(q) <= MAX_QUEUE:
+        return
+    now_idx = get_now_idx(guild_id)
+    excess = len(q) - MAX_QUEUE
+    trim_count = min(excess, now_idx)  # กันไม่ให้ตัดเพลงที่กำลังเล่นทิ้ง
+    if trim_count > 0:
+        del q[:trim_count]
+        set_now_idx(guild_id, now_idx - trim_count)
+        queue_seq_offset[guild_id] = get_seq_offset(guild_id) + trim_count
+
+        # ปรับ key ของ queue_add_msgs (ข้อความ "เพิ่มใน Queue #") ให้ตรงกับตำแหน่งใหม่
+        # ไม่งั้นข้อความจะไม่ถูกลบตอนเพลงนั้นเริ่มเล่นจริง เพราะ key เดิมอ้างถึง index ที่ไม่มีอยู่แล้ว
+        old_msgs = queue_add_msgs.get(guild_id, {})
+        if old_msgs:
+            shifted = {}
+            for old_key, msg in old_msgs.items():
+                new_key = old_key - trim_count
+                if new_key >= 0:
+                    shifted[new_key] = msg
+                else:
+                    # เพลงที่ key อ้างถึงถูกตัดออกไปแล้ว (ไม่ควรเกิดขึ้นได้จริง เพราะ
+                    # ตัดได้แค่ไม่เกิน now_idx เท่านั้น แต่กันไว้เผื่อไว้)
+                    pass
+            queue_add_msgs[guild_id] = shifted
+
 def add_to_queue(guild_id: int, track) -> int:
     q = get_full_queue(guild_id)
     q.append(track)
-
-    # ปล่อยให้ล้นได้ก่อน พอเกิน MAX_QUEUE ค่อยตัดรวดเดียวให้เหลือ MAX_QUEUE
-    # ตัดจากเพลงบนสุด (เก่าสุด) ออก แต่ห้ามตัดเลยตำแหน่งเพลงที่กำลังเล่นอยู่
-    if len(q) > MAX_QUEUE:
-        now_idx = get_now_idx(guild_id)
-        excess = len(q) - MAX_QUEUE
-        trim_count = min(excess, now_idx)  # กันไม่ให้ตัดเพลงที่กำลังเล่นทิ้ง
-        if trim_count > 0:
-            del q[:trim_count]
-            set_now_idx(guild_id, now_idx - trim_count)
-            queue_seq_offset[guild_id] = get_seq_offset(guild_id) + trim_count
-
+    _trim_queue(guild_id)
     return len(q) - 1
 
 def clear_guild(guild_id: int):
     full_queues[guild_id] = []
     now_playing_idx[guild_id] = 0
     queue_seq_offset[guild_id] = 0
+    guild_volumes.pop(guild_id, None)  # ออกจาก VC แล้ว → รีเซ็ตระดับเสียงกลับ default
     active_views.pop(guild_id, None)
     queue_view_msgs.pop(guild_id, None)
     search_result_msgs.pop(guild_id, None)
@@ -652,9 +685,11 @@ class VolumeModal(discord.ui.Modal, title="🔊 ปรับระดับเ�
             if not 0 <= vol <= 100: raise ValueError
         except ValueError:
             return await interaction.response.send_message("❌ กรอกตัวเลข 0-100", ephemeral=True)
-        self.player_view.volume_level = vol / 100
+        vol_level = vol / 100
+        self.player_view.volume_level = vol_level
+        set_guild_volume(self.player_view.guild.id, vol_level)
         if self.vc.source:
-            self.vc.source.volume = vol / 100
+            self.vc.source.volume = vol_level
         await interaction.response.send_message(f"🔊 ระดับเสียง: **{vol}%**", ephemeral=True)
 
 
@@ -766,7 +801,7 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                             
                             track = (url, title, duration, interaction.user, thumbnail)
                             added_idx, added_title = await _add_and_play(vc, self.guild, self.channel, self.loop_getter, track, notify=False)
-                            added_titles.append((display_no(self.guild.id, added_idx), added_title))
+                            added_titles.append((display_no(self.guild.id, added_idx), added_title, added_idx))
                             added_count += 1
                         except Exception as e:
                             print(f"Error adding track from playlist: {str(e)}")
@@ -1035,15 +1070,17 @@ async def _add_and_play(vc, guild, channel, loop_getter, track, notify: bool = T
                 except Exception: pass
         else:
             set_now_idx(guild.id, track_idx)
+            _trim_queue(guild.id)
+            track_idx = get_now_idx(guild.id)
             source = discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=DEFAULT_VOLUME)
+                discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
             loop = loop_getter()
             view = PlayerView(guild, channel, loop, current_track=track, current_idx=track_idx)
             active_views[guild.id] = view
             _g, _ch, _lp, _t, _ti = guild, channel, loop, track, track_idx
             vc.play(source, after=lambda e, g=_g, ch=_ch, lp=_lp, t=_t, ti=_ti:
                     asyncio.run_coroutine_threadsafe(
-                        play_next(g, ch, lp, current_idx=ti), lp))
+                        play_next(g, ch, lp, current_track=t, current_idx=ti, error=e), lp))
             embed = make_now_playing_embed(title, duration, requester, thumbnail,
                                            _queue_pos_str(guild.id, track_idx))
             msg = await channel.send(embed=embed, view=view)
@@ -1052,18 +1089,18 @@ async def _add_and_play(vc, guild, channel, loop_getter, track, notify: bool = T
         return track_idx, title
 
 
-_playlist_summary_seq = 0
-
 async def _send_playlist_added_summary(guild_id: int, channel, requester, titles: list):
     """ส่งสรุปเพลงที่เพิ่มจาก playlist เป็นข้อความเดียว ให้ทุกคนเห็น (ไม่ ephemeral)
-    titles: list of (display_no, title) — display_no คือเลขลำดับสะสมที่จะแสดงผล (คำนวณไว้แล้วตอนเพิ่ม)
-    เก็บ reference ไว้ใน queue_add_msgs (คีย์เป็นเลขลบ ไม่ชนกับ index เพลงจริง)
-    เพื่อให้ถูกลบพร้อมข้อความ "เพิ่มใน Queue #" อื่นๆ ตอน stop/clear เหมือนกัน
+    titles: list of (display_no, title, list_idx) — display_no คือเลขลำดับสะสมที่จะแสดงผล,
+            list_idx คือตำแหน่งจริงในคิว (0-based) ของเพลงนั้น
+    เก็บ reference ไว้ใน queue_add_msgs โดยใช้ list_idx ของ "เพลงสุดท้าย" ในสรุปเป็นคีย์
+    เพื่อให้ข้อความสรุปถูกลบโดยอัตโนมัติพร้อมกับตอนที่เพลงสุดท้ายนั้นเริ่มเล่นจริง
+    (ใช้ระบบลบตาม index เดียวกับข้อความ "เพิ่มใน Queue #" ของเพลงเดี่ยว — ปลอดภัยเพราะ
+    เพลงจาก playlist ถูกเพิ่มด้วย notify=False จึงไม่มี key ชนกัน)
     """
-    global _playlist_summary_seq
     if not titles:
         return
-    lines = [f"`#{no}` {_trunc(t, 58)}" for no, t in titles]
+    lines = [f"`#{no}` {_trunc(t, 58)}" for no, t, _ in titles]
     embed = discord.Embed(
         description="\n".join(lines) + f"\n\nขอโดย: {requester.mention}",
         color=0x1a1a2e,
@@ -1071,8 +1108,8 @@ async def _send_playlist_added_summary(guild_id: int, channel, requester, titles
     embed.set_author(name=f"📋  เพิ่มเข้า Queue แล้ว {len(titles)} เพลง")
     try:
         pub_msg = await channel.send(embed=embed)
-        _playlist_summary_seq -= 1
-        queue_add_msgs.setdefault(guild_id, {})[_playlist_summary_seq] = pub_msg
+        last_idx = titles[-1][2]
+        queue_add_msgs.setdefault(guild_id, {})[last_idx] = pub_msg
     except Exception:
         pass
 
@@ -1087,14 +1124,17 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
     เล่นเพลงที่ idx โดยไม่สร้าง message ใหม่ — edit embed เดิม
     ต้องเรียกหลัง interaction.response.defer() หรือ edit_message แล้ว
     """
+    # อัปเดต now_idx แล้วลอง trim ก่อนดึง track ออกมา กัน index เพี้ยนหลัง trim
+    set_now_idx(view.guild.id, idx)
+    _trim_queue(view.guild.id)
+    idx = get_now_idx(view.guild.id)
+
     q = get_full_queue(view.guild.id)
     track = q[idx]
     url, title, duration, requester, *_thumb = track
     thumbnail = _thumb[0] if _thumb else None
     vc = view.guild.voice_client
 
-    # อัปเดต state ก่อนทุกอย่าง
-    set_now_idx(view.guild.id, idx)
     view.current_track = track
     view.current_idx = idx
     active_views[view.guild.id] = view
@@ -1107,9 +1147,9 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
     vc.stop()
     # ไม่ discard ที่นี่ — play_next จะ discard เอง
 
-    vc.play(source, after=lambda e, _idx=idx:
+    vc.play(source, after=lambda e, _idx=idx, _track=track:
             asyncio.run_coroutine_threadsafe(
-                play_next(view.guild, view.channel, view.loop, current_idx=_idx), view.loop))
+                play_next(view.guild, view.channel, view.loop, current_track=_track, current_idx=_idx, error=e), view.loop))
 
     embed = make_now_playing_embed(title, duration, requester, thumbnail,
                                    _queue_pos_str(view.guild.id, idx))
@@ -1148,7 +1188,7 @@ class PlayerView(discord.ui.View):
         self.current_track = current_track
         self.current_idx = current_idx if current_idx is not None else get_now_idx(guild.id)
         self.now_playing_msg: discord.Message | None = None
-        self.volume_level: float = DEFAULT_VOLUME
+        self.volume_level: float = get_guild_volume(guild.id)
 
     async def delete_now_playing(self):
         if self.now_playing_msg:
@@ -1289,7 +1329,7 @@ class PlayerView(discord.ui.View):
 # ─────────────────────────────────────────────
 
 async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
-                    current_track=None, current_idx: int = None):
+                    current_track=None, current_idx: int = None, error=None):
     # กำลัง skip/prev → callback เก่านี้ต้องข้ามไป
     if guild.id in guild_changing:
         guild_changing.discard(guild.id)
@@ -1300,6 +1340,25 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
         guild_stopped.discard(guild.id)
         return
 
+    # เพลงก่อนหน้าเล่นไม่ได้ (error จริง ไม่ใช่เล่นจบปกติ/ถูก stop ตั้งใจ)
+    # แจ้งในแชทให้ทุกคนเห็น ก่อนข้ามไปเพลงถัดไป
+    if error is not None:
+        failed_title = None
+        if current_track:
+            failed_title = current_track[1]
+        elif current_idx is not None:
+            q_now = get_full_queue(guild.id)
+            if 0 <= current_idx < len(q_now):
+                failed_title = q_now[current_idx][1]
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{ts}] ✗ PLAYBACK_ERROR | {_trunc(failed_title or '?', 60)} | {_trunc(str(error), 120)}")
+        try:
+            await channel.send(embed=discord.Embed(
+                description=f"❌ เล่น **{_trunc(failed_title or 'เพลงนี้', 60)}** ไม่ได้ กำลังข้ามไปเพลงถัดไป",
+                color=discord.Color.red()))
+        except Exception:
+            pass
+
     if current_idx is None:
         current_idx = get_now_idx(guild.id)
 
@@ -1307,12 +1366,16 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
     q = get_full_queue(guild.id)
 
     if next_idx < len(q):
-        track = q[next_idx]
         set_now_idx(guild.id, next_idx)
+        _trim_queue(guild.id)
+        next_idx = get_now_idx(guild.id)
+        q = get_full_queue(guild.id)
+
+        track = q[next_idx]
         url, title, duration, requester, *_thumb = track
         thumbnail = _thumb[0] if _thumb else None
         source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=DEFAULT_VOLUME)
+            discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
         embed = make_now_playing_embed(title, duration, requester, thumbnail,
                                        _queue_pos_str(guild.id, next_idx))
 
@@ -1334,9 +1397,9 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             msg = await channel.send(embed=embed, view=view)
             view.now_playing_msg = msg
 
-        guild.voice_client.play(source, after=lambda e, _idx=next_idx:
+        guild.voice_client.play(source, after=lambda e, _idx=next_idx, _track=track:
             asyncio.run_coroutine_threadsafe(
-                play_next(guild, channel, loop, current_idx=_idx), loop))
+                play_next(guild, channel, loop, current_track=_track, current_idx=_idx, error=e), loop))
 
         # ลบ "เพิ่มใน Queue" ของเพลงนี้
         add_msg = queue_add_msgs.get(guild.id, {}).pop(next_idx, None)
@@ -1475,7 +1538,7 @@ def register(tree: app_commands.CommandTree, loop_getter):
                             
                             track = (url, title, duration, interaction.user, thumbnail)
                             added_idx, added_title = await _add_and_play(vc, interaction.guild, interaction.channel, loop_getter, track, notify=False)
-                            added_titles.append((display_no(interaction.guild.id, added_idx), added_title))
+                            added_titles.append((display_no(interaction.guild.id, added_idx), added_title, added_idx))
                             added_count += 1
                         except Exception as e:
                             print(f"Error adding track: {str(e)}")
