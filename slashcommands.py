@@ -9,7 +9,6 @@ import yt_dlp
 import asyncio
 import datetime
 import logging
-import os
 import re
 import json
 import requests
@@ -52,7 +51,8 @@ guild_volumes: dict[int, float] = {}
 guild_stopped:  set[int] = set()
 guild_changing: set[int] = set()
 
-MAX_QUEUE = 20
+MAX_QUEUE = 20   # เก็บเพลงใน memory สูงสุด 20 อัน (ย้อนกลับได้สูงสุด 20 เพลง)
+MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
 
 
 def get_full_queue(guild_id: int) -> list:
@@ -262,7 +262,7 @@ def _fetch_spotify_track_from_search(search_query: str):
     return url, title, duration, thumbnail
 
 
-def _scrape_spotify_playlist_html(playlist_id: str, kind: str, max_tracks: int = 20) -> list:
+def _scrape_spotify_playlist_html(playlist_id: str, kind: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> list:
     """Fallback: ดึง track+artist จากหน้า playlist/album ปกติด้วย regex
     เผื่อโครงสร้าง __NEXT_DATA__ เปลี่ยนไป
     """
@@ -293,7 +293,7 @@ def _scrape_spotify_playlist_html(playlist_id: str, kind: str, max_tracks: int =
 
     return tracks
 
-def get_spotify_playlist_tracks(playlist_id: str, max_tracks: int = 20) -> list:
+def get_spotify_playlist_tracks(playlist_id: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> list:
     """ดึง tracks จาก Spotify playlist/album ผ่านหน้าเว็บสาธารณะ (ไม่ใช้ API)
     Returns: list of dicts with keys: title, artist
     """
@@ -347,7 +347,7 @@ def is_playlist_url(query: str) -> bool:
         return "playlist" in query_lower or "album" in query_lower or "artist" in query_lower
     return False
 
-def fetch_playlist_tracks(query: str, max_tracks: int = 20) -> list:
+def fetch_playlist_tracks(query: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> list:
     """ดึง tracks จาก playlist (YouTube/Spotify) - สูงสุด 20 เพลงต่อ playlist
     Returns: list of dicts with keys: id, title, duration, url (ถ้าเป็น YouTube)
              หรือ title, artist (ถ้าเป็น Spotify)
@@ -682,18 +682,28 @@ async def cleanup_old_messages(bot=None):
 
 
 async def _cleanup_channel(channel: discord.TextChannel):
-    """ลบข้อความเก่าของบอทใน channel นี้ — เรียกตอนมีการใช้ /play หรือ /stop"""
-    _KEYWORDS = ["เพิ่มใน queue", "กำลังเล่น", "เล่นเพลงครบ", "หยุดเพลง", "⏹"]
+    """ลบข้อความเก่าของบอทใน channel นี้ — เรียกตอนมีการใช้ /play หรือ /stop
+    ลบเฉพาะ: "เพิ่มใน Queue", "เล่นเพลงครบ Queue", "หยุดเพลง"
+    ไม่ลบ: now playing embed (▶ Now Playing) และ queue list
+    """
+    _DELETE_KEYWORDS = ["เพิ่มใน queue", "เล่นเพลงครบ queue", "หยุดเพลงและออกจาก"]
+    _KEEP_KEYWORDS   = ["now playing", "▶", "queue เพลง"]
     try:
         async for msg in channel.history(limit=50):
             if msg.author != channel.guild.me:
                 continue
-            if msg.embeds:
-                desc = str(msg.embeds[0].description or "").lower()
-                author = str(msg.embeds[0].author.name or "").lower() if msg.embeds[0].author else ""
-                if any(x in desc or x in author for x in _KEYWORDS):
-                    try: await msg.delete()
-                    except Exception: pass
+            if not msg.embeds:
+                continue
+            embed = msg.embeds[0]
+            desc   = str(embed.description or "").lower()
+            author = str(embed.author.name or "").lower() if embed.author else ""
+            text   = desc + " " + author
+            # ข้ามถ้าเป็น now playing หรือ queue list
+            if any(k in text for k in _KEEP_KEYWORDS):
+                continue
+            if any(k in text for k in _DELETE_KEYWORDS):
+                try: await msg.delete()
+                except Exception: pass
     except Exception:
         pass
 
@@ -1087,10 +1097,7 @@ def fetch_track_from_result(r: dict):
     url = f"https://www.youtube.com/watch?v={video_id}"
     return fetch_track(url)
 
-# _queue_locks  = lock เบา ครอบแค่ add+play เพื่อป้องกัน race บน vc.play()
-#                 ใช้ร่วมกันระหว่างทุก request (เพลงเดี่ยว + playlist)
-# playlist แต่ละ request สร้าง asyncio.Lock() ใหม่ของตัวเองใน _fetch_and_add_playlist_track
-# ทำให้ playlist ต่างคนไม่ block กัน และเพลงเดี่ยวก็ไม่ถูก block รอนาน
+# _queue_locks = lock เบา ครอบแค่ add+play เพื่อป้องกัน race บน vc.play()
 _queue_locks: dict[int, asyncio.Lock] = {}
 
 def get_queue_lock(guild_id: int) -> asyncio.Lock:
@@ -1099,17 +1106,14 @@ def get_queue_lock(guild_id: int) -> asyncio.Lock:
     return _queue_locks[guild_id]
 
 
-async def _fetch_and_add_playlist_track(vc, guild, channel, loop_getter, track_info, requester,
-                                        playlist_lock: asyncio.Lock = None):
-    """ไม่ได้ใช้อีกแล้ว — เหลือไว้เพื่อ backward compat เท่านั้น"""
-    pass
 
 
 async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_tracks, requester):
     """เพิ่ม playlist ทั้งหมดเข้า queue แบบ atomic:
     1. prefetch ทุกเพลงพร้อมกัน (concurrent) — เร็ว
     2. เรียงผลตามลำดับ playlist จริง
-    3. add ทั้งหมดเข้า queue ด้วย queue_lock ครั้งเดียว — รับประกันลำดับ ไม่มีใครแทรกกลาง
+    3. เช็ค guild_stopped — ถ้า stop ระหว่าง fetch ให้ยกเลิกทันที
+    4. add ทั้งหมดเข้า queue ด้วย queue_lock ครั้งเดียว — รับประกันลำดับ ไม่มีใครแทรกกลาง
     คืนค่า list of (track_idx, title)
     """
     # ── step 1: prefetch ทุกเพลงพร้อมกัน ──
@@ -1132,7 +1136,12 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
 
     fetch_results = await asyncio.gather(*(_fetch_one(t) for t in playlist_tracks))
 
-    # ── step 2: filter None (fetch ล้มเหลว) แต่รักษาลำดับ ──
+    # ── step 2: เช็ค stop ก่อน add — ถ้าผู้ใช้กด stop ระหว่าง fetch ให้ยกเลิกทันที ──
+    if guild.id in guild_stopped:
+        print(f"  🛑 Playlist fetch ยกเลิก — guild {guild.id} ถูก stop ระหว่าง fetch")
+        return []
+
+    # ── step 3: filter None (fetch ล้มเหลว) แต่รักษาลำดับ ──
     fetched = [(url, title, duration, thumbnail)
                for r in fetch_results if r is not None
                for url, title, duration, thumbnail in [r]]
@@ -1183,9 +1192,8 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
 
     return [(idx, t) for idx, t, *_ in added]
 
-async def _add_and_play(vc, guild, channel, loop_getter, track, notify: bool = True):
+async def _add_and_play(vc, guild, channel, loop_getter, track):
     """เพิ่มเพลงเข้า queue และเล่นถ้าว่าง
-    notify=False ใช้ตอนเพิ่มหลายเพลงพร้อมกัน (เช่น playlist) เพื่อไม่ให้ spam ข้อความ "เพิ่มใน Queue #"
     คืนค่า (track_idx, title) — track_idx คือลำดับจริงในคิว (0-based)
     """
     async with get_queue_lock(guild.id):
@@ -1194,12 +1202,11 @@ async def _add_and_play(vc, guild, channel, loop_getter, track, notify: bool = T
 
         if vc.is_playing() or vc.is_paused():
             pos = display_no(guild.id, track_idx)
-            if notify:
-                short_title = title if len(title) <= 50 else title[:47] + "…"
-                pub_msg = await channel.send(embed=discord.Embed(
-                    description=f"📋 เพิ่มใน Queue **#{pos}**\n🎵 {short_title}  |  ขอโดย: {requester.mention}",
-                    color=0x1a1a2e))
-                queue_add_msgs.setdefault(guild.id, {})[track_idx] = pub_msg
+            short_title = title if len(title) <= 50 else title[:47] + "…"
+            pub_msg = await channel.send(embed=discord.Embed(
+                description=f"📋 เพิ่มใน Queue **#{pos}**\n🎵 {short_title}  |  ขอโดย: {requester.mention}",
+                color=0x1a1a2e))
+            queue_add_msgs.setdefault(guild.id, {})[track_idx] = pub_msg
             await _refresh_queue_msg(guild.id)
             old_view = active_views.get(guild.id)
             if old_view and old_view.now_playing_msg and old_view.current_track:
@@ -1235,9 +1242,6 @@ async def _send_playlist_added_summary(guild_id: int, channel, requester, titles
     titles: list of (display_no, title, list_idx) — display_no คือเลขลำดับสะสมที่จะแสดงผล,
             list_idx คือตำแหน่งจริงในคิว (0-based) ของเพลงนั้น
     เก็บ reference ไว้ใน queue_add_msgs โดยใช้ list_idx ของ "เพลงสุดท้าย" ในสรุปเป็นคีย์
-    เพื่อให้ข้อความสรุปถูกลบโดยอัตโนมัติพร้อมกับตอนที่เพลงสุดท้ายนั้นเริ่มเล่นจริง
-    (ใช้ระบบลบตาม index เดียวกับข้อความ "เพิ่มใน Queue #" ของเพลงเดี่ยว — ปลอดภัยเพราะ
-    เพลงจาก playlist ถูกเพิ่มด้วย notify=False จึงไม่มี key ชนกัน)
     """
     if not titles:
         return
