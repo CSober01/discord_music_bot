@@ -19,6 +19,8 @@ slashcommands.register(bot.tree, lambda: bot.loop)
 @bot.event
 async def on_ready():
     print(f"✅ บอทออนไลน์แล้ว: {bot.user}")
+    # ลบข้อความเก่าได้เมื่อรีสตาร์ทแล้ว
+    await slashcommands.cleanup_old_messages(bot)
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.listening,
