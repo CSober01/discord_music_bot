@@ -27,10 +27,7 @@ async def on_ready():
             name="/play 🎵",
         )
     )
-    try:
-        await bot.tree.sync()
-    except Exception as e:
-        print(f"Sync error: {e}")
+    # ไม่ sync คำสั่งอัตโนมัติที่นี่แล้ว — ถ้าต้องการอัปเดต/เพิ่มคำสั่งใหม่ ให้รัน `python register.py` เอง
 
 
 bot.run(BOT_TOKEN)
