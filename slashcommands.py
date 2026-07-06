@@ -12,13 +12,21 @@ import logging
 import re
 import json
 import requests
+import os
+import tempfile
 
 logging.getLogger("discord.player").setLevel(logging.ERROR)
 logging.getLogger("discord.voice_state").setLevel(logging.WARNING)
 
+# loudnorm = EBU R128 loudness normalization (มาตรฐานเดียวกับที่ Spotify/YouTube ใช้)
+# I=-16 (integrated loudness target, LUFS) TP=-1.5 (true peak, กัน clipping) LRA=11 (loudness range)
+# เป็น single-pass/real-time (ไม่ใช่ 2-pass) จึงไม่แม่นเป๊ะเท่าการ measure ล่วงหน้า
+# แต่ไม่เพิ่ม latency ตอนเริ่มเล่นเพลง และดีขึ้นกว่าไม่ normalize เลยมาก
+LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11"
+
 FFMPEG_OPTIONS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": "-vn",
+    "options": f"-vn -af {LOUDNORM_FILTER}",
 }
 
 DEFAULT_VOLUME = 0.10  # 10%
@@ -439,6 +447,13 @@ def fetch_playlist_tracks(query: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> l
     
     return tracks
 
+def _is_age_restricted_error(err_msg: str) -> bool:
+    """ตรวจว่า error จาก yt-dlp เป็นเพราะวิดีโอโดน age-restriction (hard gate)
+    ซึ่งต้องใช้ cookies ของบัญชีที่ล็อกอินแล้วเท่านั้นถึงจะเล่นได้ — ไม่ใช่ bot detection ทั่วไป
+    """
+    m = err_msg.lower()
+    return ("confirm your age" in m) or ("age-restricted" in m) or ("inappropriate for some users" in m)
+
 def fetch_track(query: str):
     """ดึงข้อมูล single track
     รองรับ: YouTube URLs, Spotify Track URLs, Search queries
@@ -505,6 +520,8 @@ def fetch_track(query: str):
         raise
     except Exception as e:
         print(f"Fetch track error: {str(e)}")
+        if _is_age_restricted_error(str(e)):
+            raise ValueError("AGE_RESTRICTED")
         q_lower = query.lower()
         if "soundcloud.com" in q_lower:
             raise ValueError("SOUNDCLOUD_TRACK_ERROR")
@@ -963,6 +980,8 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                         await _send_error("❌ ไม่พบบน YouTube\n💡 ลองค้นหาด้วยชื่อเพลง")
                     elif error_msg == "SPOTIFY_UNSUPPORTED_LINK":
                         await _send_error("❌ ไม่รองรับลิงก์ Spotify นี้ (เช่น พอดแคสต์/Show)\n💡 ลองส่งลิงก์เพลงเดี่ยว/เพลย์ลิสต์/ศิลปิน หรือค้นหาด้วยชื่อเพลงแทน")
+                    elif error_msg == "AGE_RESTRICTED":
+                        await _send_error("❌ เพลงนี้ถูกจำกัดอายุ (Age-restricted) เล่นไม่ได้\n💡 ลองค้นหาด้วยชื่อเพลงแทนการวาง URL")
                     elif error_msg == "SOUNDCLOUD_TRACK_ERROR":
                         await _send_error("❌ ไม่สามารถเล่นเพลงจาก SoundCloud นี้ได้\n💡 อาจเป็นเพลงส่วนตัว/ดาวน์โหลดเท่านั้น หรือถูกลบ")
                     elif error_msg == "BANDCAMP_TRACK_ERROR":
@@ -1150,9 +1169,13 @@ class SearchResultView(discord.ui.View):
             url, title, duration, thumbnail = await asyncio.to_thread(fetch_track_from_result, r)
             track = (url, title, duration, interaction.user, thumbnail)
             await _add_and_play(vc, self.guild, self.channel, self.loop_getter, track)
-        except Exception:
+        except Exception as e:
+            if isinstance(e, ValueError) and str(e) == "AGE_RESTRICTED":
+                err_text = "❌ เพลงนี้ถูกจำกัดอายุ (Age-restricted) เล่นไม่ได้\n💡 ลองเลือกเพลงอื่นจากผลการค้นหา"
+            else:
+                err_text = "❌ เกิดข้อผิดพลาด กรุณาลองใหม่"
             await interaction.followup.send(embed=discord.Embed(
-                description="❌ เกิดข้อผิดพลาด กรุณาลองใหม่", color=discord.Color.red()), ephemeral=True)
+                description=err_text, color=discord.Color.red()), ephemeral=True)
             self._selected.discard(idx)
             self._selecting = False
             return
@@ -1192,6 +1215,86 @@ def get_queue_lock(guild_id: int) -> asyncio.Lock:
         _queue_locks[guild_id] = asyncio.Lock()
     return _queue_locks[guild_id]
 
+
+# ─────────────────────────────────────────────
+#  Audio source + loudnorm verification
+# ─────────────────────────────────────────────
+
+def make_audio_source(url: str, guild_id: int, title: str, volume: float) -> "discord.PCMVolumeTransformer":
+    """สร้าง FFmpeg audio source พร้อม loudness normalization (loudnorm, -16 LUFS)
+    เก็บ stderr ของ ffmpeg process นี้ลงไฟล์ชั่วคราว แล้วเช็ค async (หลัง ffmpeg เริ่มรันไปสักพัก)
+    ว่า filter โหลด/ทำงานสำเร็จจริงหรือไม่ — log ผลลัพธ์ให้เห็นใน console
+    ไฟล์ log จะถูกลบทิ้งอัตโนมัติหลังตรวจสอบเสร็จ ไม่ค้างสะสม
+    """
+    stderr_file = None
+    stderr_path = None
+    try:
+        fd, stderr_path = tempfile.mkstemp(prefix="ffmpeg_loudnorm_", suffix=".log")
+        stderr_file = os.fdopen(fd, "w", encoding="utf-8", errors="ignore")
+    except Exception as e:
+        print(f"[Loudnorm] เปิดไฟล์ log ไม่ได้ ({e}) — เล่นต่อโดยไม่ตรวจสอบ log")
+
+    audio = discord.FFmpegPCMAudio(url, stderr=stderr_file, **FFMPEG_OPTIONS)
+    source = discord.PCMVolumeTransformer(audio, volume=volume)
+
+    if stderr_file is not None:
+        asyncio.create_task(_verify_loudnorm(guild_id, title, stderr_path, stderr_file))
+
+    return source
+
+
+async def _verify_loudnorm(guild_id: int, title: str, stderr_path: str, stderr_file):
+    """Poll stderr log ของ ffmpeg ทุก 1 วิ (สูงสุด 8 วิ) แทนการรอครั้งเดียวแบบตายตัว
+    เจอสัญญาณ (error หรือ stream เริ่มแล้ว) เมื่อไหร่ก็หยุดเช็คทันที — แม่นกว่าและไม่ต้องรอนานเกินจำเป็น
+    ถ้าครบ 8 วิแล้วยังไม่มีสัญญาณอะไรเลย ถือว่าเช็คไม่ทัน (ไม่ได้แปลว่า filter พัง)
+    """
+    MAX_WAIT = 8
+    POLL_INTERVAL = 1
+    result = None  # "error" | "ok" | None
+
+    try:
+        for _ in range(MAX_WAIT):
+            await asyncio.sleep(POLL_INTERVAL)
+            try:
+                stderr_file.flush()
+            except Exception:
+                pass
+            try:
+                with open(stderr_path, "r", encoding="utf-8", errors="ignore") as f:
+                    log_content = f.read()
+            except Exception:
+                continue
+
+            low = log_content.lower()
+            filter_error = any(kw in low for kw in (
+                "error initializing filter", "error reinitializing filters",
+                "unable to parse option value", "no such filter", "invalid argument",
+                "failed to inject frame", "error while filtering",
+            ))
+            if filter_error:
+                result = "error"
+                snippet = log_content.strip()[-400:]
+                print(f"[Loudnorm] ❌ Guild {guild_id} | {_trunc(title, 40)} | filter ล้มเหลว:\n{snippet}")
+                break
+
+            if "stream mapping" in low or "output #0" in low or "press [q]" in low:
+                result = "ok"
+                print(f"[Loudnorm] ✅ Guild {guild_id} | {_trunc(title, 40)} | normalize -16 LUFS ทำงานปกติ")
+                break
+
+        if result is None:
+            print(f"[Loudnorm] ⚠ Guild {guild_id} | {_trunc(title, 40)} | เช็คครบ {MAX_WAIT}s แล้วยังไม่มีข้อมูลพอจะยืนยัน (ไม่ได้แปลว่า filter พัง)")
+    except Exception as e:
+        print(f"[Loudnorm] ตรวจสอบ log ไม่สำเร็จ: {e}")
+    finally:
+        try:
+            stderr_file.close()
+        except Exception:
+            pass
+        try:
+            os.remove(stderr_path)
+        except Exception:
+            pass
 
 
 
@@ -1242,8 +1345,7 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
                 set_now_idx(guild.id, track_idx)
                 _trim_queue(guild.id)
                 track_idx = get_now_idx(guild.id)
-                source = discord.PCMVolumeTransformer(
-                    discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
+                source = make_audio_source(url, guild.id, title, get_guild_volume(guild.id))
                 loop = loop_getter()
                 view = PlayerView(guild, channel, loop, current_track=track,
                                   current_idx=track_idx, loop_getter=loop_getter)
@@ -1342,8 +1444,7 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
             set_now_idx(guild.id, track_idx)
             _trim_queue(guild.id)
             track_idx = get_now_idx(guild.id)
-            source = discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
+            source = make_audio_source(url, guild.id, title, get_guild_volume(guild.id))
             loop = loop_getter()
             view = PlayerView(guild, channel, loop, current_track=track, current_idx=track_idx, loop_getter=loop_getter)
             active_views[guild.id] = view
@@ -1458,8 +1559,7 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
     view.current_idx = idx
     active_views[view.guild.id] = view
 
-    source = discord.PCMVolumeTransformer(
-        discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=view.volume_level)
+    source = make_audio_source(url, view.guild.id, title, view.volume_level)
 
     # guild_changing กัน play_next callback เก่า (ที่ยิงมาจาก vc.stop())
     guild_changing.add(view.guild.id)
@@ -1699,8 +1799,7 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
 
             track = q[next_idx]
             url, title, duration, requester, thumbnail, *_rest = track
-            source = discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
+            source = make_audio_source(url, guild.id, title, get_guild_volume(guild.id))
             embed = make_now_playing_embed(title, duration, requester, thumbnail,
                                            _queue_pos_str(guild.id, next_idx))
 
@@ -1901,6 +2000,15 @@ def register(tree: app_commands.CommandTree, loop_getter):
                     elif error_msg == "SPOTIFY_UNSUPPORTED_LINK":
                         return await interaction.followup.send(embed=discord.Embed(
                             description="❌ ไม่รองรับลิงก์ Spotify นี้ (เช่น พอดแคสต์/Show)\n\n💡 ลองส่งลิงก์เพลงเดี่ยว/เพลย์ลิสต์/ศิลปิน หรือค้นหาด้วยชื่อเพลงแทน",
+                            color=discord.Color.red()), ephemeral=True)
+                    elif error_msg == "AGE_RESTRICTED":
+                        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        print(
+                            f"[{ts}] ⚠ /play — วิดีโอถูกจำกัดอายุ (age-restricted, ต้องการ cookies บัญชีที่ล็อกอิน)\n"
+                            f"  {'Query':<9}: {_trunc(query, 60)}"
+                        )
+                        return await interaction.followup.send(embed=discord.Embed(
+                            description="❌ เพลงนี้ถูกจำกัดอายุ (Age-restricted) เล่นไม่ได้\n\n💡 ลองค้นหาด้วยชื่อเพลงแทนการวาง URL",
                             color=discord.Color.red()), ephemeral=True)
                     elif error_msg == "SOUNDCLOUD_TRACK_ERROR":
                         return await interaction.followup.send(embed=discord.Embed(
