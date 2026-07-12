@@ -12,21 +12,13 @@ import logging
 import re
 import json
 import requests
-import os
-import tempfile
 
 logging.getLogger("discord.player").setLevel(logging.ERROR)
 logging.getLogger("discord.voice_state").setLevel(logging.WARNING)
 
-# loudnorm = EBU R128 loudness normalization (มาตรฐานเดียวกับที่ Spotify/YouTube ใช้)
-# I=-16 (integrated loudness target, LUFS) TP=-1.5 (true peak, กัน clipping) LRA=11 (loudness range)
-# เป็น single-pass/real-time (ไม่ใช่ 2-pass) จึงไม่แม่นเป๊ะเท่าการ measure ล่วงหน้า
-# แต่ไม่เพิ่ม latency ตอนเริ่มเล่นเพลง และดีขึ้นกว่าไม่ normalize เลยมาก
-LOUDNORM_FILTER = "loudnorm=I=-16:TP=-1.5:LRA=11"
-
 FFMPEG_OPTIONS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": f"-vn -af {LOUDNORM_FILTER}",
+    "options": "-vn",
 }
 
 DEFAULT_VOLUME = 0.10  # 10%
@@ -145,10 +137,22 @@ def clear_guild(guild_id: int):
 def _queue_pos_str(guild_id: int, idx: int) -> str:
     return f"กำลังเล่น #{display_no(guild_id, idx)} จาก {get_total_added(guild_id)} เพลง"
 
+class _YtdlpSilentLogger:
+    """ปิดเสียง WARNING/ERROR ที่ yt-dlp พิมพ์เองออกจอ (เก็บไว้แค่ exception ให้โค้ดเราจัดการ/log เอง)"""
+    def debug(self, msg):
+        pass
+    def warning(self, msg):
+        pass
+    def error(self, msg):
+        pass
+
+
 def get_ydl_options(include_playlist: bool = False) -> dict:
     opts = {
         "format": "bestaudio/best",
         "quiet": True,
+        "no_warnings": True,
+        "logger": _YtdlpSilentLogger(),
         "default_search": "ytsearch",
         "source_address": "0.0.0.0",
     }
@@ -164,7 +168,7 @@ def get_ydl_options(include_playlist: bool = False) -> dict:
 _SPOTIFY_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
 }
 
@@ -345,30 +349,25 @@ def get_spotify_artist_top_tracks(artist_id: str, max_tracks: int = 10) -> list:
     return None
 
 def is_playlist_url(query: str) -> bool:
-    """ตรวจสอบว่า URL มีหลายเพลง (playlist/album/artist) หรือไม่"""
+    """ตรวจสอบว่า URL มีหลายเพลง (playlist/album/artist) หรือไม่
+    ข้อยกเว้น: YouTube Mix/Radio (list=RDxxxx) ไม่นับเป็น playlist จริง
+    เพราะเป็นรายการอัตโนมัติที่ YouTube สร้างต่อเนื่องไม่รู้จบ — ต้องเล่นแค่เพลงเดียวที่ระบุ (video id)
+    ไม่งั้นจะโดนดึงเป็นสิบๆ เพลงพร้อมกัน ยิง request ถี่จนโดน YouTube rate-limit/บล็อกบอท
+    """
     query_lower = query.lower()
-    # YouTube / YouTube Music Playlist
+
     if "youtube.com" in query_lower or "youtu.be" in query_lower:
-        has_video_id = "watch?v=" in query_lower or "youtu.be/" in query_lower
         list_match = re.search(r'[?&]list=([a-zA-Z0-9_-]+)', query)
         if list_match:
             list_id = list_match.group(1)
-            # ลิงก์จาก YouTube Music มักแนบ list=RD... (Radio/Mix ที่ระบบสร้างอัตโนมัติ)
-            # ต่อท้ายลิงก์เพลงเดี่ยวเสมอ — ถ้ามี v= ด้วยและ list ขึ้นต้นด้วย RD
-            # ให้ถือว่าเป็นเพลงเดี่ยว ไม่ใช่ playlist
-            if has_video_id and list_id.upper().startswith("RD"):
-                return False
+            if list_id.upper().startswith("RD"):
+                return False  # Mix/Radio → เล่นเป็นเพลงเดี่ยว
             return True
         return "playlist" in query_lower
-    # Spotify Playlist/Album/Artist (หน้าศิลปินมี Top Tracks หลายเพลง ใช้ flow เดียวกับ playlist)
+
     if "spotify.com" in query_lower:
         return "playlist" in query_lower or "album" in query_lower or "artist" in query_lower
-    # SoundCloud — "/sets/" คือ playlist, เพลงเดี่ยวเป็น soundcloud.com/<artist>/<track>
-    if "soundcloud.com" in query_lower:
-        return "/sets/" in query_lower
-    # Bandcamp — "/album/" คือ playlist ทั้งอัลบั้ม, เพลงเดี่ยวเป็น "/track/"
-    if "bandcamp.com" in query_lower:
-        return "/album/" in query_lower
+
     return False
 
 def fetch_playlist_tracks(query: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> list:
@@ -412,7 +411,6 @@ def fetch_playlist_tracks(query: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> l
     opts["extract_flat"] = "in_playlist"
     
     tracks = []
-    query_lower = query.lower()
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(query, download=False)
@@ -428,31 +426,16 @@ def fetch_playlist_tracks(query: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> l
                     "duration": entry.get("duration"),
                 }
                 
-                # เพิ่ม URL ของแต่ละเพลงในเพลย์ลิสต์ — ใช้ url/webpage_url ที่ yt-dlp คืนมา
-                # ให้ครอบคลุมทุกเว็บ (ไม่ใช่แค่ YouTube) เพื่อดึงเพลงจริงตอนเล่นได้ถูกต้อง
-                entry_url = entry.get("url") or entry.get("webpage_url")
-                if entry_url:
-                    track_info["url"] = entry_url
-                elif "youtube" in query_lower:
+                # ถ้าเป็น YouTube URL ให้เพิ่ม URL ด้วย
+                if "youtube" in query.lower():
                     track_info["url"] = f"https://www.youtube.com/watch?v={entry.get('id')}"
                 
                 tracks.append(track_info)
     except Exception as e:
         print(f"Fetch playlist error: {str(e)}")
-        if "soundcloud.com" in query_lower:
-            raise ValueError("SOUNDCLOUD_PLAYLIST_ERROR")
-        if "bandcamp.com" in query_lower:
-            raise ValueError("BANDCAMP_PLAYLIST_ERROR")
         raise
     
     return tracks
-
-def _is_age_restricted_error(err_msg: str) -> bool:
-    """ตรวจว่า error จาก yt-dlp เป็นเพราะวิดีโอโดน age-restriction (hard gate)
-    ซึ่งต้องใช้ cookies ของบัญชีที่ล็อกอินแล้วเท่านั้นถึงจะเล่นได้ — ไม่ใช่ bot detection ทั่วไป
-    """
-    m = err_msg.lower()
-    return ("confirm your age" in m) or ("age-restricted" in m) or ("inappropriate for some users" in m)
 
 def fetch_track(query: str):
     """ดึงข้อมูล single track
@@ -517,16 +500,6 @@ def fetch_track(query: str):
         if str(e) in ("PLAYLIST_DETECTED", "SPOTIFY_SCRAPE_ERROR", "SPOTIFY_NO_YOUTUBE_MATCH", "SPOTIFY_UNSUPPORTED_LINK"):
             raise
         print(f"Fetch track error: {str(e)}")
-        raise
-    except Exception as e:
-        print(f"Fetch track error: {str(e)}")
-        if _is_age_restricted_error(str(e)):
-            raise ValueError("AGE_RESTRICTED")
-        q_lower = query.lower()
-        if "soundcloud.com" in q_lower:
-            raise ValueError("SOUNDCLOUD_TRACK_ERROR")
-        if "bandcamp.com" in q_lower:
-            raise ValueError("BANDCAMP_TRACK_ERROR")
         raise
     except Exception as e:
         print(f"Fetch track error: {str(e)}")
@@ -772,24 +745,6 @@ class QueueDoneView(discord.ui.View):
 
     @discord.ui.button(emoji="🔍", label="ค้นหาเพลง", style=discord.ButtonStyle.primary)
     async def search_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        vc = self.guild.voice_client
-        if vc:
-            # บอทยังอยู่ใน VC — ตรวจว่าผู้ใช้อยู่ในห้องเดียวกันไหม
-            if not interaction.user.voice:
-                return await interaction.response.send_message(embed=discord.Embed(
-                    description=f"❌ กรุณาเข้า **{vc.channel.name}** ก่อนนะ!",
-                    color=discord.Color.red()), ephemeral=True)
-            if interaction.user.voice.channel != vc.channel:
-                return await interaction.response.send_message(embed=discord.Embed(
-                    description=f"❌ คุณต้องอยู่ใน **{vc.channel.name}** ถึงจะใช้งานได้",
-                    color=discord.Color.red()), ephemeral=True)
-        else:
-            # บอทไม่ได้อยู่ใน VC — ต้องเข้า VC ก่อนถึงจะค้นหาได้
-            if not interaction.user.voice:
-                return await interaction.response.send_message(embed=discord.Embed(
-                    description="❌ กรุณาเข้า Voice Channel ก่อน",
-                    color=discord.Color.red()), ephemeral=True)
-
         loop = self.loop_getter()
         modal = SearchModal(self.guild, self.channel, loop, self.loop_getter,
                             done_msg_ref=self.done_msg_ref)
@@ -909,16 +864,6 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                     await _send_error("❌ กรุณาเข้า Voice Channel ก่อน")
                     return
                 vc = await interaction.user.voice.channel.connect()
-            else:
-                # บอทอยู่ใน VC แล้ว — ตรวจว่าผู้ใช้อยู่ใน VC เดียวกันหรือไม่
-                if not interaction.user.voice:
-                    await _ack_done()
-                    await _send_error(f"❌ กรุณาเข้า **{vc.channel.name}** ก่อนนะ!")
-                    return
-                if interaction.user.voice.channel != vc.channel:
-                    await _ack_done()
-                    await _send_error(f"❌ คุณต้องอยู่ใน **{vc.channel.name}** ถึงจะใช้งานได้")
-                    return
 
             # ตรวจสอบว่าเป็น URL หรือไม่
             is_url = query_str.startswith("http://") or query_str.startswith("https://")
@@ -943,9 +888,12 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                     await _ack_done()
                     await self._delete_done_msg()
                     
-                    await _add_playlist_to_queue(
+                    added_results = await _add_playlist_to_queue(
                         vc, self.guild, self.channel, self.loop_getter,
                         playlist_tracks, interaction.user)
+                    
+                    if not added_results:
+                        await _send_error("❌ ไม่สามารถดึงเพลงจากเพลย์ลิสต์ได้เลย")
                     return
                     
                 except ValueError as e:
@@ -956,10 +904,6 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                         await _send_error("❌ Spotify ไม่สามารถเล่นได้ (DRM)\n💡 ค้นหาด้วยชื่อเพลงแทน")
                     elif error_msg == "SPOTIFY_SCRAPE_ERROR":
                         await _send_error("❌ ไม่สามารถดึงข้อมูลจาก Spotify ได้\n💡 ลองอีกครั้ง หรือค้นหาด้วยชื่อเพลงแทน")
-                    elif error_msg == "SOUNDCLOUD_PLAYLIST_ERROR":
-                        await _send_error("❌ ไม่สามารถโหลดเพลย์ลิสต์จาก SoundCloud ได้\n💡 อาจเป็นเพลย์ลิสต์ส่วนตัวหรือถูกลบ ลองอีกครั้ง")
-                    elif error_msg == "BANDCAMP_PLAYLIST_ERROR":
-                        await _send_error("❌ ไม่สามารถโหลดอัลบั้มจาก Bandcamp ได้\n💡 อาจเป็นอัลบั้มที่ซื้อเท่านั้นถึงจะฟังได้ หรือถูกลบ")
                     else:
                         await _send_error("❌ ไม่สามารถโหลดเพลย์ลิสต์")
                     return
@@ -980,12 +924,6 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                         await _send_error("❌ ไม่พบบน YouTube\n💡 ลองค้นหาด้วยชื่อเพลง")
                     elif error_msg == "SPOTIFY_UNSUPPORTED_LINK":
                         await _send_error("❌ ไม่รองรับลิงก์ Spotify นี้ (เช่น พอดแคสต์/Show)\n💡 ลองส่งลิงก์เพลงเดี่ยว/เพลย์ลิสต์/ศิลปิน หรือค้นหาด้วยชื่อเพลงแทน")
-                    elif error_msg == "AGE_RESTRICTED":
-                        await _send_error("❌ เพลงนี้ถูกจำกัดอายุ (Age-restricted) เล่นไม่ได้\n💡 ลองค้นหาด้วยชื่อเพลงแทนการวาง URL")
-                    elif error_msg == "SOUNDCLOUD_TRACK_ERROR":
-                        await _send_error("❌ ไม่สามารถเล่นเพลงจาก SoundCloud นี้ได้\n💡 อาจเป็นเพลงส่วนตัว/ดาวน์โหลดเท่านั้น หรือถูกลบ")
-                    elif error_msg == "BANDCAMP_TRACK_ERROR":
-                        await _send_error("❌ ไม่สามารถเล่นเพลงจาก Bandcamp นี้ได้\n💡 อาจเป็นเพลงที่ซื้อเท่านั้นถึงจะฟังได้ หรือถูกลบ")
                     else:
                         await _send_error("❌ เกิดข้อผิดพลาด")
                     return
@@ -1097,26 +1035,17 @@ class SearchResultView(discord.ui.View):
                     description="❌ กรุณาเข้า Voice Channel ก่อน", color=discord.Color.red()), ephemeral=True)
                 return
             vc = await interaction.user.voice.channel.connect()
-        else:
-            if not interaction.user.voice:
-                await interaction.followup.send(embed=discord.Embed(
-                    description=f"❌ กรุณาเข้า **{vc.channel.name}** ก่อนนะ!", color=discord.Color.red()), ephemeral=True)
-                return
-            if interaction.user.voice.channel != vc.channel:
-                await interaction.followup.send(embed=discord.Embed(
-                    description=f"❌ คุณต้องอยู่ใน **{vc.channel.name}** ถึงจะใช้งานได้", color=discord.Color.red()), ephemeral=True)
-                return
 
         await self._clear_done()
-
-        # แปลง search results ที่ยังไม่ได้เลือก → playlist_tracks format
-        # เพื่อให้ _add_playlist_to_queue fetch พร้อมกัน + add ทีเดียว + ส่ง summary
-        remaining = [{"id": r["id"], "title": r["title"]}
-                     for i, r in enumerate(self.results) if i not in self._selected]
-
-        await _add_playlist_to_queue(
-            vc, self.guild, self.channel, self.loop_getter,
-            remaining, interaction.user)
+        # Serial loop: await ทีละอัน เพื่อป้องกัน race condition บน index
+        for i, r in enumerate(self.results):
+            if i in self._selected:
+                continue  # ข้ามเพลงที่เลือกแล้ว
+            try:
+                url, title, duration, thumbnail = await asyncio.to_thread(fetch_track_from_result, r)
+                track = (url, title, duration, interaction.user, thumbnail)
+                await _add_and_play(vc, self.guild, self.channel, self.loop_getter, track)
+            except Exception: pass
 
         await self._close_message()
 
@@ -1150,32 +1079,15 @@ class SearchResultView(discord.ui.View):
                 self._selecting = False
                 return
             vc = await interaction.user.voice.channel.connect()
-        else:
-            if not interaction.user.voice:
-                await interaction.followup.send(embed=discord.Embed(
-                    description=f"❌ กรุณาเข้า **{vc.channel.name}** ก่อนนะ!", color=discord.Color.red()), ephemeral=True)
-                self._selected.discard(idx)
-                self._selecting = False
-                return
-            if interaction.user.voice.channel != vc.channel:
-                await interaction.followup.send(embed=discord.Embed(
-                    description=f"❌ คุณต้องอยู่ใน **{vc.channel.name}** ถึงจะใช้งานได้", color=discord.Color.red()), ephemeral=True)
-                self._selected.discard(idx)
-                self._selecting = False
-                return
 
         await self._clear_done()
         try:
             url, title, duration, thumbnail = await asyncio.to_thread(fetch_track_from_result, r)
             track = (url, title, duration, interaction.user, thumbnail)
             await _add_and_play(vc, self.guild, self.channel, self.loop_getter, track)
-        except Exception as e:
-            if isinstance(e, ValueError) and str(e) == "AGE_RESTRICTED":
-                err_text = "❌ เพลงนี้ถูกจำกัดอายุ (Age-restricted) เล่นไม่ได้\n💡 ลองเลือกเพลงอื่นจากผลการค้นหา"
-            else:
-                err_text = "❌ เกิดข้อผิดพลาด กรุณาลองใหม่"
+        except Exception:
             await interaction.followup.send(embed=discord.Embed(
-                description=err_text, color=discord.Color.red()), ephemeral=True)
+                description="❌ เกิดข้อผิดพลาด กรุณาลองใหม่", color=discord.Color.red()), ephemeral=True)
             self._selected.discard(idx)
             self._selecting = False
             return
@@ -1216,182 +1128,101 @@ def get_queue_lock(guild_id: int) -> asyncio.Lock:
     return _queue_locks[guild_id]
 
 
-# ─────────────────────────────────────────────
-#  Audio source + loudnorm verification
-# ─────────────────────────────────────────────
-
-def make_audio_source(url: str, guild_id: int, title: str, volume: float) -> "discord.PCMVolumeTransformer":
-    """สร้าง FFmpeg audio source พร้อม loudness normalization (loudnorm, -16 LUFS)
-    เก็บ stderr ของ ffmpeg process นี้ลงไฟล์ชั่วคราว แล้วเช็ค async (หลัง ffmpeg เริ่มรันไปสักพัก)
-    ว่า filter โหลด/ทำงานสำเร็จจริงหรือไม่ — log ผลลัพธ์ให้เห็นใน console
-    ไฟล์ log จะถูกลบทิ้งอัตโนมัติหลังตรวจสอบเสร็จ ไม่ค้างสะสม
+def _fetch_playlist_track_sync(track_info: dict):
+    """ดึงข้อมูล track เดี่ยวจาก playlist entry (sync, รันใน thread)
+    ถ้าดึงจาก URL/ID ตรงไม่ได้ (เช่น age-restricted, private, ถูกลบ)
+    จะลองค้นหาด้วยชื่อเพลงแทน เพื่อหาวิดีโอตัวที่เข้าถึงได้ แทนที่จะข้ามเพลงไปเฉยๆ
+    (ทั้งหมด log เข้า console เท่านั้น ไม่มีข้อความแจ้งใน Discord)
     """
-    stderr_file = None
-    stderr_path = None
-    try:
-        fd, stderr_path = tempfile.mkstemp(prefix="ffmpeg_loudnorm_", suffix=".log")
-        stderr_file = os.fdopen(fd, "w", encoding="utf-8", errors="ignore")
-    except Exception as e:
-        print(f"[Loudnorm] เปิดไฟล์ log ไม่ได้ ({e}) — เล่นต่อโดยไม่ตรวจสอบ log")
+    orig_title = track_info.get("title", "Unknown")
 
-    audio = discord.FFmpegPCMAudio(url, stderr=stderr_file, **FFMPEG_OPTIONS)
-    source = discord.PCMVolumeTransformer(audio, volume=volume)
-
-    if stderr_file is not None:
-        asyncio.create_task(_verify_loudnorm(guild_id, title, stderr_path, stderr_file))
-
-    return source
-
-
-async def _verify_loudnorm(guild_id: int, title: str, stderr_path: str, stderr_file):
-    """Poll stderr log ของ ffmpeg ทุก 1 วิ (สูงสุด 8 วิ) แทนการรอครั้งเดียวแบบตายตัว
-    เจอสัญญาณ (error หรือ stream เริ่มแล้ว) เมื่อไหร่ก็หยุดเช็คทันที — แม่นกว่าและไม่ต้องรอนานเกินจำเป็น
-    ถ้าครบ 8 วิแล้วยังไม่มีสัญญาณอะไรเลย ถือว่าเช็คไม่ทัน (ไม่ได้แปลว่า filter พัง)
-    """
-    MAX_WAIT = 8
-    POLL_INTERVAL = 1
-    result = None  # "error" | "ok" | None
+    def _reason(e: Exception) -> str:
+        # ตัดข้อความ error ยาวๆ ของ yt-dlp เหลือแค่บรรทัดแรกสั้นๆ พอให้รู้สาเหตุ
+        first_line = str(e).splitlines()[0] if str(e) else str(e)
+        return _trunc(first_line.replace("ERROR: [youtube] ", ""), 60)
 
     try:
-        for _ in range(MAX_WAIT):
-            await asyncio.sleep(POLL_INTERVAL)
+        if "url" in track_info:
+            return fetch_track(track_info["url"])
+
+        elif "id" in track_info and track_info.get("id"):
+            yt_url = f"https://www.youtube.com/watch?v={track_info['id']}"
             try:
-                stderr_file.flush()
-            except Exception:
-                pass
-            try:
-                with open(stderr_path, "r", encoding="utf-8", errors="ignore") as f:
-                    log_content = f.read()
-            except Exception:
-                continue
+                return fetch_track(yt_url)
+            except Exception as e:
+                print(f"  ⚠ ดึงตรงไม่ได้ [{_reason(e)}] — ลองหาแทน: {_trunc(orig_title, 40)}")
+                try:
+                    result = fetch_track(orig_title)
+                    found_title = result[1] if result else "?"
+                    print(f"  ✅ ทดแทนสำเร็จ: {_trunc(orig_title, 35)} → {_trunc(found_title, 35)}")
+                    return result
+                except Exception as e2:
+                    print(f"  ❌ ข้ามเพลง [{_reason(e2)}]: {_trunc(orig_title, 40)}")
+                    return None
 
-            low = log_content.lower()
-            filter_error = any(kw in low for kw in (
-                "error initializing filter", "error reinitializing filters",
-                "unable to parse option value", "no such filter", "invalid argument",
-                "failed to inject frame", "error while filtering",
-            ))
-            if filter_error:
-                result = "error"
-                snippet = log_content.strip()[-400:]
-                print(f"[Loudnorm] ❌ Guild {guild_id} | {_trunc(title, 40)} | filter ล้มเหลว:\n{snippet}")
-                break
+        elif "artist" in track_info:
+            search_query = f"{track_info['title']} {track_info['artist']}"
+            print(f"  🎵 Spotify→YT: {_trunc(track_info['title'], 40)} — {_trunc(track_info['artist'], 30)}")
+            return _fetch_spotify_track_from_search(search_query)
 
-            if "stream mapping" in low or "output #0" in low or "press [q]" in low:
-                result = "ok"
-                print(f"[Loudnorm] ✅ Guild {guild_id} | {_trunc(title, 40)} | normalize -16 LUFS ทำงานปกติ")
-                break
-
-        if result is None:
-            print(f"[Loudnorm] ⚠ Guild {guild_id} | {_trunc(title, 40)} | เช็คครบ {MAX_WAIT}s แล้วยังไม่มีข้อมูลพอจะยืนยัน (ไม่ได้แปลว่า filter พัง)")
+        return None
     except Exception as e:
-        print(f"[Loudnorm] ตรวจสอบ log ไม่สำเร็จ: {e}")
-    finally:
-        try:
-            stderr_file.close()
-        except Exception:
-            pass
-        try:
-            os.remove(stderr_path)
-        except Exception:
-            pass
-
+        print(f"  ❌ ข้ามเพลง [{_reason(e)}]: {_trunc(orig_title, 40)}")
+        return None
 
 
 async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_tracks, requester):
-    """เพิ่ม playlist เข้า queue แบบ 2-phase:
-    Phase 1 — fetch เพลงแรก → เล่นทันที (ไม่ต้องรอทั้ง playlist)
-    Phase 2 — fetch เพลงที่เหลือ concurrent ใน background → ทยอย add เข้า queue
-    คืนค่า list of (track_idx, title) ของทุกเพลงที่เพิ่มสำเร็จ
+    """เพิ่ม playlist เข้า queue โดยเล่นเพลงแรกทันทีที่ดึงสำเร็จ (ไม่ต้องรอทั้งเพลย์ลิสต์)
+    ถ้าเพลงแรกดึงไม่สำเร็จ (เช่น age-restricted) จะลองเพลงถัดไปเป็น "เพลงเริ่ม" แทนอัตโนมัติ
+    ส่วนที่เหลือจะถูกดึงและเพิ่มเข้าคิวต่อใน background task (_bg_fetch_rest)
+    คืนค่า list of (track_idx, title) — มีแค่เพลงแรกที่เล่นทันที (เพลงที่เหลือมาทีหลังผ่าน summary แยก)
     """
-
-    async def _fetch_one(track_info):
-        try:
-            if "url" in track_info:
-                return await asyncio.to_thread(fetch_track, track_info["url"])
-            elif "id" in track_info and track_info.get("id"):
-                yt_url = f"https://www.youtube.com/watch?v={track_info['id']}"
-                return await asyncio.to_thread(fetch_track, yt_url)
-            elif "artist" in track_info:
-                search_query = f"{track_info['title']} {track_info['artist']}"
-                print(f"  {'🎵 Spotify→YT':<13}: {_trunc(track_info['title'], 40)} — {_trunc(track_info['artist'], 30)}")
-                return await asyncio.to_thread(_fetch_spotify_track_from_search, search_query)
-            else:
-                return None
-        except Exception as e:
-            print(f"Error fetching track from playlist: {str(e)}")
-            return None
-
     if not playlist_tracks:
         return []
 
-    added: list = []  # [(track_idx, title)] ผลรวมทั้งหมด
+    # ── step 1: ดึงเพลงแรกก่อน (ทีละเพลง) เพื่อเริ่มเล่นให้เร็วที่สุด ──
+    # ถ้าเพลงไหนดึงไม่ได้ (เช่น age-restricted) ข้ามไปลองเพลงถัดไปเป็น "เพลงเริ่ม" แทน
+    first_result = None
+    remaining_tracks = list(playlist_tracks)
 
-    # ── Phase 1: fetch เพลงแรก → เล่นทันที ──
-    first_result = await _fetch_one(playlist_tracks[0])
-    if guild.id in guild_stopped:
+    while remaining_tracks:
+        candidate = remaining_tracks.pop(0)
+        result = await asyncio.to_thread(_fetch_playlist_track_sync, candidate)
+
+        if guild.id in guild_stopped:
+            print(f"  🛑 Playlist fetch ยกเลิก — guild {guild.id} ถูก stop ระหว่าง fetch")
+            return []
+
+        if result:
+            first_result = result
+            break
+
+    if not first_result:
         return []
-    if first_result is None:
-        # เพลงแรก fetch ไม่ได้ ลองข้ามไปเพลงถัดไปแล้วค่อย bg fetch ที่เหลือ
-        pass
-    else:
-        url, title, duration, thumbnail = first_result
+
+    url, title, duration, thumbnail = first_result
+    async with get_queue_lock(guild.id):
         track = (url, title, duration, requester, thumbnail)
-        async with get_queue_lock(guild.id):
-            first_was_empty = not (vc.is_playing() or vc.is_paused())
-            track_idx = add_to_queue(guild.id, track)
-            added.append((track_idx, title))
-            if first_was_empty:
-                set_now_idx(guild.id, track_idx)
-                _trim_queue(guild.id)
-                track_idx = get_now_idx(guild.id)
-                source = make_audio_source(url, guild.id, title, get_guild_volume(guild.id))
-                loop = loop_getter()
-                view = PlayerView(guild, channel, loop, current_track=track,
-                                  current_idx=track_idx, loop_getter=loop_getter)
-                active_views[guild.id] = view
-                vc.play(source, after=lambda e, _t=track, _ti=track_idx:
-                        asyncio.run_coroutine_threadsafe(
-                            play_next(guild, channel, loop, current_track=_t,
-                                      current_idx=_ti, error=e), loop))
-                embed = make_now_playing_embed(title, duration, requester, thumbnail,
-                                               _queue_pos_str(guild.id, track_idx))
-                msg = await channel.send(embed=embed, view=view)
-                view.now_playing_msg = msg
+        track_idx = add_to_queue(guild.id, track)
+        first_was_empty = not (vc.is_playing() or vc.is_paused())
 
-    # ── Phase 2: fetch เพลงที่เหลือ concurrent ใน background ──
-    rest = playlist_tracks[1:]
-    if not rest:
-        return added
-
-    async def _bg_fetch_rest():
-        if guild.id in guild_stopped:
-            return
-
-        rest_results = await asyncio.gather(*(_fetch_one(t) for t in rest))
-
-        if guild.id in guild_stopped:
-            return
-
-        # ถือ lock ครอบตลอดทั้งชุดการเพิ่มเพลงของ playlist นี้ (ไม่ปล่อยจนกว่าจะเพิ่มครบ)
-        # กันไม่ให้คำขอเพลงเดี่ยวจากคนอื่นแทรกเข้ามากลาง playlist ระหว่างที่กำลังเพิ่มอยู่
-        # การ append แต่ละเพลงเป็น sync ล้วน (ไม่มี I/O) จึงถือ lock ได้เร็วมาก ไม่บล็อกคนอื่นนาน
-        newly_added = []
-        async with get_queue_lock(guild.id):
-            for result in rest_results:
-                if result is None:
-                    continue
-                if guild.id in guild_stopped:
-                    break
-                r_url, r_title, r_duration, r_thumbnail = result
-                r_track = (r_url, r_title, r_duration, requester, r_thumbnail)
-                r_idx = add_to_queue(guild.id, r_track)
-                newly_added.append((r_idx, r_title))
-
-        added.extend(newly_added)
-
-        # อัปเดต queue/now playing แค่ครั้งเดียวหลังเพิ่มครบ (ลดการยิง Discord API ซ้ำๆ ด้วย)
-        if newly_added and guild.id not in guild_stopped:
+        if first_was_empty:
+            set_now_idx(guild.id, track_idx)
+            _trim_queue(guild.id)
+            track_idx = get_now_idx(guild.id)
+            source = discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
+            loop = loop_getter()
+            view = PlayerView(guild, channel, loop, current_track=track, current_idx=track_idx, loop_getter=loop_getter)
+            active_views[guild.id] = view
+            vc.play(source, after=lambda e, _t=track, _ti=track_idx:
+                    asyncio.run_coroutine_threadsafe(
+                        play_next(guild, channel, loop, current_track=_t, current_idx=_ti, error=e), loop))
+            embed = make_now_playing_embed(title, duration, requester, thumbnail,
+                                           _queue_pos_str(guild.id, track_idx))
+            msg = await channel.send(embed=embed, view=view)
+            view.now_playing_msg = msg
+        else:
             await _refresh_queue_msg(guild.id)
             old_view = active_views.get(guild.id)
             if old_view and old_view.now_playing_msg and old_view.current_track:
@@ -1399,22 +1230,48 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
                 _tn = _th[0] if _th else None
                 try:
                     await old_view.now_playing_msg.edit(embed=make_now_playing_embed(
-                        _ti, _du, _rq, _tn,
-                        _queue_pos_str(guild.id, get_now_idx(guild.id))))
+                        _ti, _du, _rq, _tn, _queue_pos_str(guild.id, get_now_idx(guild.id))))
                 except Exception:
                     pass
 
-    async def _bg_and_summary():
-        await _bg_fetch_rest()
-        if guild.id in guild_stopped:
-            return
-        # ส่ง summary หลัง bg fetch เสร็จครบ — added มีทุกเพลงแล้ว
-        if added:
-            titles = [(display_no(guild.id, idx), t, idx) for idx, t in added]
-            await _send_playlist_added_summary(guild.id, channel, requester, titles)
+    if remaining_tracks:
+        asyncio.create_task(_bg_fetch_rest(guild, channel, remaining_tracks, requester))
 
-    asyncio.create_task(_bg_and_summary())
-    return added
+    return [(track_idx, title)]
+
+
+async def _bg_fetch_rest(guild, channel, rest_tracks, requester):
+    """ดึงเพลงที่เหลือของ playlist (หลังเพลงแรก) แบบ concurrent ในพื้นหลัง
+    แล้วเพิ่มเข้าคิวทั้งหมดพร้อมกันด้วย queue_lock ครั้งเดียว (atomic)
+    เพื่อรักษาลำดับและป้องกันไม่ให้แทรกกลางกับเพลงอื่นที่ถูกเพิ่มระหว่างนี้
+    """
+    async def _fetch_one(track_info):
+        return await asyncio.to_thread(_fetch_playlist_track_sync, track_info)
+
+    fetch_results = await asyncio.gather(*(_fetch_one(t) for t in rest_tracks))
+
+    if guild.id in guild_stopped:
+        print(f"  🛑 Playlist bg fetch ยกเลิก — guild {guild.id} ถูก stop ระหว่าง fetch")
+        return
+
+    fetched = [(url, title, duration, thumbnail)
+               for r in fetch_results if r is not None
+               for url, title, duration, thumbnail in [r]]
+
+    if not fetched:
+        return
+
+    added = []
+    async with get_queue_lock(guild.id):
+        for url, title, duration, thumbnail in fetched:
+            track = (url, title, duration, requester, thumbnail)
+            track_idx = add_to_queue(guild.id, track)
+            added.append((track_idx, title))
+        await _refresh_queue_msg(guild.id)
+
+    added_titles = [(display_no(guild.id, idx), title, idx) for idx, title in added]
+    await _send_playlist_added_summary(guild.id, channel, requester, added_titles)
+
 
 async def _add_and_play(vc, guild, channel, loop_getter, track):
     """เพิ่มเพลงเข้า queue และเล่นถ้าว่าง
@@ -1444,7 +1301,8 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
             set_now_idx(guild.id, track_idx)
             _trim_queue(guild.id)
             track_idx = get_now_idx(guild.id)
-            source = make_audio_source(url, guild.id, title, get_guild_volume(guild.id))
+            source = discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
             loop = loop_getter()
             view = PlayerView(guild, channel, loop, current_track=track, current_idx=track_idx, loop_getter=loop_getter)
             active_views[guild.id] = view
@@ -1460,52 +1318,6 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
         return track_idx, title
 
 
-def _smart_shorten(title: str, max_len: int) -> str:
-    """ย่อชื่อเพลงอย่างฉลาด:
-    1. ตัด bracket/parentheses ที่เป็น metadata ออกก่อน (Official MV, feat., HD, etc.)
-    2. ตัด subtitle หลัง ' - ' ออก (ถ้ายังยาวเกิน)
-    3. truncate ด้วย … เป็น fallback สุดท้าย
-    """
-    if len(title) <= max_len:
-        return title
-
-    # รูปแบบที่ตัดออกได้ (case-insensitive) — metadata ที่ไม่ใช่ชื่อเพลงหลัก
-    _BRACKET_RE = re.compile(
-        r'[\[(（【][\s\S]*?[\])）】]',
-        re.IGNORECASE,
-    )
-    _META_SUFFIXES = re.compile(
-        r'\s*[-|｜·•]\s*(official\b.*|lyrics?\b.*|audio\b.*|mv\b.*|music video\b.*|'
-        r'hd\b.*|4k\b.*|visualizer\b.*|live\b.*|karaoke\b.*|ver\..*|version\b.*)'
-        r'|\s+[|｜]\s+.*$',
-        re.IGNORECASE,
-    )
-
-    t = title
-
-    # ขั้น 1: ลบ bracket metadata + suffix metadata วนซ้ำจน clean
-    for _ in range(3):
-        prev = t
-        t = _BRACKET_RE.sub('', t).strip()
-        t = _META_SUFFIXES.sub('', t).strip()
-        t = t or prev
-        if t == prev:
-            break
-    if len(t) <= max_len:
-        return t
-
-    # ขั้น 2: ตัด subtitle หลัง ' - ' ตัวแรก
-    if ' - ' in t:
-        t_main = t.split(' - ')[0].strip()
-        if t_main and len(t_main) <= max_len:
-            return t_main
-        if t_main:
-            t = t_main
-
-    # ขั้น 3: truncate เป็น fallback สุดท้าย
-    return t[:max_len - 1] + '…'
-
-
 async def _send_playlist_added_summary(guild_id: int, channel, requester, titles: list):
     """ส่งสรุปเพลงที่เพิ่มจาก playlist เป็นข้อความเดียว ให้ทุกคนเห็น (ไม่ ephemeral)
     titles: list of (display_no, title, list_idx) — display_no คือเลขลำดับสะสมที่จะแสดงผล,
@@ -1514,14 +1326,7 @@ async def _send_playlist_added_summary(guild_id: int, channel, requester, titles
     """
     if not titles:
         return
-
-    # คำนวณ max_len ต่อบรรทัดแบบ dynamic — กันไม่ให้ embed เกิน 4000 chars
-    # โครงสร้าง: "`#NN` <title>\n" × N แถว + "\n\nขอโดย: @mention"
-    # mention ≈ 25 chars, prefix "`#NN` " ≈ 6-8 chars → เผื่อ 10 chars
-    # budget ต่อบรรทัด = (3900 - 30) / len(titles) แต่ไม่เกิน 55 ไม่น้อยกว่า 20
-    budget = max(20, min(55, (3900 - 30) // max(len(titles), 1)))
-    lines = [f"`#{no}` {_smart_shorten(t, budget)}" for no, t, _ in titles]
-
+    lines = [f"`#{no}` {_trunc(t, 58)}" for no, t, _ in titles]
     embed = discord.Embed(
         description="\n".join(lines) + f"\n\nขอโดย: {requester.mention}",
         color=0x1a1a2e,
@@ -1559,7 +1364,8 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
     view.current_idx = idx
     active_views[view.guild.id] = view
 
-    source = make_audio_source(url, view.guild.id, title, view.volume_level)
+    source = discord.PCMVolumeTransformer(
+        discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=view.volume_level)
 
     # guild_changing กัน play_next callback เก่า (ที่ยิงมาจาก vc.stop())
     guild_changing.add(view.guild.id)
@@ -1659,8 +1465,11 @@ class PlayerView(discord.ui.View):
         idx = get_now_idx(self.guild.id)
         q = get_full_queue(self.guild.id)
         if idx + 1 >= len(q):
-            return await safe_respond(interaction, embed=discord.Embed(
-                description="❌ ไม่มีเพลงถัดไปใน Queue", color=discord.Color.red()), ephemeral=True)
+            log("⏭ SKIP_LAST", interaction, f"idx {idx} → end")
+            try: await interaction.response.defer()
+            except Exception: pass
+            vc.stop()
+            return
         log("⏭ SKIP", interaction, f"idx {idx} → {idx+1}")
         try: await interaction.response.defer()
         except Exception: pass
@@ -1716,6 +1525,7 @@ class PlayerView(discord.ui.View):
 
     @discord.ui.button(emoji="📋", style=discord.ButtonStyle.primary, row=1)
     async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        log("📋 QUEUE", interaction)
         # defer ก่อนทุกอย่าง กัน interaction token หมดอายุ (3 วินาที)
         try:
             await interaction.response.defer(ephemeral=True, thinking=False)
@@ -1788,10 +1598,12 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
     next_idx = current_idx + 1
     
     # Acquire lock ก่อนจะแก้ index ป้องกัน race condition กับ skip/prev
+    has_next = False
     async with get_queue_lock(guild.id):
         q = get_full_queue(guild.id)
+        has_next = next_idx < len(q)
 
-        if next_idx < len(q):
+        if has_next:
             set_now_idx(guild.id, next_idx)
             _trim_queue(guild.id)
             next_idx = get_now_idx(guild.id)
@@ -1799,7 +1611,8 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
 
             track = q[next_idx]
             url, title, duration, requester, thumbnail, *_rest = track
-            source = make_audio_source(url, guild.id, title, get_guild_volume(guild.id))
+            source = discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
             embed = make_now_playing_embed(title, duration, requester, thumbnail,
                                            _queue_pos_str(guild.id, next_idx))
 
@@ -1833,49 +1646,53 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
 
             await _refresh_queue_msg(guild.id)
 
-        else:
-            if guild.id in guild_stopped:
-                guild_stopped.discard(guild.id)
-                return
+    # ── หมดคิวแล้ว (ไม่มีเพลงถัดไป) ──
+    # ต้องทำ "นอก" queue_lock เสมอ เพราะมี await asyncio.sleep(300) ยาวมาก
+    # ถ้าทำในนั้น lock จะถูกถือค้าง 5 นาที ทำให้ /play หรือปุ่มค้นหาเพลงใหม่
+    # ขอเพลงไม่ได้เลยจนกว่าจะครบ 300 วิ หรือมีคน /stop
+    if not has_next:
+        if guild.id in guild_stopped:
+            guild_stopped.discard(guild.id)
+            return
 
-            old_view = active_views.pop(guild.id, None)
-            if old_view and old_view.now_playing_msg:
-                try: await old_view.now_playing_msg.delete()
+        old_view = active_views.pop(guild.id, None)
+        if old_view and old_view.now_playing_msg:
+            try: await old_view.now_playing_msg.delete()
+            except Exception: pass
+            old_view.now_playing_msg = None
+
+        await _delete_queue_view_msg(guild.id)
+        await _delete_queue_add_msgs(guild.id)
+        await _delete_search_result_msgs(guild.id)
+
+        await asyncio.sleep(1)
+        vc = guild.voice_client
+        if not vc or not vc.is_playing():
+            old_done = queue_done_msgs.pop(guild.id, None)
+            if old_done:
+                try: await old_done.delete()
                 except Exception: pass
-                old_view.now_playing_msg = None
 
-            await _delete_queue_view_msg(guild.id)
-            await _delete_queue_add_msgs(guild.id)
-            await _delete_search_result_msgs(guild.id)
-
-            await asyncio.sleep(1)
-            vc = guild.voice_client
-            if not vc or not vc.is_playing():
-                old_done = queue_done_msgs.pop(guild.id, None)
-                if old_done:
-                    try: await old_done.delete()
-                    except Exception: pass
-
-                done_msg_ref = [None]
-                view = QueueDoneView(guild, channel, lambda: loop, done_msg_ref=done_msg_ref)
-                msg = await channel.send(embed=discord.Embed(
-                    description="✅ เล่นเพลงครบ Queue แล้ว — บอทจะออกใน 5 นาทีถ้าไม่มีเพลงใหม่",
+            done_msg_ref = [None]
+            view = QueueDoneView(guild, channel, lambda: loop, done_msg_ref=done_msg_ref)
+            msg = await channel.send(embed=discord.Embed(
+                description="✅ เล่นเพลงครบ Queue แล้ว — บอทจะออกใน 5 นาทีถ้าไม่มีเพลงใหม่",
                     color=discord.Color.green()), view=view)
-                done_msg_ref[0] = msg
-                queue_done_msgs[guild.id] = msg
+            done_msg_ref[0] = msg
+            queue_done_msgs[guild.id] = msg
 
-                await asyncio.sleep(300)
-                vc = guild.voice_client
-                if vc and not vc.is_playing() and not vc.is_paused() \
-                        and next_idx >= len(get_full_queue(guild.id)):
-                    await _delete_search_result_msgs(guild.id)
-                    await _delete_queue_view_msg(guild.id)
-                    await vc.disconnect()
-                    clear_guild(guild.id)
-                    done_msg = queue_done_msgs.pop(guild.id, None)
-                    if done_msg:
-                        try: await done_msg.delete()
-                        except Exception: pass
+            await asyncio.sleep(300)
+            vc = guild.voice_client
+            if vc and not vc.is_playing() and not vc.is_paused() \
+                    and next_idx >= len(get_full_queue(guild.id)):
+                await _delete_search_result_msgs(guild.id)
+                await _delete_queue_view_msg(guild.id)
+                await vc.disconnect()
+                clear_guild(guild.id)
+                done_msg = queue_done_msgs.pop(guild.id, None)
+                if done_msg:
+                    try: await done_msg.delete()
+                    except Exception: pass
 
 
 # ─────────────────────────────────────────────
@@ -1940,11 +1757,14 @@ def register(tree: app_commands.CommandTree, loop_getter):
                         return await interaction.followup.send(embed=discord.Embed(
                             description="❌ ไม่พบเพลงในเพลย์ลิสต์", color=discord.Color.red()), ephemeral=True)
                     
-                    await _add_playlist_to_queue(
+                    added_results = await _add_playlist_to_queue(
                         vc, interaction.guild, interaction.channel, loop_getter,
                         playlist_tracks, interaction.user)
-
+                    
                     await _del_search()
+                    if not added_results:
+                        return await interaction.followup.send(embed=discord.Embed(
+                            description="❌ ไม่สามารถดึงเพลงจากเพลย์ลิสต์ได้เลย", color=discord.Color.red()), ephemeral=True)
                     return
                     
                 except ValueError as e:
@@ -1958,14 +1778,6 @@ def register(tree: app_commands.CommandTree, loop_getter):
                     elif error_msg == "SPOTIFY_SCRAPE_ERROR":
                         return await interaction.followup.send(embed=discord.Embed(
                             description="❌ ไม่สามารถดึงข้อมูลจาก Spotify ได้\n\n💡 ลองอีกครั้ง หรือค้นหาเพลงด้วยชื่อแทน",
-                            color=discord.Color.red()), ephemeral=True)
-                    elif error_msg == "SOUNDCLOUD_PLAYLIST_ERROR":
-                        return await interaction.followup.send(embed=discord.Embed(
-                            description="❌ ไม่สามารถโหลดเพลย์ลิสต์จาก SoundCloud ได้\n\n💡 อาจเป็นเพลย์ลิสต์ส่วนตัวหรือถูกลบ ลองอีกครั้ง",
-                            color=discord.Color.red()), ephemeral=True)
-                    elif error_msg == "BANDCAMP_PLAYLIST_ERROR":
-                        return await interaction.followup.send(embed=discord.Embed(
-                            description="❌ ไม่สามารถโหลดอัลบั้มจาก Bandcamp ได้\n\n💡 อาจเป็นอัลบั้มที่ซื้อเท่านั้นถึงจะฟังได้ หรือถูกลบ",
                             color=discord.Color.red()), ephemeral=True)
                     else:
                         return await interaction.followup.send(embed=discord.Embed(
@@ -2000,23 +1812,6 @@ def register(tree: app_commands.CommandTree, loop_getter):
                     elif error_msg == "SPOTIFY_UNSUPPORTED_LINK":
                         return await interaction.followup.send(embed=discord.Embed(
                             description="❌ ไม่รองรับลิงก์ Spotify นี้ (เช่น พอดแคสต์/Show)\n\n💡 ลองส่งลิงก์เพลงเดี่ยว/เพลย์ลิสต์/ศิลปิน หรือค้นหาด้วยชื่อเพลงแทน",
-                            color=discord.Color.red()), ephemeral=True)
-                    elif error_msg == "AGE_RESTRICTED":
-                        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        print(
-                            f"[{ts}] ⚠ /play — วิดีโอถูกจำกัดอายุ (age-restricted, ต้องการ cookies บัญชีที่ล็อกอิน)\n"
-                            f"  {'Query':<9}: {_trunc(query, 60)}"
-                        )
-                        return await interaction.followup.send(embed=discord.Embed(
-                            description="❌ เพลงนี้ถูกจำกัดอายุ (Age-restricted) เล่นไม่ได้\n\n💡 ลองค้นหาด้วยชื่อเพลงแทนการวาง URL",
-                            color=discord.Color.red()), ephemeral=True)
-                    elif error_msg == "SOUNDCLOUD_TRACK_ERROR":
-                        return await interaction.followup.send(embed=discord.Embed(
-                            description="❌ ไม่สามารถเล่นเพลงจาก SoundCloud นี้ได้\n\n💡 อาจเป็นเพลงส่วนตัว/ดาวน์โหลดเท่านั้น หรือถูกลบ",
-                            color=discord.Color.red()), ephemeral=True)
-                    elif error_msg == "BANDCAMP_TRACK_ERROR":
-                        return await interaction.followup.send(embed=discord.Embed(
-                            description="❌ ไม่สามารถเล่นเพลงจาก Bandcamp นี้ได้\n\n💡 อาจเป็นเพลงที่ซื้อเท่านั้นถึงจะฟังได้ หรือถูกลบ",
                             color=discord.Color.red()), ephemeral=True)
                     else:
                         raise
