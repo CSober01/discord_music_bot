@@ -12,6 +12,8 @@ import slashcommands
 
 load_dotenv()
 BOT_TOKEN = os.getenv("DISCORD_TOKEN")
+_guild_env = os.getenv("GUILD_ID")
+GUILD_ID = int(_guild_env) if _guild_env else None
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -24,10 +26,14 @@ slashcommands.register(bot.tree, lambda: bot.loop)
 async def on_ready():
     print(f"🔗 เชื่อมต่อแล้ว: {bot.user}\n")
 
-    # Sync แบบ global เสมอ — คำสั่งจะขึ้นทุกเซิร์ฟที่บอทอยู่ โดยไม่ต้องระบุ GUILD_ID
-    # (Discord อาจใช้เวลาสูงสุด ~1 ชั่วโมงในการกระจายคำสั่งใหม่ไปทุกเซิร์ฟ)
-    synced = await bot.tree.sync()
-    print(f"🌐 Synced {len(synced)} slash command(s) → Global (รอ Discord สูงสุด ~1 ชั่วโมง)")
+    if GUILD_ID:
+        guild = discord.Object(id=GUILD_ID)
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"⚡ Synced {len(synced)} slash command(s) → Guild {GUILD_ID} (มีผลทันที)")
+    else:
+        synced = await bot.tree.sync()
+        print(f"🌐 Synced {len(synced)} slash command(s) → Global (รอ Discord ~1 ชั่วโมง)")
 
     print("\nคำสั่งที่ register แล้ว:")
     for cmd in synced:

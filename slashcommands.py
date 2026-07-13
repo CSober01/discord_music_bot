@@ -9,13 +9,67 @@ import yt_dlp
 import asyncio
 import datetime
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import re
 import json
 import requests
+import html
+
+
+def _html_unescape(text: str) -> str:
+    return html.unescape(text) if text else text
+
+
+class _YtdlpSilentLogger:
+    """ปิดเสียง WARNING/ERROR ที่ yt-dlp พิมพ์เองออกจอ (เก็บไว้แค่ exception ให้โค้ดเราจัดการ/log เอง)"""
+    def debug(self, msg): pass
+    def warning(self, msg): pass
+    def error(self, msg): pass
+
 
 logging.getLogger("discord.player").setLevel(logging.ERROR)
 logging.getLogger("discord.voice_state").setLevel(logging.WARNING)
+
+# ─────────────────────────────────────────────
+#  Multi-guild file logging
+#  ทุก guild มีไฟล์ log แยกของตัวเอง (logs/guilds/<id>.log) เก็บรายละเอียดเต็ม
+#  console เห็นทุก guild ปนกัน จึงต้องเติม [ชื่อ guild] นำหน้าให้แยกออก
+# ─────────────────────────────────────────────
+
+_guild_loggers: dict[int, logging.Logger] = {}
+
+def get_guild_logger(guild_id: int) -> logging.Logger:
+    """คืน logger เฉพาะของ guild นี้ (cache ไว้ใช้ซ้ำ) — เขียนเข้าไฟล์ logs/guilds/<id>.log
+    ไฟล์หมุนอัตโนมัติเมื่อขนาดเกิน 5MB เก็บสำรองย้อนหลัง 3 ไฟล์ กันไฟล์บวมไม่จำกัด
+    """
+    if guild_id in _guild_loggers:
+        return _guild_loggers[guild_id]
+
+    os.makedirs("logs/guilds", exist_ok=True)
+    logger = logging.getLogger(f"guild.{guild_id}")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False  # กัน log ซ้ำขึ้น root logger/console
+
+    handler = RotatingFileHandler(
+        f"logs/guilds/{guild_id}.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+
+    _guild_loggers[guild_id] = logger
+    return logger
+
+
+def glog(guild_id: int, guild_name: str, message: str, level: str = "info", console: bool = True):
+    """เขียน log ของ guild นี้ — บันทึกรายละเอียดเต็มเข้าไฟล์เสมอ และ print ขึ้น console ถ้า console=True
+    (console มี [ชื่อ guild] นำหน้า กันสับสนตอนหลาย guild ทำงานพร้อมกัน)
+    ใช้ level="info"/"warning"/"error" ให้ตรงความรุนแรง เพื่อกรองในไฟล์ log ได้ภายหลัง
+    """
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    logger = get_guild_logger(guild_id)
+    getattr(logger, level, logger.info)(f"[{ts}] {message}")
+    if console:
+        print(f"[{guild_name or guild_id}] {message}")
 
 FFMPEG_OPTIONS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
@@ -23,7 +77,6 @@ FFMPEG_OPTIONS = {
 }
 
 DEFAULT_VOLUME = 0.10  # 10%
-MAX_QUEUE_DISPLAY = 12
 
 full_queues: dict[int, list] = {}
 now_playing_idx: dict[int, int] = {}
@@ -52,9 +105,10 @@ guild_volumes: dict[int, float] = {}
 # guild_changing = กำลัง skip/prev → play_next callback เก่าต้องข้ามไป
 guild_stopped:  set[int] = set()
 guild_changing: set[int] = set()
-guild_playlist_fetch: set[int] = set()  # guilds ที่กำลัง background fetch playlist
 
-MAX_QUEUE = 20
+MAX_QUEUE = 20   # เก็บเพลงใน memory สูงสุด 20 อัน (ย้อนกลับได้สูงสุด 20 เพลง)
+MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
+PLAYLIST_FETCH_CONCURRENCY = 4  # จำกัดจำนวน request พร้อมกันไปหา YouTube กันโดน rate-limit (HTTP 429)
 
 
 def get_full_queue(guild_id: int) -> list:
@@ -143,19 +197,10 @@ def get_ydl_options(include_playlist: bool = False) -> dict:
     opts = {
         "format": "bestaudio/best",
         "quiet": True,
-        "no_warnings": True,  # ปิด warnings
+        "no_warnings": True,
+        "logger": _YtdlpSilentLogger(),
         "default_search": "ytsearch",
         "source_address": "0.0.0.0",
-        "remote_components": ["ejs:github"],
-        "socket_timeout": 60,  # เพิ่ม timeout
-        "retries": 5,  # เพิ่ม retries
-        "fragment_retries": 5,
-        "skip_unavailable_fragments": True,
-        "extractor_args": {"youtube": {
-            "client_name": "web",  # ระบุ client อย่างชัดเจน เพื่อหลีกเลี่ยง web_safari
-            "player_skip": ["webpage", "configs"],
-            "skip": ["hls", "dash"],
-        }},
     }
     # ถ้า include_playlist เป็น True จะดึง playlist ทั้งหมด
     opts["noplaylist"] = not include_playlist
@@ -269,14 +314,13 @@ def _fetch_spotify_track_from_search(search_query: str):
         title = info.get("title", "Unknown")
         duration = f"{minutes}:{seconds:02d}"
         thumbnail = info.get("thumbnail")
+        
+        
     
     return url, title, duration, thumbnail
 
 
-    import html as _html
-    return _html.unescape(text).strip()
-
-def _scrape_spotify_playlist_html(playlist_id: str, kind: str, max_tracks: int = 50) -> list:
+def _scrape_spotify_playlist_html(playlist_id: str, kind: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> list:
     """Fallback: ดึง track+artist จากหน้า playlist/album ปกติด้วย regex
     เผื่อโครงสร้าง __NEXT_DATA__ เปลี่ยนไป
     """
@@ -307,7 +351,7 @@ def _scrape_spotify_playlist_html(playlist_id: str, kind: str, max_tracks: int =
 
     return tracks
 
-def get_spotify_playlist_tracks(playlist_id: str, max_tracks: int = 50) -> list:
+def get_spotify_playlist_tracks(playlist_id: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> list:
     """ดึง tracks จาก Spotify playlist/album ผ่านหน้าเว็บสาธารณะ (ไม่ใช้ API)
     Returns: list of dicts with keys: title, artist
     """
@@ -332,7 +376,7 @@ def get_spotify_playlist_tracks(playlist_id: str, max_tracks: int = 50) -> list:
 
     return None
 
-def get_spotify_artist_top_tracks(artist_id: str, max_tracks: int = 20) -> list:
+def get_spotify_artist_top_tracks(artist_id: str, max_tracks: int = 10) -> list:
     """ดึงเพลงนิยมสูงสุด (Top Tracks) ของศิลปินจากหน้า embed ของ Spotify (ไม่ใช้ API)
     หน้า embed ของศิลปินใช้โครงสร้าง trackList เดียวกับ playlist/album
     Returns: list of dicts with keys: title, artist
@@ -361,8 +405,8 @@ def is_playlist_url(query: str) -> bool:
         return "playlist" in query_lower or "album" in query_lower or "artist" in query_lower
     return False
 
-def fetch_playlist_tracks(query: str, max_tracks: int = 50) -> list:
-    """ดึง tracks จาก playlist (YouTube/Spotify) - สูงสุด 50 เพลงต่อ playlist
+def fetch_playlist_tracks(query: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> list:
+    """ดึง tracks จาก playlist (YouTube/Spotify) - สูงสุด 20 เพลงต่อ playlist
     Returns: list of dicts with keys: id, title, duration, url (ถ้าเป็น YouTube)
              หรือ title, artist (ถ้าเป็น Spotify)
     """
@@ -375,8 +419,7 @@ def fetch_playlist_tracks(query: str, max_tracks: int = 50) -> list:
         tracks = get_spotify_playlist_tracks(playlist_id, max_tracks)
         if not tracks:
             raise ValueError("SPOTIFY_SCRAPE_ERROR")
-        
-        print(f"🎵 Spotify Playlist: ดึงเพลง {len(tracks)} เพลง")
+
         return tracks
 
     # ตรวจสอบ Spotify Artist URL — ดึงเพลงนิยมสูงสุด (Top Tracks) จากหน้า embed
@@ -388,8 +431,7 @@ def fetch_playlist_tracks(query: str, max_tracks: int = 50) -> list:
         tracks = get_spotify_artist_top_tracks(artist_id, max_tracks)
         if not tracks:
             raise ValueError("SPOTIFY_SCRAPE_ERROR")
-        
-        print(f"🎵 Spotify Artist: ดึงเพลง {len(tracks)} เพลง")
+
         return tracks
     
     # Spotify URL รูปแบบอื่นที่ไม่รองรับ
@@ -442,7 +484,7 @@ def fetch_track(query: str):
             if track_info:
                 # ค้นหา track จาก YouTube ด้วย title + artist
                 search_query = f"{track_info['title']} {track_info['artist']}"
-                print(f"🎵 Spotify → YouTube: {search_query}")
+                print(f"  {'🎵 Spotify→YT':<13}: {track_info['title']} — {track_info['artist']}")
                 
                 opts = get_ydl_options(include_playlist=False)
                 opts["socket_timeout"] = 30
@@ -456,6 +498,8 @@ def fetch_track(query: str):
                             info = info["entries"][0]
                         duration = info.get("duration", 0)
                         minutes, seconds = divmod(int(duration), 60)
+                        
+                        
                         return info["url"], info.get("title", "Unknown"), f"{minutes}:{seconds:02d}", info.get("thumbnail")
                 except Exception as e:
                     print(f"YouTube search error: {str(e)}")
@@ -484,14 +528,14 @@ def fetch_track(query: str):
                 info = info["entries"][0]
             duration = info.get("duration", 0)
             minutes, seconds = divmod(int(duration), 60)
+            
+            
             return info["url"], info.get("title", "Unknown"), f"{minutes}:{seconds:02d}", info.get("thumbnail")
     except ValueError as e:
         if str(e) in ("PLAYLIST_DETECTED", "SPOTIFY_SCRAPE_ERROR", "SPOTIFY_NO_YOUTUBE_MATCH", "SPOTIFY_UNSUPPORTED_LINK"):
             raise
-        print(f"Fetch track error: {str(e)}")
         raise
     except Exception as e:
-        print(f"Fetch track error: {str(e)}")
         raise
 
 def search_tracks(query: str, limit: int = 5):
@@ -544,16 +588,12 @@ async def send_search_results(results, guild, channel, loop, loop_getter, reques
 
 
 def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queue_pos=None):
-    title_text = _trunc(title, 70)
     requester_str = f"ขอโดย: {requester.mention}" if requester else ""
     footer_parts = ["SEa Music  •  ใช้ปุ่มด้านล่างเพื่อควบคุม"]
     if queue_pos:
         footer_parts.append(queue_pos)
-    description_lines = [f"### 🎵  {title_text}", f"⏱ `{duration}`"]
-    if requester_str:
-        description_lines.append(requester_str)
     embed = discord.Embed(
-        description="\n".join(description_lines),
+        description=f"### 🎵  {title}\n⏱ `{duration}`　{requester_str}",
         color=0x1a1a2e,
     )
     embed.set_author(name="▶  Now Playing")
@@ -571,14 +611,13 @@ def make_done_embed():
 _QUEUE_TITLE_NORMAL  = 60
 _QUEUE_TITLE_PLAYING = 48
 
-def make_queue_embed(guild_id: int, current_idx: int = None, limit: int = MAX_QUEUE_DISPLAY):
+def make_queue_embed(guild_id: int, current_idx: int = None):
     q = get_full_queue(guild_id)
     idx = current_idx if current_idx is not None else get_now_idx(guild_id)
     if not q:
         return discord.Embed(description="📋 Queue ว่างเปล่า", color=discord.Color.blurple())
     lines = []
-    visible = q[:limit]
-    for i, t in enumerate(visible):
+    for i, t in enumerate(q):
         no = display_no(guild_id, i)
         if i == idx:
             t_cut = t[1][:_QUEUE_TITLE_PLAYING - 1] + "…" if len(t[1]) > _QUEUE_TITLE_PLAYING else t[1]
@@ -586,8 +625,6 @@ def make_queue_embed(guild_id: int, current_idx: int = None, limit: int = MAX_QU
         else:
             t_cut = t[1][:_QUEUE_TITLE_NORMAL - 1] + "…" if len(t[1]) > _QUEUE_TITLE_NORMAL else t[1]
             lines.append(f"`{no}.` {t_cut}")
-    if len(q) > limit:
-        lines.append(f"… และอีก {len(q) - limit} เพลง")
     embed = discord.Embed(title="📋 Queue เพลง", description="\n".join(lines), color=0x5865F2)
     embed.set_footer(text=f"กำลังเล่น #{display_no(guild_id, idx)} จาก {get_total_added(guild_id)} เพลง")
     return embed
@@ -599,15 +636,20 @@ def _trunc(text: str, n: int = MAX_TITLE_LOG) -> str:
 
 def log(action: str, interaction: discord.Interaction, extra: str = ""):
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = (
-        f"[{ts}]{action}|"
-        f"{_trunc(interaction.guild.name,20)}({interaction.guild.id})|"
-        f"#{_trunc(interaction.channel.name,16)}|"
-        f"{_trunc(interaction.user.display_name,20)}({interaction.user.id})"
-    )
+    lines = [
+        f"",
+        f"[{ts}] {action}",
+        f"  {'Guild':<9}: {_trunc(interaction.guild.name, 30)} ({interaction.guild.id})",
+        f"  {'Channel':<9}: #{_trunc(interaction.channel.name, 30)}",
+        f"  {'User':<9}: {_trunc(interaction.user.display_name, 30)} ({interaction.user.id})",
+    ]
     if extra:
-        line += f"|{extra}"
-    print(line)
+        key, _, val = extra.partition(": ")
+        lines.append(f"  {key:<9}: {val}")
+    full_block = "\n".join(lines)
+    print(full_block)
+    # เก็บรายละเอียดเต็มเข้าไฟล์ log ของ guild นี้ด้วย (ตรวจย้อนหลังได้แม้บอทรีสตาร์ท)
+    get_guild_logger(interaction.guild.id).info(full_block)
 
 async def check_in_voice(interaction: discord.Interaction) -> bool:
     vc = interaction.guild.voice_client
@@ -640,7 +682,6 @@ async def safe_respond(interaction: discord.Interaction, content=None, embed=Non
             pass
 
 async def _refresh_queue_msg(guild_id: int):
-    """อัพเดท queue list message ใน discord chat"""
     wmsg = queue_view_msgs.get(guild_id)
     if not wmsg:
         return
@@ -648,19 +689,6 @@ async def _refresh_queue_msg(guild_id: int):
         await wmsg.edit(embed=make_queue_embed(guild_id))
     except Exception:
         queue_view_msgs.pop(guild_id, None)
-
-async def _refresh_now_playing_msg(guild_id: int):
-    """อัพเดท now playing embed ให้เห็น queue count ที่เพิ่มขึ้น"""
-    view = active_views.get(guild_id)
-    if not view or not view.now_playing_msg or not view.current_track:
-        return
-    try:
-        _u, _ti, _du, _rq, *_th = view.current_track
-        _tn = _th[0] if _th else None
-        await view.now_playing_msg.edit(embed=make_now_playing_embed(
-            _ti, _du, _rq, _tn, _queue_pos_str(guild_id, get_now_idx(guild_id))))
-    except Exception:
-        pass
 
 async def _delete_queue_view_msg(guild_id: int):
     wmsg = queue_view_msgs.pop(guild_id, None)
@@ -687,81 +715,56 @@ async def _delete_queue_add_msgs(guild_id: int):
     await asyncio.gather(*(_safe_delete(m) for m in msgs))
 
 
-async def _delete_one_old_message(channel: discord.TextChannel):
-    """ลบข้อความ bot เก่าสุด 1 รายการจาก channel (queue-related)"""
-    try:
-        async for msg in channel.history(limit=50):
-            if msg.author.id != channel.guild.me.id:
-                continue
-            # ลบข้อความ queue-related
-            if msg.embeds and len(msg.embeds) > 0:
-                embed = msg.embeds[0]
-                desc = str(embed.description or "").lower()
-                if any(x in desc for x in ["เพิ่มใน queue", "queue", "เล่นเพลง", "⏹", "กำลังเล่น"]):
-                    try:
-                        await msg.delete()
-                        return True
-                    except Exception:
-                        pass
-    except Exception:
-        pass
-    return False
-
-
 async def cleanup_old_messages(bot=None):
-    """ลบข้อความเก่าทั้งหมดเมื่อบอทรีสตาร์ท
-    โดยดึงจาก channel history แทนเก็บ reference (ซึ่งหายไป เมื่อ disconnect)
+    """ลบ reference เก่าจาก memory ตอน startup (ไม่ scan channel history)
+    การลบข้อความจริงใน Discord จะเกิดตอนมีการใช้ /play หรือ /stop ในช่องนั้น
     """
     async def _safe_delete(m):
-        try: 
+        try:
             if m and hasattr(m, 'delete'):
                 await m.delete()
-        except Exception: 
+        except Exception:
             pass
-    
-    # ลบข้อความเก่าจาก dict ก่อน (กรณีที่ยังมี reference)
+
     all_msgs = []
     for guild_msgs in queue_add_msgs.values():
         all_msgs.extend(guild_msgs.values())
     queue_add_msgs.clear()
-    
     all_msgs.extend(queue_done_msgs.values())
     queue_done_msgs.clear()
-    
     all_msgs.extend(queue_view_msgs.values())
     queue_view_msgs.clear()
-    
+
     if all_msgs:
-        print(f"🧹 ลบข้อความเก่า {len(all_msgs)} รายการจาก memory...")
+        print(f"🧹 ลบ reference เก่า {len(all_msgs)} รายการจาก memory")
         await asyncio.gather(*(_safe_delete(m) for m in all_msgs), return_exceptions=True)
-    
-    # ลบจาก channel history เพื่อทำความสะอาดหลังจาก disconnect
-    if bot:
-        deleted_count = 0
-        for guild in bot.guilds:
-            for channel in guild.text_channels:
-                if not channel.permissions_for(guild.me).send_messages:
-                    continue
-                try:
-                    async for msg in channel.history(limit=100):
-                        if msg.author != guild.me:
-                            continue
-                        # ลบข้อความที่เป็น queue/done messages
-                        if msg.embeds and len(msg.embeds) > 0:
-                            embed = msg.embeds[0]
-                            # ลบข้อความ queue-related
-                            if any(x in str(embed.description or "").lower() for x in 
-                                   ["เพิ่มใน queue", "queue", "หยุดเพลง", "⏹"]):
-                                try:
-                                    await msg.delete()
-                                    deleted_count += 1
-                                except Exception:
-                                    pass
-                except Exception:
-                    pass
-        
-        if deleted_count > 0:
-            print(f"🧹 ลบข้อความเก่า {deleted_count} รายการจาก channel history")
+
+
+async def _cleanup_channel(channel: discord.TextChannel):
+    """ลบข้อความเก่าของบอทใน channel นี้ — เรียกตอนมีการใช้ /play หรือ /stop
+    ลบเฉพาะ: "เพิ่มใน Queue", "เล่นเพลงครบ Queue", "หยุดเพลง"
+    ไม่ลบ: now playing embed (▶ Now Playing) และ queue list
+    """
+    _DELETE_KEYWORDS = ["เพิ่มใน queue", "เล่นเพลงครบ queue", "หยุดเพลงและออกจาก"]
+    _KEEP_KEYWORDS   = ["now playing", "▶", "queue เพลง"]
+    try:
+        async for msg in channel.history(limit=50):
+            if msg.author != channel.guild.me:
+                continue
+            if not msg.embeds:
+                continue
+            embed = msg.embeds[0]
+            desc   = str(embed.description or "").lower()
+            author = str(embed.author.name or "").lower() if embed.author else ""
+            text   = desc + " " + author
+            # ข้ามถ้าเป็น now playing หรือ queue list
+            if any(k in text for k in _KEEP_KEYWORDS):
+                continue
+            if any(k in text for k in _DELETE_KEYWORDS):
+                try: await msg.delete()
+                except Exception: pass
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────
@@ -778,10 +781,30 @@ class QueueDoneView(discord.ui.View):
 
     @discord.ui.button(emoji="🔍", label="ค้นหาเพลง", style=discord.ButtonStyle.primary)
     async def search_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.voice:
+            return await safe_respond(
+                interaction,
+                embed=discord.Embed(
+                    description="❌ กรุณาเข้า Voice Channel ก่อน",
+                    color=discord.Color.red()),
+                ephemeral=True)
+
+        # ส่ง modal ทันที ไม่มี await ใดๆ คั่นกลาง — กัน interaction token หมดอายุ (3 วิ)
+        # เรื่องเชื่อมต่อ/ย้ายห้องเสียง ให้ SearchModal.on_submit() จัดการเองตอน submit (เหมือน /play)
         loop = self.loop_getter()
-        modal = SearchModal(self.guild, self.channel, loop, self.loop_getter,
-                            done_msg_ref=self.done_msg_ref)
-        await interaction.response.send_modal(modal)
+        try:
+            modal = SearchModal(self.guild, self.channel, loop, self.loop_getter,
+                                done_msg_ref=self.done_msg_ref)
+            await interaction.response.send_modal(modal)
+        except Exception as e:
+            log("🔍 SEARCH BTN ERROR", interaction, str(e))
+            try:
+                await safe_respond(
+                    interaction,
+                    embed=discord.Embed(description="❌ เกิดข้อผิดพลาดในการเปิดหน้าต่างค้นหา", color=discord.Color.red()),
+                    ephemeral=True)
+            except Exception:
+                pass
 
     @discord.ui.button(emoji="⏹", label="หยุดและออก", style=discord.ButtonStyle.danger)
     async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -897,9 +920,29 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                     await _send_error("❌ กรุณาเข้า Voice Channel ก่อน")
                     return
                 vc = await interaction.user.voice.channel.connect()
+            elif interaction.user.voice and interaction.user.voice.channel != vc.channel:
+                try:
+                    await vc.move_to(interaction.user.voice.channel)
+                except Exception as move_error:
+                    log("🔍 SEARCH MOVE ERROR", interaction, str(move_error))
+                    await _ack_done()
+                    await _send_error("❌ ไม่สามารถย้ายบอทไป Voice Channel ของคุณได้")
+                    return
+
+            if not vc:
+                await _ack_done()
+                await _send_error("❌ เกิดปัญหาในการเชื่อมต่อ Voice Channel")
+                return
 
             # ตรวจสอบว่าเป็น URL หรือไม่
             is_url = query_str.startswith("http://") or query_str.startswith("https://")
+
+            # ตรวจ URL scheme ผิด เช่น ttps:// หรือ htp://
+            looks_like_url = re.search(r'^[a-zA-Z]{2,10}://', query_str)
+            if looks_like_url and not is_url:
+                await _ack_done()
+                await _send_error(f"❌ URL ไม่ถูกต้อง (`{query_str[:40]}`)\n💡 ลองวาง URL ใหม่อีกครั้ง")
+                return
 
             # ตรวจสอบว่าเป็น playlist หรือไม่
             if is_url and is_playlist_url(query_str):
@@ -918,9 +961,10 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                         vc, self.guild, self.channel, self.loop_getter,
                         playlist_tracks, interaction.user)
                     
-                    added_titles = [(display_no(self.guild.id, idx), title, idx)
-                                    for idx, title in added_results]
-                    await _send_playlist_added_summary(self.guild.id, self.channel, interaction.user, added_titles)
+                    if not added_results:
+                        await _send_error("❌ ไม่สามารถดึงเพลงจากเพลย์ลิสต์ได้เลย")
+                    # เพลงแรกเล่นทันทีแล้ว (เห็นจาก Now Playing embed)
+                    # เพลงที่เหลือกำลังโหลดในพื้นหลัง จะมีข้อความสรุปตามมาเอง
                     return
                     
                 except ValueError as e:
@@ -975,7 +1019,8 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                                       self.loop_getter, interaction.user,
                                       done_msg_ref=self.done_msg_ref)
 
-        except Exception:
+        except Exception as e:
+            log("🔍 SEARCH SUBMIT ERROR", interaction, str(e))
             await _ack_done()
             await _send_error("❌ เกิดข้อผิดพลาด กรุณาลองใหม่")
 
@@ -1062,6 +1107,13 @@ class SearchResultView(discord.ui.View):
                     description="❌ กรุณาเข้า Voice Channel ก่อน", color=discord.Color.red()), ephemeral=True)
                 return
             vc = await interaction.user.voice.channel.connect()
+        elif interaction.user.voice and interaction.user.voice.channel != vc.channel:
+            try:
+                await vc.move_to(interaction.user.voice.channel)
+            except Exception:
+                await interaction.followup.send(embed=discord.Embed(
+                    description="❌ ไม่สามารถย้ายบอทไป Voice Channel ของคุณได้", color=discord.Color.red()), ephemeral=True)
+                return
 
         await self._clear_done()
         # Serial loop: await ทีละอัน เพื่อป้องกัน race condition บน index
@@ -1106,6 +1158,15 @@ class SearchResultView(discord.ui.View):
                 self._selecting = False
                 return
             vc = await interaction.user.voice.channel.connect()
+        elif interaction.user.voice and interaction.user.voice.channel != vc.channel:
+            try:
+                await vc.move_to(interaction.user.voice.channel)
+            except Exception:
+                await interaction.followup.send(embed=discord.Embed(
+                    description="❌ ไม่สามารถย้ายบอทไป Voice Channel ของคุณได้", color=discord.Color.red()), ephemeral=True)
+                self._selected.discard(idx)
+                self._selecting = False
+                return
 
         await self._clear_done()
         try:
@@ -1146,10 +1207,7 @@ def fetch_track_from_result(r: dict):
     url = f"https://www.youtube.com/watch?v={video_id}"
     return fetch_track(url)
 
-# _queue_locks  = lock เบา ครอบแค่ add+play เพื่อป้องกัน race บน vc.play()
-#                 ใช้ร่วมกันระหว่างทุก request (เพลงเดี่ยว + playlist)
-# playlist แต่ละ request สร้าง asyncio.Lock() ใหม่ของตัวเองใน _fetch_and_add_playlist_track
-# ทำให้ playlist ต่างคนไม่ block กัน และเพลงเดี่ยวก็ไม่ถูก block รอนาน
+# _queue_locks = lock เบา ครอบแค่ add+play เพื่อป้องกัน race บน vc.play()
 _queue_locks: dict[int, asyncio.Lock] = {}
 
 def get_queue_lock(guild_id: int) -> asyncio.Lock:
@@ -1158,170 +1216,239 @@ def get_queue_lock(guild_id: int) -> asyncio.Lock:
     return _queue_locks[guild_id]
 
 
-async def _fetch_and_add_playlist_track(vc, guild, channel, loop_getter, track_info, requester,
-                                        playlist_lock: asyncio.Lock = None):
-    """ไม่ได้ใช้อีกแล้ว — เหลือไว้เพื่อ backward compat เท่านั้น"""
-    pass
+
+
+def _fetch_playlist_track_sync(track_info: dict, guild_id: int, guild_name: str):
+    """ดึงข้อมูล track เดียวจาก playlist entry (sync, รันใน thread)
+    ถ้าดึงจาก URL/ID ตรงไม่ได้ (เช่น age-restricted, bot-check, private, ถูกลบ)
+    จะลองค้นหาด้วยชื่อเพลงแทน เพื่อหาวิดีโอทดแทนที่เข้าถึงได้ แทนที่จะข้ามเพลงไปเฉยๆ
+    รายละเอียดเต็ม (ชื่อเพลง/เหตุผล) บันทึกเข้าไฟล์ log ของ guild เท่านั้น (console=False)
+    เพราะ console จะโชว์แค่ตัวเลขความคืบหน้ารวมผ่าน _PlaylistFetchProgress แทน
+    คืนค่า (result, outcome) — outcome: "direct" | "fallback_ok" | "fallback_fail"
+    """
+    orig_title = track_info.get("title", "Unknown")
+
+    def _reason(e: Exception) -> str:
+        # ตัดข้อความ error ยาวๆ ของ yt-dlp เหลือแค่บรรทัดแรกสั้นๆ พอให้รู้สาเหตุ
+        first_line = str(e).splitlines()[0] if str(e) else str(e)
+        return _trunc(first_line.replace("ERROR: [youtube] ", ""), 60)
+
+    try:
+        if "url" in track_info:
+            return fetch_track(track_info["url"]), "direct"
+
+        elif "id" in track_info and track_info.get("id"):
+            yt_url = f"https://www.youtube.com/watch?v={track_info['id']}"
+            try:
+                return fetch_track(yt_url), "direct"
+            except Exception as e:
+                glog(guild_id, guild_name,
+                     f"⚠ ดึงตรงไม่ได้ [{_reason(e)}] — ลองหาแทน: {_trunc(orig_title, 40)}",
+                     level="warning", console=False)
+                try:
+                    result = fetch_track(orig_title)
+                    found_title = result[1] if result else "?"
+                    glog(guild_id, guild_name,
+                         f"✅ ทดแทนสำเร็จ: {_trunc(orig_title, 35)} → {_trunc(found_title, 35)}",
+                         level="info", console=False)
+                    return result, "fallback_ok"
+                except Exception as e2:
+                    glog(guild_id, guild_name,
+                         f"❌ ข้ามเพลง [{_reason(e2)}]: {_trunc(orig_title, 40)}",
+                         level="error", console=False)
+                    return None, "fallback_fail"
+
+        elif "artist" in track_info:
+            search_query = f"{track_info['title']} {track_info['artist']}"
+            glog(guild_id, guild_name,
+                 f"🎵 Spotify→YT: {_trunc(track_info['title'], 40)} — {_trunc(track_info['artist'], 30)}",
+                 level="info", console=False)
+            return _fetch_spotify_track_from_search(search_query), "direct"
+
+        return None, "fallback_fail"
+    except Exception as e:
+        glog(guild_id, guild_name,
+             f"❌ ข้ามเพลง [{_reason(e)}]: {_trunc(orig_title, 40)}",
+             level="error", console=False)
+        return None, "fallback_fail"
+
+
+class _PlaylistFetchProgress:
+    """เก็บสถานะความคืบหน้าการดึงเพลงจาก playlist ใช้ร่วมกันระหว่างช่วงหาเพลงแรก (step1)
+    และช่วงดึงที่เหลือใน background (_bg_fetch_rest) — รวมเป็นตัวนับเดียวกันตลอดทั้ง playlist
+    เมธอด record() ต้องถูกเรียกจาก event loop thread เท่านั้น (หลัง await เสร็จ) จึงไม่ต้องใช้ lock
+    console จะเห็นแค่ตัวเลข ไม่มีชื่อเพลง — รายละเอียดเต็มอยู่ในไฟล์ log ของ guild แทน
+    """
+    def __init__(self, guild_id: int, guild_name: str, total: int):
+        self.guild_id = guild_id
+        self.guild_name = guild_name
+        self.total = total
+        self.done = 0
+        self.direct_ok = 0
+        self.fallback_attempts = 0
+        self.fallback_ok = 0
+        self.skipped = 0
+
+    def _p(self, msg: str):
+        print(f"[{self.guild_name}] {msg}")
+
+    def record(self, outcome: str):
+        if outcome == "direct":
+            self.done += 1
+            self.direct_ok += 1
+            self._p(f"กำลังเพิ่มเพลง {self.done}/{self.total}")
+        elif outcome == "fallback_ok":
+            self.done += 1
+            self.fallback_attempts += 1
+            self.fallback_ok += 1
+            self._p(f"ดึงตรงไม่ได้ {self.fallback_attempts}")
+            self._p(f"ทดแทนแล้ว {self.fallback_ok}/{self.fallback_attempts}")
+            self._p(f"กำลังเพิ่มเพลง {self.done}/{self.total}")
+        else:  # fallback_fail
+            self.fallback_attempts += 1
+            self.skipped += 1
+            self._p(f"ดึงตรงไม่ได้ {self.fallback_attempts}")
+            self._p(f"ทดแทนแล้ว {self.fallback_ok}/{self.fallback_attempts}")
+
+    def print_summary(self):
+        self._p(f"เพิ่มเพลงครบ {self.done}/{self.total} "
+                f"(ตรงสำเร็จ {self.direct_ok} · ทดแทน {self.fallback_ok}/{self.fallback_attempts} · ข้ามจริง {self.skipped})")
 
 
 async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_tracks, requester):
-    """เพิ่ม playlist โดย:
-    1. โหลดแค่เพลงแรก
-    2. เล่นเพลงแรกทันที (ไม่เพิ่มเข้า queue)
-    3. ในพื้นหลัง ค่อยโหลดเพลง 2-21 ทั้งหมด แล้วเพิ่มเข้า queue ทีเดียว
-    คืนค่า list of (track_idx, title)
+    """เพิ่ม playlist เข้า queue โดยเล่นเพลงแรกทันทีที่ดึงสำเร็จ (ไม่ต้องรอทั้งเพลย์ลิสต์)
+    ถ้าเพลงแรกดึงไม่สำเร็จ (เช่น age-restricted) จะลองเพลงถัดไปเป็น "เพลงเริ่ม" แทนอัตโนมัติ
+    ส่วนที่เหลือจะถูกดึงและเพิ่มเข้าคิวต่อใน background task (_bg_fetch_rest)
+    คืนค่า list of (track_idx, title) — มีแค่เพลงแรกที่เล่นทันที (เพลงที่เหลือมาทีหลังผ่าน summary แยก)
     """
-    async def _fetch_one(track_info):
-        try:
-            if "url" in track_info:
-                return await asyncio.to_thread(fetch_track, track_info["url"])
-            elif "id" in track_info and track_info.get("id"):
-                yt_url = f"https://www.youtube.com/watch?v={track_info['id']}"
-                return await asyncio.to_thread(fetch_track, yt_url)
-            elif "artist" in track_info:
-                search_query = f"{track_info['title']} {track_info['artist']}"
-                print(f"🎵 Spotify Playlist → YouTube: {search_query}")
-                return await asyncio.to_thread(_fetch_spotify_track_from_search, search_query)
-            else:
-                return None
-        except Exception as e:
-            print(f"Error fetching track from playlist: {str(e)}")
-            return None
-
-    # ── step 1: โหลดเพลงแรก ──
     if not playlist_tracks:
         return []
-    
-    first_result = await _fetch_one(playlist_tracks[0])
-    if not first_result:
-        return []
-    
-    url, title, duration, thumbnail = first_result
-    first_track = (url, title, duration, requester, thumbnail)
-    remaining_tracks = playlist_tracks[1:]
 
-    # ── step 2: เล่นเพลงแรก + add เข้า queue ──
-    first_was_empty = not (vc.is_playing() or vc.is_paused())
-    
-    # เพิ่มเพลงแรกเข้า queue ก่อนเล่น
+    progress = _PlaylistFetchProgress(guild.id, guild.name, len(playlist_tracks))
+
+    # ── step 1: ดึงเพลงแรกก่อน (ทีละเพลง) เพื่อเริ่มเล่นให้เร็วที่สุด ──
+    # ถ้าเพลงไหนดึงไม่ได้ (เช่น age-restricted) ข้ามไปลองเพลงถัดไปเป็น "เพลงเริ่ม" แทน
+    first_result = None
+    remaining_tracks = list(playlist_tracks)
+
+    while remaining_tracks:
+        candidate = remaining_tracks.pop(0)
+        result, outcome = await asyncio.to_thread(_fetch_playlist_track_sync, candidate, guild.id, guild.name)
+
+        if guild.id in guild_stopped:
+            print(f"[{guild.name}] 🛑 Playlist fetch ยกเลิก — ถูก stop ระหว่าง fetch")
+            return []
+
+        progress.record(outcome)
+
+        if result:
+            first_result = result
+            break
+        # ดึงไม่สำเร็จ → ข้ามไปลองเพลงถัดไปเป็นเพลงเริ่มแทน (candidate ถูก pop ทิ้งแล้ว ไม่กลับมาลองอีก)
+
+    if not first_result:
+        progress.print_summary()
+        return []  # ดึงไม่สำเร็จสักเพลงเลยในทั้งเพลย์ลิสต์
+
+    # ── step 2: เพิ่มเพลงแรกเข้าคิว + เล่นทันที ──
+    url, title, duration, thumbnail = first_result
     async with get_queue_lock(guild.id):
-        track_idx = add_to_queue(guild.id, first_track)
-    
-    if first_was_empty:
-        source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
-        loop = loop_getter()
-        view = PlayerView(guild, channel, loop, current_track=first_track, current_idx=track_idx)
-        active_views[guild.id] = view
-        vc.play(source, after=lambda e, _t=first_track, _ti=track_idx:
-                asyncio.run_coroutine_threadsafe(
-                    play_next(guild, channel, loop, current_track=_t, current_idx=_ti, error=e), loop))
-        embed = make_now_playing_embed(title, duration, requester, thumbnail, "")
-        msg = await channel.send(embed=embed, view=view)
-        view.now_playing_msg = msg
+        track = (url, title, duration, requester, thumbnail)
+        track_idx = add_to_queue(guild.id, track)
+        first_was_empty = not (vc.is_playing() or vc.is_paused())
+
+        if first_was_empty:
+            set_now_idx(guild.id, track_idx)
+            _trim_queue(guild.id)
+            track_idx = get_now_idx(guild.id)
+            source = discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
+            loop = loop_getter()
+            view = PlayerView(guild, channel, loop, current_track=track, current_idx=track_idx, loop_getter=loop_getter)
+            active_views[guild.id] = view
+            vc.play(source, after=lambda e, _t=track, _ti=track_idx:
+                    asyncio.run_coroutine_threadsafe(
+                        play_next(guild, channel, loop, current_track=_t, current_idx=_ti, error=e), loop))
+            embed = make_now_playing_embed(title, duration, requester, thumbnail,
+                                           _queue_pos_str(guild.id, track_idx))
+            msg = await channel.send(embed=embed, view=view)
+            view.now_playing_msg = msg
+        else:
+            await _refresh_queue_msg(guild.id)
+            old_view = active_views.get(guild.id)
+            if old_view and old_view.now_playing_msg and old_view.current_track:
+                _u, _ti, _du, _rq, *_th = old_view.current_track
+                _tn = _th[0] if _th else None
+                try:
+                    await old_view.now_playing_msg.edit(embed=make_now_playing_embed(
+                        _ti, _du, _rq, _tn, _queue_pos_str(guild.id, get_now_idx(guild.id))))
+                except Exception:
+                    pass
+
+    # ── step 3: ดึงเพลงที่เหลือ (ถ้ามี) แบบ concurrent ใน background — ไม่บล็อกการเล่นเพลงแรก ──
+    if remaining_tracks:
+        asyncio.create_task(_bg_fetch_rest(guild, channel, remaining_tracks, requester, progress))
     else:
-        # มี queue อยู่แล้ว — เพลงแรกเพิ่งถูก add ด้านบน ก็ update queue message ได้เลย
+        progress.print_summary()
+
+    return [(track_idx, title)]
+
+
+async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_PlaylistFetchProgress"):
+    """ดึงเพลงที่เหลือของ playlist (หลังเพลงแรก) แบบ concurrent (จำกัดจำนวนพร้อมกัน) ในพื้นหลัง
+    แล้วเพิ่มเข้าคิวทั้งหมดพร้อมกันด้วย queue_lock ครั้งเดียว (atomic)
+    จำกัด concurrency ด้วย Semaphore กัน YouTube rate-limit (429) ตอน playlist ยาวๆ
+    progress: ตัวนับความคืบหน้าเดียวกับที่ใช้ใน step1 ของ _add_playlist_to_queue (นับรวมทั้ง playlist)
+    """
+    sem = asyncio.Semaphore(PLAYLIST_FETCH_CONCURRENCY)
+
+    async def _fetch_one(track_info):
+        async with sem:
+            result, outcome = await asyncio.to_thread(_fetch_playlist_track_sync, track_info, guild.id, guild.name)
+            progress.record(outcome)
+            return result
+
+    fetch_results = await asyncio.gather(*(_fetch_one(t) for t in rest_tracks))
+    progress.print_summary()
+
+    if guild.id in guild_stopped:
+        print(f"[{guild.name}] 🛑 Playlist bg fetch ยกเลิก — ถูก stop ระหว่าง fetch")
+        return
+
+    fetched = [(url, title, duration, thumbnail)
+               for r in fetch_results if r is not None
+               for url, title, duration, thumbnail in [r]]
+
+    if not fetched:
+        return
+
+    added = []
+    async with get_queue_lock(guild.id):
+        for url, title, duration, thumbnail in fetched:
+            track = (url, title, duration, requester, thumbnail)
+            track_idx = add_to_queue(guild.id, track)
+            added.append((track_idx, title))
         await _refresh_queue_msg(guild.id)
 
-    # ── step 3: spawn background task ไปโหลดเพลงที่เหลือ ──
-    if remaining_tracks:
-        asyncio.create_task(_prefetch_playlist_background(
-            guild, channel, loop_getter, remaining_tracks, requester))
+    added_titles = [(display_no(guild.id, idx), title, idx) for idx, title in added]
+    await _send_playlist_added_summary(guild.id, channel, requester, added_titles)
 
-    return []
-
-
-async def _prefetch_playlist_background(guild, channel, loop_getter, remaining_tracks, requester):
-    """โหลดเพลงที่เหลือในพื้นหลัง แล้วเพิ่มทั้งหมดเข้า queue ทีเดียว"""
-    guild_playlist_fetch.add(guild.id)
-    print(f"🔄 Background fetch: เริ่มโหลด {len(remaining_tracks)} เพลง...")
-    try:
-        async def _fetch_one(track_info):
-            try:
-                if "url" in track_info:
-                    return await asyncio.to_thread(fetch_track, track_info["url"])
-                elif "id" in track_info and track_info.get("id"):
-                    yt_url = f"https://www.youtube.com/watch?v={track_info['id']}"
-                    return await asyncio.to_thread(fetch_track, yt_url)
-                elif "artist" in track_info:
-                    search_query = f"{track_info['title']} {track_info['artist']}"
-                    return await asyncio.to_thread(_fetch_spotify_track_from_search, search_query)
-                else:
-                    return None
-            except Exception as e:
-                print(f"❌ Background prefetch error: {str(e)}")
-                return None
-
-        # โหลดทีละเพลง (sequential) และเพิ่มเข้า queue ทันที
-        success_count = 0
-        all_added_indices = []
-        
-        for idx, track_info in enumerate(remaining_tracks, 1):
-            # check guild ยังมี queue - ถ้า user stop/clear
-            if guild.id not in full_queues or len(get_full_queue(guild.id)) == 0:
-                print(f"🛑 Background fetch ยกเลิก - guild queue ถูกล้าง")
-                break
-            
-            result = await _fetch_one(track_info)
-            if result:
-                url, title, duration, thumbnail = result
-                track = (url, title, duration, requester, thumbnail)
-                
-                # เพิ่มเข้า queue เงียบ ๆ (ไม่แสดงข้อความ)
-                async with get_queue_lock(guild.id):
-                    idx_queued = add_to_queue(guild.id, track)
-                    all_added_indices.append((idx_queued, title))
-                    # update queue message ทุกเพลง (discord chat)
-                    await _refresh_queue_msg(guild.id)
-                    # update now playing embed ทุก 5 เพลง (เครื่องเล่น)
-                    if success_count % 5 == 0:
-                        await _refresh_now_playing_msg(guild.id)
-                
-                success_count += 1
-                print(f"✅ โหลด {idx}/{len(remaining_tracks)}: {_trunc(title, 50)}")
-            else:
-                print(f"⚠️ โหลดไม่ได้ {idx}/{len(remaining_tracks)}")
-            
-            # delay 0.5 วิ เพื่อหลีกเลี่ยง YouTube bot detection
-            await asyncio.sleep(0.5)
-        
-        # แสดงสรุป + ส่งข้อความเดียว เมื่อโหลดครบ
-        if all_added_indices:
-            async with get_queue_lock(guild.id):
-                await _refresh_queue_msg(guild.id)
-            
-            # ส่งข้อความสรุป
-            display_info = [(display_no(guild.id, idx), title, idx) 
-                           for idx, title in all_added_indices]
-            await _send_playlist_added_summary(guild.id, channel, requester, display_info)
-            print(f"📋 เพิ่มเข้า Queue {len(all_added_indices)} เพลง")
-        
-        print(f"🎵 Background fetch สำเร็จ: {success_count}/{len(remaining_tracks)} เพลง")
-    finally:
-        guild_playlist_fetch.discard(guild.id)
-
-
-
-async def _add_and_play(vc, guild, channel, loop_getter, track, notify: bool = True):
+async def _add_and_play(vc, guild, channel, loop_getter, track):
     """เพิ่มเพลงเข้า queue และเล่นถ้าว่าง
-    notify=False ใช้ตอนเพิ่มหลายเพลงพร้อมกัน (เช่น playlist) เพื่อไม่ให้ spam ข้อความ "เพิ่มใน Queue #"
     คืนค่า (track_idx, title) — track_idx คือลำดับจริงในคิว (0-based)
     """
     async with get_queue_lock(guild.id):
         track_idx = add_to_queue(guild.id, track)
-        url, title, duration, requester, *_thumb = track
-        thumbnail = _thumb[0] if _thumb else None
+        url, title, duration, requester, thumbnail, *_rest = track
 
         if vc.is_playing() or vc.is_paused():
             pos = display_no(guild.id, track_idx)
-            if notify:
-                short_title = title if len(title) <= 50 else title[:47] + "…"
-                pub_msg = await channel.send(embed=discord.Embed(
-                    description=f"📋 เพิ่มใน Queue **#{pos}**\n🎵 {short_title}  |  ขอโดย: {requester.mention}",
-                    color=0x1a1a2e))
-                queue_add_msgs.setdefault(guild.id, {})[track_idx] = pub_msg
+            short_title = title if len(title) <= 50 else title[:47] + "…"
+            pub_msg = await channel.send(embed=discord.Embed(
+                description=f"📋 เพิ่มใน Queue **#{pos}**\n🎵 {short_title}  |  ขอโดย: {requester.mention}",
+                color=0x1a1a2e))
+            queue_add_msgs.setdefault(guild.id, {})[track_idx] = pub_msg
             await _refresh_queue_msg(guild.id)
-            # อัปเดต footer ของ now playing embed
             old_view = active_views.get(guild.id)
             if old_view and old_view.now_playing_msg and old_view.current_track:
                 _u, _ti, _du, _rq, *_th = old_view.current_track
@@ -1337,7 +1464,7 @@ async def _add_and_play(vc, guild, channel, loop_getter, track, notify: bool = T
             source = discord.PCMVolumeTransformer(
                 discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
             loop = loop_getter()
-            view = PlayerView(guild, channel, loop, current_track=track, current_idx=track_idx)
+            view = PlayerView(guild, channel, loop, current_track=track, current_idx=track_idx, loop_getter=loop_getter)
             active_views[guild.id] = view
             _g, _ch, _lp, _t, _ti = guild, channel, loop, track, track_idx
             vc.play(source, after=lambda e, g=_g, ch=_ch, lp=_lp, t=_t, ti=_ti:
@@ -1356,9 +1483,6 @@ async def _send_playlist_added_summary(guild_id: int, channel, requester, titles
     titles: list of (display_no, title, list_idx) — display_no คือเลขลำดับสะสมที่จะแสดงผล,
             list_idx คือตำแหน่งจริงในคิว (0-based) ของเพลงนั้น
     เก็บ reference ไว้ใน queue_add_msgs โดยใช้ list_idx ของ "เพลงสุดท้าย" ในสรุปเป็นคีย์
-    เพื่อให้ข้อความสรุปถูกลบโดยอัตโนมัติพร้อมกับตอนที่เพลงสุดท้ายนั้นเริ่มเล่นจริง
-    (ใช้ระบบลบตาม index เดียวกับข้อความ "เพิ่มใน Queue #" ของเพลงเดี่ยว — ปลอดภัยเพราะ
-    เพลงจาก playlist ถูกเพิ่มด้วย notify=False จึงไม่มี key ชนกัน)
     """
     if not titles:
         return
@@ -1393,8 +1517,7 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
 
     q = get_full_queue(view.guild.id)
     track = q[idx]
-    url, title, duration, requester, *_thumb = track
-    thumbnail = _thumb[0] if _thumb else None
+    url, title, duration, requester, thumbnail, *_rest = track
     vc = view.guild.voice_client
 
     view.current_track = track
@@ -1434,7 +1557,6 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
         msg = await view.channel.send(embed=embed, view=view)
         view.now_playing_msg = msg
 
-    view._refresh_button_state()
     await _refresh_queue_msg(view.guild.id)
 
 
@@ -1443,37 +1565,16 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
 # ─────────────────────────────────────────────
 
 class PlayerView(discord.ui.View):
-    def __init__(self, guild, channel, loop, current_track=None, current_idx=None):
+    def __init__(self, guild, channel, loop, current_track=None, current_idx=None, loop_getter=None):
         super().__init__(timeout=None)
         self.guild = guild
         self.channel = channel
         self.loop = loop
+        self.loop_getter = loop_getter or (lambda: loop)
         self.current_track = current_track
         self.current_idx = current_idx if current_idx is not None else get_now_idx(guild.id)
         self.now_playing_msg: discord.Message | None = None
         self.volume_level: float = get_guild_volume(guild.id)
-        self._refresh_button_state()
-
-    def _refresh_button_state(self):
-        prev_btn = next((child for child in self.children if isinstance(child, discord.ui.Button) and getattr(child, "emoji", None) == "⏮"), None)
-        pause_btn = next((child for child in self.children if isinstance(child, discord.ui.Button) and getattr(child, "emoji", None) == "⏸"), None)
-        skip_btn = next((child for child in self.children if isinstance(child, discord.ui.Button) and getattr(child, "emoji", None) == "⏭"), None)
-        stop_btn = next((child for child in self.children if isinstance(child, discord.ui.Button) and getattr(child, "emoji", None) == "⏹"), None)
-
-        if prev_btn:
-            prev_btn.disabled = get_now_idx(self.guild.id) <= 0
-        if skip_btn:
-            skip_btn.disabled = get_now_idx(self.guild.id) + 1 >= len(get_full_queue(self.guild.id))
-        if pause_btn:
-            vc = self.guild.voice_client
-            if vc and vc.is_paused():
-                pause_btn.emoji = "▶️"
-            elif vc and vc.is_playing():
-                pause_btn.emoji = "⏸"
-            else:
-                pause_btn.emoji = "⏸"
-        if stop_btn:
-            stop_btn.disabled = not bool(self.guild.voice_client and (self.guild.voice_client.is_playing() or self.guild.voice_client.is_paused()))
 
     async def delete_now_playing(self):
         if self.now_playing_msg:
@@ -1492,7 +1593,6 @@ class PlayerView(discord.ui.View):
         try: await interaction.response.defer()
         except Exception: pass
         await _do_play_at_idx(self, idx - 1)
-        self._refresh_button_state()
 
     @discord.ui.button(emoji="⏸", style=discord.ButtonStyle.secondary, row=0)
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1503,14 +1603,12 @@ class PlayerView(discord.ui.View):
             vc.pause()
             button.emoji = "▶️"
             log("⏸ PAUSE", interaction, f"เพลง: {title}")
-            self._refresh_button_state()
             try: await interaction.response.edit_message(view=self)
             except Exception: pass
         elif vc.is_paused():
             vc.resume()
             button.emoji = "⏸"
             log("▶️ RESUME", interaction, f"เพลง: {title}")
-            self._refresh_button_state()
             try: await interaction.response.edit_message(view=self)
             except Exception: pass
         else:
@@ -1527,13 +1625,15 @@ class PlayerView(discord.ui.View):
         idx = get_now_idx(self.guild.id)
         q = get_full_queue(self.guild.id)
         if idx + 1 >= len(q):
-            return await safe_respond(interaction, embed=discord.Embed(
-                description="❌ ไม่มีเพลงถัดไปใน Queue", color=discord.Color.red()), ephemeral=True)
+            log("⏭ SKIP", interaction, f"idx {idx} → end")
+            try: await interaction.response.defer()
+            except Exception: pass
+            vc.stop()
+            return
         log("⏭ SKIP", interaction, f"idx {idx} → {idx+1}")
         try: await interaction.response.defer()
         except Exception: pass
         await _do_play_at_idx(self, idx + 1)
-        self._refresh_button_state()
 
     @discord.ui.button(emoji="⏹", style=discord.ButtonStyle.danger, row=0)
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1579,20 +1679,19 @@ class PlayerView(discord.ui.View):
     async def search(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
         log("🔍 SEARCH", interaction)
-        loop = self.loop if self.loop else asyncio.get_event_loop()
-        modal = SearchModal(self.guild, self.channel, loop, lambda: loop)
+        loop = self.loop_getter()
+        modal = SearchModal(self.guild, self.channel, loop, self.loop_getter)
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(emoji="📋", style=discord.ButtonStyle.primary, row=1)
     async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
-        log("📋 QUEUE", interaction)
         # defer ก่อนทุกอย่าง กัน interaction token หมดอายุ (3 วินาที)
         try:
             await interaction.response.defer(ephemeral=True, thinking=False)
         except Exception:
             return  # token หมดอายุไปแล้ว ทำอะไรต่อไม่ได้
 
-        embed = make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), limit=MAX_QUEUE_DISPLAY)
+        embed = make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id))
         old_wmsg = queue_view_msgs.pop(self.guild.id, None)
         if old_wmsg:
             try: await old_wmsg.delete()
@@ -1640,7 +1739,11 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             if 0 <= current_idx < len(q_now):
                 failed_title = q_now[current_idx][1]
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{ts}] ✗ PLAYBACK_ERROR | {_trunc(failed_title or '?', 60)} | {_trunc(str(error), 120)}")
+        print(
+            f"[{ts}] ✗ PLAYBACK_ERROR\n"
+            f"  {'Track':<9}: {_trunc(failed_title or '?', 60)}\n"
+            f"  {'Error':<9}: {_trunc(str(error), 120)}"
+        )
         try:
             await channel.send(embed=discord.Embed(
                 description=f"❌ เล่น **{_trunc(failed_title or 'เพลงนี้', 60)}** ไม่ได้ กำลังข้ามไปเพลงถัดไป",
@@ -1656,16 +1759,16 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
     # Acquire lock ก่อนจะแก้ index ป้องกัน race condition กับ skip/prev
     async with get_queue_lock(guild.id):
         q = get_full_queue(guild.id)
+        has_next = next_idx < len(q)
 
-        if next_idx < len(q):
+        if has_next:
             set_now_idx(guild.id, next_idx)
             _trim_queue(guild.id)
             next_idx = get_now_idx(guild.id)
             q = get_full_queue(guild.id)
 
             track = q[next_idx]
-            url, title, duration, requester, *_thumb = track
-            thumbnail = _thumb[0] if _thumb else None
+            url, title, duration, requester, thumbnail, *_rest = track
             source = discord.PCMVolumeTransformer(
                 discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
             embed = make_now_playing_embed(title, duration, requester, thumbnail,
@@ -1679,13 +1782,12 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                 view = old_view
                 try:
                     await view.now_playing_msg.edit(embed=embed, view=view)
-                    view._refresh_button_state()
                 except Exception:
                     view.now_playing_msg = None
                     msg = await channel.send(embed=embed, view=view)
                     view.now_playing_msg = msg
             else:
-                view = PlayerView(guild, channel, loop, current_track=track, current_idx=next_idx)
+                view = PlayerView(guild, channel, loop, current_track=track, current_idx=next_idx, loop_getter=lambda: loop)
                 active_views[guild.id] = view
                 msg = await channel.send(embed=embed, view=view)
                 view.now_playing_msg = msg
@@ -1702,55 +1804,53 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
 
             await _refresh_queue_msg(guild.id)
 
-        else:
-            # queue ว่าง — แต่ตรวจก่อนว่า background playlist loading ยังทำงานอยู่ไหม
-            if guild.id in guild_playlist_fetch:
-                # ยังกำลังโหลด background → รอสักครู่แล้วลองใหม่
-                await asyncio.sleep(0.5)
-                return await play_next(guild, channel, loop, current_track=None, current_idx=None, error=None)
-            
-            if guild.id in guild_stopped:
-                guild_stopped.discard(guild.id)
-                return
+    # ── หมดคิวแล้ว (ไม่มีเพลงถัดไป) ──
+    # ต้องทำ "นอก" queue_lock เสมอ เพราะมี await asyncio.sleep(300) ยาวมาก
+    # ถ้าทำในนั้น lock จะถูกถือค้าง 5 นาที ทำให้ /play หรือปุ่มค้นหาเพลงใหม่
+    # ขอเพลงไม่ได้เลยจนกว่าจะครบ 300 วิ หรือมีคน /stop (นี่คือ bug ตัวเดิมที่ทำให้ค้าง)
+    if not has_next:
+        if guild.id in guild_stopped:
+            guild_stopped.discard(guild.id)
+            return
 
-            old_view = active_views.pop(guild.id, None)
-            if old_view and old_view.now_playing_msg:
-                try: await old_view.now_playing_msg.delete()
+        old_view = active_views.pop(guild.id, None)
+        if old_view and old_view.now_playing_msg:
+            try: await old_view.now_playing_msg.delete()
+            except Exception: pass
+            old_view.now_playing_msg = None
+
+        await _delete_queue_view_msg(guild.id)
+        await _delete_queue_add_msgs(guild.id)
+        await _delete_search_result_msgs(guild.id)
+
+        await asyncio.sleep(1)
+        vc = guild.voice_client
+        if not vc or not vc.is_playing():
+            old_done = queue_done_msgs.pop(guild.id, None)
+            if old_done:
+                try: await old_done.delete()
                 except Exception: pass
-                old_view.now_playing_msg = None
 
-            await _delete_queue_view_msg(guild.id)
-            await _delete_queue_add_msgs(guild.id)
-            await _delete_search_result_msgs(guild.id)
+            done_msg_ref = [None]
+            view = QueueDoneView(guild, channel, lambda: loop, done_msg_ref=done_msg_ref)
+            msg = await channel.send(embed=discord.Embed(
+                description="✅ เล่นเพลงครบ Queue แล้ว — บอทจะออกใน 5 นาทีถ้าไม่มีเพลงใหม่",
+                color=discord.Color.green()), view=view)
+            done_msg_ref[0] = msg
+            queue_done_msgs[guild.id] = msg
 
-            await asyncio.sleep(1)
+            await asyncio.sleep(300)
             vc = guild.voice_client
-            if not vc or not vc.is_playing():
-                old_done = queue_done_msgs.pop(guild.id, None)
-                if old_done:
-                    try: await old_done.delete()
+            if vc and not vc.is_playing() and not vc.is_paused() \
+                    and next_idx >= len(get_full_queue(guild.id)):
+                await _delete_search_result_msgs(guild.id)
+                await _delete_queue_view_msg(guild.id)
+                await vc.disconnect()
+                clear_guild(guild.id)
+                done_msg = queue_done_msgs.pop(guild.id, None)
+                if done_msg:
+                    try: await done_msg.delete()
                     except Exception: pass
-
-                done_msg_ref = [None]
-                view = QueueDoneView(guild, channel, lambda: loop, done_msg_ref=done_msg_ref)
-                msg = await channel.send(embed=discord.Embed(
-                    description="✅ เล่นเพลงครบ Queue แล้ว — บอทจะออกใน 5 นาทีถ้าไม่มีเพลงใหม่",
-                    color=discord.Color.green()), view=view)
-                done_msg_ref[0] = msg
-                queue_done_msgs[guild.id] = msg
-
-                await asyncio.sleep(300)
-                vc = guild.voice_client
-                if vc and not vc.is_playing() and not vc.is_paused() \
-                        and next_idx >= len(get_full_queue(guild.id)):
-                    await _delete_search_result_msgs(guild.id)
-                    await _delete_queue_view_msg(guild.id)
-                    await vc.disconnect()
-                    clear_guild(guild.id)
-                    done_msg = queue_done_msgs.pop(guild.id, None)
-                    if done_msg:
-                        try: await done_msg.delete()
-                        except Exception: pass
 
 
 # ─────────────────────────────────────────────
@@ -1767,8 +1867,8 @@ def register(tree: app_commands.CommandTree, loop_getter):
                 description="❌ กรุณาเข้า Voice Channel ก่อนนะ!", color=discord.Color.red()), ephemeral=True)
         log("▶️ /play", interaction, f"query: {_trunc(query, 50)}")
 
-        # ลบข้อความเก่า 1 รายการจาก channel
-        await _delete_one_old_message(interaction.channel)
+        # ลบข้อความเก่าของบอทใน channel นี้
+        asyncio.create_task(_cleanup_channel(interaction.channel))
 
         done_msg = queue_done_msgs.pop(interaction.guild.id, None)
         if done_msg:
@@ -1796,6 +1896,14 @@ def register(tree: app_commands.CommandTree, loop_getter):
                 await vc.move_to(voice_channel)
 
             is_url = query.strip().startswith("http://") or query.strip().startswith("https://")
+
+            # ตรวจ URL scheme ผิด เช่น ttps:// หรือ htp://
+            looks_like_url = re.search(r'^[a-zA-Z]{2,10}://', query.strip())
+            if looks_like_url and not is_url:
+                await _del_search()
+                return await interaction.followup.send(embed=discord.Embed(
+                    description=f"❌ URL ไม่ถูกต้อง (`{query.strip()[:40]}`)\n💡 ลองวาง URL ใหม่อีกครั้ง",
+                    color=discord.Color.red()), ephemeral=True)
             
             # ตรวจสอบว่าเป็น playlist หรือไม่
             if is_url and is_playlist_url(query):
@@ -1812,9 +1920,11 @@ def register(tree: app_commands.CommandTree, loop_getter):
                         playlist_tracks, interaction.user)
                     
                     await _del_search()
-                    added_titles = [(display_no(interaction.guild.id, idx), title, idx)
-                                    for idx, title in added_results]
-                    await _send_playlist_added_summary(interaction.guild.id, interaction.channel, interaction.user, added_titles)
+                    if not added_results:
+                        return await interaction.followup.send(embed=discord.Embed(
+                            description="❌ ไม่สามารถดึงเพลงจากเพลย์ลิสต์ได้เลย", color=discord.Color.red()), ephemeral=True)
+                    # เพลงแรกเล่นทันทีแล้ว (เห็นจาก Now Playing embed)
+                    # เพลงที่เหลือกำลังโหลดในพื้นหลัง จะมีข้อความสรุปตามมาเอง
                     return
                     
                 except ValueError as e:
@@ -1885,10 +1995,18 @@ def register(tree: app_commands.CommandTree, loop_getter):
             err = str(e)
             ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             if "Sign in" in err or "cookies" in err.lower():
-                print(f"[{ts}] ⚠ /play | age-restricted | {_trunc(query, 50)}")
+                print(
+                    f"[{ts}] ⚠ /play — YouTube bot detection (ต้องการ cookies)\n"
+                    f"  {'Query':<9}: {_trunc(query, 60)}\n"
+                    f"  {'Hint':<9}: ใช้ --cookies-from-browser หรือ export cookies ให้ yt-dlp"
+                )
                 msg_text = "❌ YouTube บล็อกการเข้าถึง กรุณาลองใหม่อีกครั้ง"
             else:
-                print(f"[{ts}] ✗ /play | {_trunc(err, 80)}")
+                print(
+                    f"[{ts}] ✗ /play\n"
+                    f"  {'Query':<9}: {_trunc(query, 60)}\n"
+                    f"  {'Error':<9}: {_trunc(err, 120)}"
+                )
                 msg_text = "❌ เกิดข้อผิดพลาด กรุณาลองใหม่"
             try:
                 await _del_search()
@@ -1909,6 +2027,9 @@ def register(tree: app_commands.CommandTree, loop_getter):
         cur = active_views.get(interaction.guild.id)
         log("⏹ /stop", interaction,
             f"เพลง: {_trunc(cur.current_track[1]) if cur and cur.current_track else '?'}")
+
+        # ลบข้อความเก่าของบอทใน channel นี้
+        asyncio.create_task(_cleanup_channel(interaction.channel))
 
         # ตอบ interaction ทันที กัน Discord ฟ้อง "the application did not respond"
         try: await interaction.response.send_message("⏳", ephemeral=True, delete_after=0)
@@ -1995,3 +2116,39 @@ def register(tree: app_commands.CommandTree, loop_getter):
     async def slash_clear_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.MissingPermissions):
             await safe_respond(interaction, "❌ คุณไม่มีสิทธิ์ลบข้อความ", ephemeral=True)
+
+    @tree.command(name="skip", description="ข้ามเพลงปัจจุบัน")
+    async def slash_skip(interaction: discord.Interaction):
+        vc = interaction.guild.voice_client
+        if not vc:
+            return await safe_respond(interaction, embed=discord.Embed(
+                description="❌ บอทไม่ได้อยู่ใน Voice Channel", color=discord.Color.red()), ephemeral=True)
+        if not interaction.user.voice or interaction.user.voice.channel != vc.channel:
+            return await safe_respond(interaction, embed=discord.Embed(
+                description=f"❌ คุณต้องอยู่ใน **{vc.channel.name}** ถึงจะใช้งานได้",
+                color=discord.Color.red()), ephemeral=True)
+        
+        # Check if there's a current track playing
+        current_view = active_views.get(interaction.guild.id)
+        if not current_view or not current_view.current_track:
+            return await safe_respond(interaction, embed=discord.Embed(
+                description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red()), ephemeral=True)
+        
+        # Get the current index
+        idx = get_now_idx(interaction.guild.id)
+        q = get_full_queue(interaction.guild.id)
+        
+        # Check if there's a next track to play
+        if idx + 1 >= len(q):
+            # No more tracks, stop playback
+            log("⏭ SKIP", interaction, f"idx {idx} → end")
+            try: await interaction.response.send_message("⏳ กำลังข้าม...", ephemeral=True)
+            except Exception: pass
+            vc.stop()
+            return
+
+        # Skip to next track using existing logic from PlayerView.skip()
+        log("⏭ SKIP", interaction, f"idx {idx} → {idx+1}")
+        try: await interaction.response.send_message("⏳ กำลังข้าม...", ephemeral=True)
+        except Exception: pass
+        await _do_play_at_idx(current_view, idx + 1)
