@@ -1,3 +1,13 @@
 .env
+.agents
+__pycache__/*.pyc
+logs/guilds/*.log
+
+# Runtime-generated files
 __pycache__/
-*.pyc
+*.py[cod]
+logs/
+
+# Local Python environments
+.venv/
+venv/

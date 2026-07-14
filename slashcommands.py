@@ -15,6 +15,7 @@ import re
 import json
 import requests
 import html
+import unicodedata
 
 
 def _html_unescape(text: str) -> str:
@@ -33,30 +34,40 @@ logging.getLogger("discord.voice_state").setLevel(logging.WARNING)
 
 # ─────────────────────────────────────────────
 #  Multi-guild file logging
-#  ทุก guild มีไฟล์ log แยกของตัวเอง (logs/guilds/<id>.log) เก็บรายละเอียดเต็ม
+#  ทุก guild มีไฟล์ log แยกตามชื่อ server และวันที่ (logs/guilds/<server>_<YYYY-MM-DD>.log)
 #  console เห็นทุก guild ปนกัน จึงต้องเติม [ชื่อ guild] นำหน้าให้แยกออก
 # ─────────────────────────────────────────────
 
-_guild_loggers: dict[int, logging.Logger] = {}
+_guild_loggers: dict[tuple[int, str], logging.Logger] = {}
 
-def get_guild_logger(guild_id: int) -> logging.Logger:
-    """คืน logger เฉพาะของ guild นี้ (cache ไว้ใช้ซ้ำ) — เขียนเข้าไฟล์ logs/guilds/<id>.log
+def _safe_log_filename_part(name: str, guild_id: int) -> str:
+    """แปลงชื่อ server ให้ใช้เป็นชื่อไฟล์ Windows ได้อย่างปลอดภัย."""
+    safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name or "")
+    safe_name = re.sub(r'\s+', " ", safe_name).strip(". ")
+    return safe_name[:80] or f"guild-{guild_id}"
+
+def get_guild_logger(guild_id: int, guild_name: str = "") -> logging.Logger:
+    """คืน logger เฉพาะของ guild และวันที่ — เขียน logs/guilds/<server>_<YYYY-MM-DD>.log
     ไฟล์หมุนอัตโนมัติเมื่อขนาดเกิน 5MB เก็บสำรองย้อนหลัง 3 ไฟล์ กันไฟล์บวมไม่จำกัด
     """
-    if guild_id in _guild_loggers:
-        return _guild_loggers[guild_id]
+    log_date = datetime.datetime.now().strftime("%Y-%m-%d")
+    cache_key = (guild_id, log_date)
+    if cache_key in _guild_loggers:
+        return _guild_loggers[cache_key]
 
     os.makedirs("logs/guilds", exist_ok=True)
-    logger = logging.getLogger(f"guild.{guild_id}")
+    logger = logging.getLogger(f"guild.{guild_id}.{log_date}")
     logger.setLevel(logging.DEBUG)
     logger.propagate = False  # กัน log ซ้ำขึ้น root logger/console
 
+    safe_name = _safe_log_filename_part(guild_name, guild_id)
     handler = RotatingFileHandler(
-        f"logs/guilds/{guild_id}.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+        f"logs/guilds/{safe_name}_{log_date}.log",
+        maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(handler)
 
-    _guild_loggers[guild_id] = logger
+    _guild_loggers[cache_key] = logger
     return logger
 
 
@@ -66,7 +77,7 @@ def glog(guild_id: int, guild_name: str, message: str, level: str = "info", cons
     ใช้ level="info"/"warning"/"error" ให้ตรงความรุนแรง เพื่อกรองในไฟล์ log ได้ภายหลัง
     """
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    logger = get_guild_logger(guild_id)
+    logger = get_guild_logger(guild_id, guild_name)
     getattr(logger, level, logger.info)(f"[{ts}] {message}")
     if console:
         print(f"[{guild_name or guild_id}] {message}")
@@ -95,6 +106,10 @@ queue_done_msgs: dict[int, object] = {}
 queue_add_msgs: dict[int, dict[int, object]] = {}
 queue_view_msgs: dict[int, object] = {}
 search_result_msgs: dict[int, list] = {}
+
+# เก็บชื่อแบบสั้นสำหรับแสดงใน Queue โดยผูกกับ stream URL
+# ไม่แก้ title ต้นฉบับ เพื่อให้หน้าผลการค้นหายังแสดงชื่อวิดีโอเต็มเหมือนเดิม
+queue_display_titles: dict[str, str] = {}
 
 # guild_volumes = ระดับเสียงที่ผู้ใช้ตั้งไว้ต่อ server (guild)
 # จำไว้ตราบใดที่บอทยังอยู่ใน Voice Channel (ไม่ว่าเพลงจะเปลี่ยนกี่รอบ)
@@ -181,6 +196,9 @@ def add_to_queue(guild_id: int, track) -> int:
     return len(q) - 1
 
 def clear_guild(guild_id: int):
+    for track in full_queues.get(guild_id, []):
+        if track:
+            queue_display_titles.pop(track[0], None)
     full_queues[guild_id] = []
     now_playing_idx[guild_id] = 0
     queue_seq_offset[guild_id] = 0
@@ -205,6 +223,18 @@ def get_ydl_options(include_playlist: bool = False) -> dict:
     # ถ้า include_playlist เป็น True จะดึง playlist ทั้งหมด
     opts["noplaylist"] = not include_playlist
     return opts
+
+def _remember_queue_display_title(info: dict, stream_url: str):
+    """เก็บ artist — track สำหรับ Queue เมื่อ extractor มี metadata ที่เชื่อถือได้.
+
+    title ต้นฉบับยังถูกส่งกลับเหมือนเดิม จึงไม่กระทบหน้าผลการค้นหา.
+    """
+    artist = info.get("artist")
+    track = info.get("track")
+    if artist and track:
+        queue_display_titles[stream_url] = f"{artist} — {track}"
+    else:
+        queue_display_titles.pop(stream_url, None)
 
 # ─────────────────────────────────────────────
 #  Spotify — ดึงข้อมูลจากหน้า embed สาธารณะ ไม่ใช้ Web API
@@ -312,6 +342,7 @@ def _fetch_spotify_track_from_search(search_query: str):
         minutes, seconds = divmod(int(duration), 60)
         url = info["url"]
         title = info.get("title", "Unknown")
+        _remember_queue_display_title(info, url)
         duration = f"{minutes}:{seconds:02d}"
         thumbnail = info.get("thumbnail")
         
@@ -500,7 +531,10 @@ def fetch_track(query: str):
                         minutes, seconds = divmod(int(duration), 60)
                         
                         
-                        return info["url"], info.get("title", "Unknown"), f"{minutes}:{seconds:02d}", info.get("thumbnail")
+                        url = info["url"]
+                        title = info.get("title", "Unknown")
+                        _remember_queue_display_title(info, url)
+                        return url, title, f"{minutes}:{seconds:02d}", info.get("thumbnail")
                 except Exception as e:
                     print(f"YouTube search error: {str(e)}")
                     raise ValueError("SPOTIFY_NO_YOUTUBE_MATCH")
@@ -530,7 +564,10 @@ def fetch_track(query: str):
             minutes, seconds = divmod(int(duration), 60)
             
             
-            return info["url"], info.get("title", "Unknown"), f"{minutes}:{seconds:02d}", info.get("thumbnail")
+            url = info["url"]
+            title = info.get("title", "Unknown")
+            _remember_queue_display_title(info, url)
+            return url, title, f"{minutes}:{seconds:02d}", info.get("thumbnail")
     except ValueError as e:
         if str(e) in ("PLAYLIST_DETECTED", "SPOTIFY_SCRAPE_ERROR", "SPOTIFY_NO_YOUTUBE_MATCH", "SPOTIFY_UNSUPPORTED_LINK"):
             raise
@@ -611,6 +648,28 @@ def make_done_embed():
 _QUEUE_TITLE_NORMAL  = 60
 _QUEUE_TITLE_PLAYING = 48
 
+def _char_display_width(char: str) -> int:
+    """ประมาณความกว้างของอักขระใน Discord: CJK กว้างกว่า Latin ราว 2 เท่า."""
+    if unicodedata.combining(char):
+        return 0
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+def _truncate_display_width(text: str, max_width: int) -> str:
+    """ตัดข้อความตามความกว้างที่มองเห็น แทนการนับจำนวนตัวอักษรล้วน ๆ."""
+    if sum(_char_display_width(char) for char in text) <= max_width:
+        return text
+
+    chars = []
+    width = 0
+    # สงวนความกว้าง 1 ช่องให้เครื่องหมาย …
+    for char in text:
+        char_width = _char_display_width(char)
+        if width + char_width > max_width - 1:
+            break
+        chars.append(char)
+        width += char_width
+    return "".join(chars) + "…"
+
 def make_queue_embed(guild_id: int, current_idx: int = None):
     q = get_full_queue(guild_id)
     idx = current_idx if current_idx is not None else get_now_idx(guild_id)
@@ -619,11 +678,12 @@ def make_queue_embed(guild_id: int, current_idx: int = None):
     lines = []
     for i, t in enumerate(q):
         no = display_no(guild_id, i)
+        display_title = queue_display_titles.get(t[0], t[1])
         if i == idx:
-            t_cut = t[1][:_QUEUE_TITLE_PLAYING - 1] + "…" if len(t[1]) > _QUEUE_TITLE_PLAYING else t[1]
+            t_cut = _truncate_display_width(display_title, _QUEUE_TITLE_PLAYING)
             lines.append(f"**▶ {no}. {t_cut} ◀ กำลังเล่น**")
         else:
-            t_cut = t[1][:_QUEUE_TITLE_NORMAL - 1] + "…" if len(t[1]) > _QUEUE_TITLE_NORMAL else t[1]
+            t_cut = _truncate_display_width(display_title, _QUEUE_TITLE_NORMAL)
             lines.append(f"`{no}.` {t_cut}")
     embed = discord.Embed(title="📋 Queue เพลง", description="\n".join(lines), color=0x5865F2)
     embed.set_footer(text=f"กำลังเล่น #{display_no(guild_id, idx)} จาก {get_total_added(guild_id)} เพลง")
@@ -649,7 +709,7 @@ def log(action: str, interaction: discord.Interaction, extra: str = ""):
     full_block = "\n".join(lines)
     print(full_block)
     # เก็บรายละเอียดเต็มเข้าไฟล์ log ของ guild นี้ด้วย (ตรวจย้อนหลังได้แม้บอทรีสตาร์ท)
-    get_guild_logger(interaction.guild.id).info(full_block)
+    get_guild_logger(interaction.guild.id, interaction.guild.name).info(full_block)
 
 async def check_in_voice(interaction: discord.Interaction) -> bool:
     vc = interaction.guild.voice_client
@@ -1116,15 +1176,18 @@ class SearchResultView(discord.ui.View):
                 return
 
         await self._clear_done()
-        # Serial loop: await ทีละอัน เพื่อป้องกัน race condition บน index
-        for i, r in enumerate(self.results):
-            if i in self._selected:
-                continue  # ข้ามเพลงที่เลือกแล้ว
-            try:
-                url, title, duration, thumbnail = await asyncio.to_thread(fetch_track_from_result, r)
-                track = (url, title, duration, interaction.user, thumbnail)
-                await _add_and_play(vc, self.guild, self.channel, self.loop_getter, track)
-            except Exception: pass
+        # ใช้ flow เดียวกับ playlist: เพลงแรกเริ่มเล่นทันที ส่วนที่เหลือดึงพร้อมกัน
+        # (จำกัดด้วย PLAYLIST_FETCH_CONCURRENCY) แล้วเพิ่ม/อัปเดตคิวเป็นชุดเดียว
+        # จึงไม่ต้องรอ yt-dlp แบบทีละเพลง หรือแก้ข้อความ Now Playing ซ้ำทุกเพลง
+        remaining_results = [
+            result for i, result in enumerate(self.results)
+            if i not in self._selected
+        ]
+        if remaining_results:
+            await _add_playlist_to_queue(
+                vc, self.guild, self.channel, self.loop_getter,
+                remaining_results, interaction.user,
+            )
 
         await self._close_message()
 
@@ -1352,6 +1415,7 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
 
     # ── step 2: เพิ่มเพลงแรกเข้าคิว + เล่นทันที ──
     url, title, duration, thumbnail = first_result
+    first_added = None
     async with get_queue_lock(guild.id):
         track = (url, title, duration, requester, thumbnail)
         track_idx = add_to_queue(guild.id, track)
@@ -1374,6 +1438,9 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
             msg = await channel.send(embed=embed, view=view)
             view.now_playing_msg = msg
         else:
+            # เพลงแรกของชุดนี้ถูกต่อท้ายคิวอยู่แล้ว ต้องนำไปแสดงใน summary
+            # ร่วมกับเพลงที่ background fetch เพิ่มภายหลังด้วย
+            first_added = track
             await _refresh_queue_msg(guild.id)
             old_view = active_views.get(guild.id)
             if old_view and old_view.now_playing_msg and old_view.current_track:
@@ -1387,14 +1454,20 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
 
     # ── step 3: ดึงเพลงที่เหลือ (ถ้ามี) แบบ concurrent ใน background — ไม่บล็อกการเล่นเพลงแรก ──
     if remaining_tracks:
-        asyncio.create_task(_bg_fetch_rest(guild, channel, remaining_tracks, requester, progress))
+        asyncio.create_task(_bg_fetch_rest(
+            guild, channel, remaining_tracks, requester, progress,
+            initial_added=[first_added] if first_added else [],
+        ))
     else:
         progress.print_summary()
+        if first_added:
+            await _send_playlist_added_summary(guild.id, channel, requester, [first_added])
 
     return [(track_idx, title)]
 
 
-async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_PlaylistFetchProgress"):
+async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_PlaylistFetchProgress",
+                         initial_added=None):
     """ดึงเพลงที่เหลือของ playlist (หลังเพลงแรก) แบบ concurrent (จำกัดจำนวนพร้อมกัน) ในพื้นหลัง
     แล้วเพิ่มเข้าคิวทั้งหมดพร้อมกันด้วย queue_lock ครั้งเดียว (atomic)
     จำกัด concurrency ด้วย Semaphore กัน YouTube rate-limit (429) ตอน playlist ยาวๆ
@@ -1419,19 +1492,20 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
                for r in fetch_results if r is not None
                for url, title, duration, thumbnail in [r]]
 
+    added = list(initial_added or [])
     if not fetched:
+        if added:
+            await _send_playlist_added_summary(guild.id, channel, requester, added)
         return
 
-    added = []
     async with get_queue_lock(guild.id):
         for url, title, duration, thumbnail in fetched:
             track = (url, title, duration, requester, thumbnail)
-            track_idx = add_to_queue(guild.id, track)
-            added.append((track_idx, title))
+            add_to_queue(guild.id, track)
+            added.append(track)
         await _refresh_queue_msg(guild.id)
 
-    added_titles = [(display_no(guild.id, idx), title, idx) for idx, title in added]
-    await _send_playlist_added_summary(guild.id, channel, requester, added_titles)
+    await _send_playlist_added_summary(guild.id, channel, requester, added)
 
 async def _add_and_play(vc, guild, channel, loop_getter, track):
     """เพิ่มเพลงเข้า queue และเล่นถ้าว่าง
@@ -1443,7 +1517,8 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
 
         if vc.is_playing() or vc.is_paused():
             pos = display_no(guild.id, track_idx)
-            short_title = title if len(title) <= 50 else title[:47] + "…"
+            display_title = queue_display_titles.get(url, title)
+            short_title = _truncate_display_width(display_title, 50)
             pub_msg = await channel.send(embed=discord.Embed(
                 description=f"📋 เพิ่มใน Queue **#{pos}**\n🎵 {short_title}  |  ขอโดย: {requester.mention}",
                 color=0x1a1a2e))
@@ -1478,23 +1553,36 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
         return track_idx, title
 
 
-async def _send_playlist_added_summary(guild_id: int, channel, requester, titles: list):
+async def _send_playlist_added_summary(guild_id: int, channel, requester, tracks: list):
     """ส่งสรุปเพลงที่เพิ่มจาก playlist เป็นข้อความเดียว ให้ทุกคนเห็น (ไม่ ephemeral)
-    titles: list of (display_no, title, list_idx) — display_no คือเลขลำดับสะสมที่จะแสดงผล,
-            list_idx คือตำแหน่งจริงในคิว (0-based) ของเพลงนั้น
-    เก็บ reference ไว้ใน queue_add_msgs โดยใช้ list_idx ของ "เพลงสุดท้าย" ในสรุปเป็นคีย์
+    tracks: track tuples ที่ถูกเพิ่มในชุดนี้ ใช้ object identity เพื่อหาตำแหน่งล่าสุดในคิว
+    หลัง _trim_queue เลื่อน index จึงไม่อ้าง index ที่บันทึกก่อนเพิ่มเพลงครบ
     """
-    if not titles:
+    if not tracks:
         return
-    lines = [f"`#{no}` {_trunc(t, 58)}" for no, t, _ in titles]
+    queue = get_full_queue(guild_id)
+    added_positions = [
+        (idx, track)
+        for track in tracks
+        for idx, queued_track in enumerate(queue)
+        if queued_track is track
+    ]
+    if not added_positions:
+        return
+
+    lines = [
+        f"`#{display_no(guild_id, idx)}` "
+        f"{_truncate_display_width(queue_display_titles.get(track[0], track[1]), 58)}"
+        for idx, track in added_positions
+    ]
     embed = discord.Embed(
         description="\n".join(lines) + f"\n\nขอโดย: {requester.mention}",
         color=0x1a1a2e,
     )
-    embed.set_author(name=f"📋  เพิ่มเข้า Queue แล้ว {len(titles)} เพลง")
+    embed.set_author(name=f"📋  เพิ่มเข้า Queue แล้ว {len(added_positions)} เพลง")
     try:
         pub_msg = await channel.send(embed=embed)
-        last_idx = titles[-1][2]
+        last_idx = added_positions[-1][0]
         queue_add_msgs.setdefault(guild_id, {})[last_idx] = pub_msg
     except Exception:
         pass
