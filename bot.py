@@ -17,6 +17,13 @@ slashcommands.register(bot.tree, lambda: bot.loop)
 
 
 @bot.event
+async def on_voice_state_update(member, before, after):
+    # ถ้าถูก kick/disconnect จาก VC ให้ยุติ playback และเก็บสถานะเหมือนกดปุ่มหยุด
+    if bot.user and member.id == bot.user.id and before.channel and not after.channel:
+        await slashcommands.handle_external_voice_disconnect(member.guild)
+
+
+@bot.event
 async def on_ready():
     print(f"✅ บอทออนไลน์แล้ว: {bot.user}")
     # ลบข้อความเก่าได้เมื่อรีสตาร์ทแล้ว

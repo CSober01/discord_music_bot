@@ -426,10 +426,17 @@ def get_spotify_artist_top_tracks(artist_id: str, max_tracks: int = 10) -> list:
     return None
 
 def is_playlist_url(query: str) -> bool:
-    """ตรวจสอบว่า URL มีหลายเพลง (playlist/album/artist) หรือไม่"""
+    """ตรวจสอบว่า URL มีหลายเพลง (playlist/album/artist) หรือไม่
+    ข้อยกเว้น: YouTube Mix/Radio (list=RDxxxx) ไม่นับเป็น playlist —
+    เป็น auto-generated playlist ที่ YouTube สร้างสดๆ ไม่มีจำนวนเพลงตายตัว/ขยายได้ไม่จำกัด
+    จึงให้เล่นเป็นเพลงเดี่ยวเหมือนลิงก์ปกติแทน (ตัดพารามิเตอร์ list= ทิ้งตอนดึงเพลง)
+    """
     query_lower = query.lower()
     # YouTube Playlist
     if "youtube.com" in query_lower or "youtu.be" in query_lower:
+        list_match = re.search(r"[?&]list=([^&]+)", query)
+        if list_match and list_match.group(1).upper().startswith("RD"):
+            return False  # YouTube Mix/Radio — เล่นเป็นเพลงเดี่ยว ไม่ใช่ playlist
         return "list=" in query or "playlist" in query_lower
     # Spotify Playlist/Album/Artist (หน้าศิลปินมี Top Tracks หลายเพลง ใช้ flow เดียวกับ playlist)
     if "spotify.com" in query_lower:
@@ -711,6 +718,33 @@ def log(action: str, interaction: discord.Interaction, extra: str = ""):
     # เก็บรายละเอียดเต็มเข้าไฟล์ log ของ guild นี้ด้วย (ตรวจย้อนหลังได้แม้บอทรีสตาร์ท)
     get_guild_logger(interaction.guild.id, interaction.guild.name).info(full_block)
 
+VOICE_CONNECT_RETRIES = 3       # ลองเชื่อมต่อ VC สูงสุดกี่ครั้งถ้าโดน 1006/หลุดกลาง handshake
+VOICE_CONNECT_RETRY_DELAY = 1.5  # วินาที รอก่อนลองใหม่แต่ละรอบ (กันยิงรัวตอนเน็ตแกว่ง)
+
+async def _connect_with_retry(voice_channel: discord.VoiceChannel):
+    """เชื่อมต่อ Voice Channel พร้อม retry — กัน ConnectionClosed (1006) ตอนเน็ตบอทไม่เสถียร
+    ถ้า handshake หลุดกลางทาง discord.py จะโยน ConnectionClosed/asyncio.TimeoutError ออกมาทันที
+    โดยไม่ retry เอง จึงต้องดักแล้วลองใหม่ที่นี่แทน ไม่งั้น /play จะพังทันทีตั้งแต่ครั้งแรกที่เน็ตสะดุด
+    คืนค่า VoiceClient ถ้าสำเร็จ, โยน exception เดิมกลับไปถ้าลองครบทุกครั้งแล้วยังไม่ผ่าน
+    """
+    last_error = None
+    for attempt in range(1, VOICE_CONNECT_RETRIES + 1):
+        try:
+            vc = await voice_channel.connect()
+            return vc
+        except (discord.errors.ConnectionClosed, asyncio.TimeoutError) as e:
+            last_error = e
+            print(f"⚠ Voice connect ล้มเหลว (ครั้งที่ {attempt}/{VOICE_CONNECT_RETRIES}): {e}")
+            # เช็คว่ามี voice_client ค้างอยู่จาก attempt ก่อนหน้าไหม (บาง state discord.py
+            # จะสร้าง VoiceClient ไว้ก่อนแล้วค่อยพังตอน handshake) ต้อง disconnect ทิ้งก่อนลองใหม่
+            stale_vc = voice_channel.guild.voice_client
+            if stale_vc:
+                try: await stale_vc.disconnect(force=True)
+                except Exception: pass
+            if attempt < VOICE_CONNECT_RETRIES:
+                await asyncio.sleep(VOICE_CONNECT_RETRY_DELAY)
+    raise last_error
+
 async def check_in_voice(interaction: discord.Interaction) -> bool:
     vc = interaction.guild.voice_client
     if not vc:
@@ -839,7 +873,8 @@ class QueueDoneView(discord.ui.View):
         self.loop_getter = loop_getter
         self.done_msg_ref = done_msg_ref
 
-    @discord.ui.button(emoji="🔍", label="ค้นหาเพลง", style=discord.ButtonStyle.primary)
+    @discord.ui.button(emoji="🔍", label="ค้นหาเพลง", style=discord.ButtonStyle.primary,
+                       custom_id="queue_done_search")
     async def search_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.voice:
             return await safe_respond(
@@ -866,7 +901,8 @@ class QueueDoneView(discord.ui.View):
             except Exception:
                 pass
 
-    @discord.ui.button(emoji="⏹", label="หยุดและออก", style=discord.ButtonStyle.danger)
+    @discord.ui.button(emoji="⏹", label="หยุดและออก", style=discord.ButtonStyle.danger,
+                       custom_id="queue_done_stop")
     async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         log("⏹ STOP", interaction, "Queue done stop")
 
@@ -899,15 +935,20 @@ class QueueDoneView(discord.ui.View):
 # ─────────────────────────────────────────────
 
 class VolumeModal(discord.ui.Modal, title="🔊 ปรับระดับเสียง"):
-    vol_input = discord.ui.TextInput(
-        label="ระดับเสียง (0-100)",
-        placeholder="ค่าเริ่มต้น: 10",
-        min_length=1, max_length=3)
-
     def __init__(self, vc, player_view):
-        super().__init__()
+        super().__init__(custom_id="volume_modal")
         self.vc = vc
         self.player_view = player_view
+        # แสดงค่าปัจจุบันล่าสุดของ guild นี้ (ไม่ใช่ placeholder ตายตัว)
+        # ใช้ default= ให้ผู้ใช้เห็นค่าปัจจุบันเติมอยู่ในช่องกรอกเลย ไม่ใช่แค่ตัวอย่างจางๆ
+        current_pct = round(get_guild_volume(player_view.guild.id) * 100)
+        self.vol_input = discord.ui.TextInput(
+            label="ระดับเสียง (0-100)",
+            placeholder=f"ค่าปัจจุบัน: {current_pct}",
+            default=str(current_pct),
+            min_length=1, max_length=3,
+            custom_id="volume_modal_input")
+        self.add_item(self.vol_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -920,6 +961,7 @@ class VolumeModal(discord.ui.Modal, title="🔊 ปรับระดับเ�
         set_guild_volume(self.player_view.guild.id, vol_level)
         if self.vc.source:
             self.vc.source.volume = vol_level
+        log("🔊 VOLUME", interaction, f"ระดับเสียง: {vol}%")
         await interaction.response.send_message(f"🔊 ระดับเสียง: **{vol}%**", ephemeral=True)
 
 
@@ -932,10 +974,11 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
         label="ค้นหาเพลง หรือวาง URL YouTube",
         placeholder="ระบุชื่อเพลง หรือวาง URL YouTube ที่นี่",
         min_length=1, 
-        max_length=100)
+        max_length=100,
+        custom_id="search_modal_input")
 
     def __init__(self, guild, channel, loop, loop_getter, done_msg_ref: list = None):
-        super().__init__()
+        super().__init__(custom_id="search_modal")
         self.guild = guild
         self.channel = channel
         self.loop = loop
@@ -979,7 +1022,13 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                     await _ack_done()
                     await _send_error("❌ กรุณาเข้า Voice Channel ก่อน")
                     return
-                vc = await interaction.user.voice.channel.connect()
+                try:
+                    vc = await _connect_with_retry(interaction.user.voice.channel)
+                except Exception as connect_error:
+                    log("🔍 SEARCH CONNECT ERROR", interaction, str(connect_error))
+                    await _ack_done()
+                    await _send_error("❌ เชื่อมต่อ Voice Channel ไม่สำเร็จ (เน็ตบอทไม่เสถียร) กรุณาลองใหม่")
+                    return
             elif interaction.user.voice and interaction.user.voice.channel != vc.channel:
                 try:
                     await vc.move_to(interaction.user.voice.channel)
@@ -1104,7 +1153,8 @@ class SearchResultView(discord.ui.View):
         self._adding_all = False
         self._selecting = False
         self.message: discord.Message | None = None
-        self._select_item = discord.ui.Select(placeholder="เลือกเพลง", options=self._build_options())
+        self._select_item = discord.ui.Select(placeholder="เลือกเพลง", options=self._build_options(),
+                                              custom_id="search_result_select")
         self._select_item.callback = self.select_callback
         self.add_item(self._select_item)
 
@@ -1151,7 +1201,8 @@ class SearchResultView(discord.ui.View):
             try: await old_done.delete()
             except Exception: pass
 
-    @discord.ui.button(emoji="➕", label="เพิ่มทั้งหมด", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(emoji="➕", label="เพิ่มทั้งหมด", style=discord.ButtonStyle.primary, row=1,
+                       custom_id="search_result_add_all")
     async def add_all_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._check_requester(interaction): return
         if self._adding_all: return await interaction.response.defer()
@@ -1166,7 +1217,13 @@ class SearchResultView(discord.ui.View):
                 await interaction.followup.send(embed=discord.Embed(
                     description="❌ กรุณาเข้า Voice Channel ก่อน", color=discord.Color.red()), ephemeral=True)
                 return
-            vc = await interaction.user.voice.channel.connect()
+            try:
+                vc = await _connect_with_retry(interaction.user.voice.channel)
+            except Exception:
+                await interaction.followup.send(embed=discord.Embed(
+                    description="❌ เชื่อมต่อ Voice Channel ไม่สำเร็จ (เน็ตบอทไม่เสถียร) กรุณาลองใหม่",
+                    color=discord.Color.red()), ephemeral=True)
+                return
         elif interaction.user.voice and interaction.user.voice.channel != vc.channel:
             try:
                 await vc.move_to(interaction.user.voice.channel)
@@ -1191,7 +1248,8 @@ class SearchResultView(discord.ui.View):
 
         await self._close_message()
 
-    @discord.ui.button(emoji="✖", label="ปิด", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(emoji="✖", label="ปิด", style=discord.ButtonStyle.danger, row=1,
+                       custom_id="search_result_close")
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         self._remove_self_from_registry()
         try:
@@ -1220,7 +1278,15 @@ class SearchResultView(discord.ui.View):
                 self._selected.discard(idx)
                 self._selecting = False
                 return
-            vc = await interaction.user.voice.channel.connect()
+            try:
+                vc = await _connect_with_retry(interaction.user.voice.channel)
+            except Exception:
+                await interaction.followup.send(embed=discord.Embed(
+                    description="❌ เชื่อมต่อ Voice Channel ไม่สำเร็จ (เน็ตบอทไม่เสถียร) กรุณาลองใหม่",
+                    color=discord.Color.red()), ephemeral=True)
+                self._selected.discard(idx)
+                self._selecting = False
+                return
         elif interaction.user.voice and interaction.user.voice.channel != vc.channel:
             try:
                 await vc.move_to(interaction.user.voice.channel)
@@ -1341,6 +1407,9 @@ class _PlaylistFetchProgress:
     และช่วงดึงที่เหลือใน background (_bg_fetch_rest) — รวมเป็นตัวนับเดียวกันตลอดทั้ง playlist
     เมธอด record() ต้องถูกเรียกจาก event loop thread เท่านั้น (หลัง await เสร็จ) จึงไม่ต้องใช้ lock
     console จะเห็นแค่ตัวเลข ไม่มีชื่อเพลง — รายละเอียดเต็มอยู่ในไฟล์ log ของ guild แทน
+
+    แสดงผลบน console เป็นบรรทัดเดียว overwrite ตัวเองด้วย \\r (ไม่ print บรรทัดใหม่ทุกเพลง)
+    ต้อง print_summary() ปิดท้ายเสมอ เพื่อขึ้นบรรทัดใหม่จริงก่อน log ถัดไปจะพิมพ์ทับกัน
     """
     def __init__(self, guild_id: int, guild_name: str, total: int):
         self.guild_id = guild_id
@@ -1351,31 +1420,40 @@ class _PlaylistFetchProgress:
         self.fallback_attempts = 0
         self.fallback_ok = 0
         self.skipped = 0
+        self._last_line_len = 0
 
     def _p(self, msg: str):
-        print(f"[{self.guild_name}] {msg}")
+        """เขียนทับบรรทัด progress เดิมด้วย \\r — เติม space ปิดท้ายกันตัวอักษรเก่าเหลือค้าง
+        ถ้าบรรทัดใหม่สั้นกว่าบรรทัดก่อนหน้า (เช่น ตัวเลขเปลี่ยนจากหลักสิบเป็นหลักเดียว)
+        """
+        line = f"[{self.guild_name}] {msg}"
+        pad = max(0, self._last_line_len - len(line))
+        print(f"\r{line}{' ' * pad}", end="", flush=True)
+        self._last_line_len = len(line)
 
     def record(self, outcome: str):
         if outcome == "direct":
             self.done += 1
             self.direct_ok += 1
-            self._p(f"กำลังเพิ่มเพลง {self.done}/{self.total}")
         elif outcome == "fallback_ok":
             self.done += 1
             self.fallback_attempts += 1
             self.fallback_ok += 1
-            self._p(f"ดึงตรงไม่ได้ {self.fallback_attempts}")
-            self._p(f"ทดแทนแล้ว {self.fallback_ok}/{self.fallback_attempts}")
-            self._p(f"กำลังเพิ่มเพลง {self.done}/{self.total}")
         else:  # fallback_fail
             self.fallback_attempts += 1
             self.skipped += 1
-            self._p(f"ดึงตรงไม่ได้ {self.fallback_attempts}")
-            self._p(f"ทดแทนแล้ว {self.fallback_ok}/{self.fallback_attempts}")
+
+        parts = [f"กำลังเพิ่มเพลง {self.done}/{self.total}"]
+        if self.fallback_attempts:
+            parts.append(f"ทดแทน {self.fallback_ok}/{self.fallback_attempts}")
+        if self.skipped:
+            parts.append(f"ข้าม {self.skipped}")
+        self._p(" · ".join(parts))
 
     def print_summary(self):
         self._p(f"เพิ่มเพลงครบ {self.done}/{self.total} "
                 f"(ตรงสำเร็จ {self.direct_ok} · ทดแทน {self.fallback_ok}/{self.fallback_attempts} · ข้ามจริง {self.skipped})")
+        print()  # ขึ้นบรรทัดใหม่จริง ปิดท้าย progress bar ก่อน log ถัดไป
 
 
 async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_tracks, requester):
@@ -1399,7 +1477,7 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
         result, outcome = await asyncio.to_thread(_fetch_playlist_track_sync, candidate, guild.id, guild.name)
 
         if guild.id in guild_stopped:
-            print(f"[{guild.name}] 🛑 Playlist fetch ยกเลิก — ถูก stop ระหว่าง fetch")
+            print(f"\n[{guild.name}] 🛑 Playlist fetch ยกเลิก — ถูก stop ระหว่าง fetch")
             return []
 
         progress.record(outcome)
@@ -1670,7 +1748,8 @@ class PlayerView(discord.ui.View):
             except Exception: pass
             self.now_playing_msg = None
 
-    @discord.ui.button(emoji="⏮", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(emoji="⏮", style=discord.ButtonStyle.secondary, row=0,
+                       custom_id="player_previous")
     async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
         idx = get_now_idx(self.guild.id)
@@ -1682,7 +1761,8 @@ class PlayerView(discord.ui.View):
         except Exception: pass
         await _do_play_at_idx(self, idx - 1)
 
-    @discord.ui.button(emoji="⏸", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(emoji="⏸", style=discord.ButtonStyle.secondary, row=0,
+                       custom_id="player_pause_resume")
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
         vc = self.guild.voice_client
@@ -1703,7 +1783,8 @@ class PlayerView(discord.ui.View):
             await safe_respond(interaction, embed=discord.Embed(
                 description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red()), ephemeral=True)
 
-    @discord.ui.button(emoji="⏭", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(emoji="⏭", style=discord.ButtonStyle.secondary, row=0,
+                       custom_id="player_skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
         vc = self.guild.voice_client
@@ -1723,7 +1804,8 @@ class PlayerView(discord.ui.View):
         except Exception: pass
         await _do_play_at_idx(self, idx + 1)
 
-    @discord.ui.button(emoji="⏹", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(emoji="⏹", style=discord.ButtonStyle.danger, row=0,
+                       custom_id="player_stop")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
         vc = self.guild.voice_client
@@ -1763,7 +1845,8 @@ class PlayerView(discord.ui.View):
             done_msg = await self.channel.send(embed=done_embed)
             queue_done_msgs[self.guild.id] = done_msg
 
-    @discord.ui.button(emoji="🔍", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(emoji="🔍", style=discord.ButtonStyle.secondary, row=1,
+                       custom_id="player_search")
     async def search(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
         log("🔍 SEARCH", interaction)
@@ -1771,7 +1854,8 @@ class PlayerView(discord.ui.View):
         modal = SearchModal(self.guild, self.channel, loop, self.loop_getter)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(emoji="📋", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(emoji="📋", style=discord.ButtonStyle.primary, row=1,
+                       custom_id="player_show_queue")
     async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
         # defer ก่อนทุกอย่าง กัน interaction token หมดอายุ (3 วินาที)
         try:
@@ -1788,16 +1872,81 @@ class PlayerView(discord.ui.View):
         wmsg = await interaction.followup.send(embed=embed, ephemeral=True, wait=True)
         queue_view_msgs[self.guild.id] = wmsg
 
-    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=1,
+                       custom_id="player_volume")
     async def volume_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
         vc = self.guild.voice_client
         if not vc.source:
             return await safe_respond(interaction, embed=discord.Embed(
                 description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red()), ephemeral=True)
-        log("🔊 VOLUME", interaction)
         modal = VolumeModal(vc, self)
         await interaction.response.send_modal(modal)
+
+
+# ─────────────────────────────────────────────
+#  handle_external_voice_disconnect
+#  เรียกจาก bot.py เมื่อบอทถูก kick/disconnect จาก VC โดยไม่ได้ตั้งใจ
+#  (เช่นแอดมิน kick, หลุดจากปัญหาเน็ต/Discord แล้ว reconnect ไม่ติด)
+#  ต้องเก็บสถานะให้เหมือนกดปุ่มหยุด/ /stop แต่ห้ามยุ่งกับ vc เพราะหลุดไปแล้วจริง
+# ─────────────────────────────────────────────
+
+async def handle_external_voice_disconnect(guild: discord.Guild):
+    """ทำความสะอาดสถานะเมื่อบอทหลุดจาก Voice Channel โดยไม่ได้มาจาก /stop หรือปุ่มหยุด
+    ไม่เรียก vc.stop()/vc.disconnect() เพราะการเชื่อมต่อหลุดไปแล้วจริง (เรียกซ้ำจะพัง/ไม่มีผล)
+    ไม่มี interaction ในสถานการณ์นี้ จึงต้องหา channel จาก active_view ที่เก็บไว้ก่อน clear_guild
+    """
+    old_view = active_views.get(guild.id)
+    channel = old_view.channel if old_view else None
+    now_playing_msg = old_view.now_playing_msg if old_view else None
+    current_title = _trunc(old_view.current_track[1]) if old_view and old_view.current_track else "?"
+
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    full_block = (
+        f"\n[{ts}] ⏹ EXTERNAL_DISCONNECT\n"
+        f"  {'Guild':<9}: {_trunc(guild.name, 30)} ({guild.id})\n"
+        f"  {'เพลง':<9}: {current_title}"
+    )
+    print(full_block)
+    get_guild_logger(guild.id, guild.name).info(full_block)
+
+    if old_view:
+        old_view.now_playing_msg = None
+
+    guild_stopped.add(guild.id)
+    clear_guild(guild.id)
+
+    await asyncio.gather(
+        _delete_queue_add_msgs(guild.id),
+        _delete_search_result_msgs(guild.id),
+        _delete_queue_view_msg(guild.id),
+    )
+
+    if not channel:
+        return  # ไม่มี channel ให้แจ้งเตือน (เช่นบอทหลุดตอนยังไม่เคยเล่นเพลงเลย) — เคลียร์สถานะพอ
+
+    old_done = queue_done_msgs.pop(guild.id, None)
+    if old_done:
+        try: await old_done.delete()
+        except Exception: pass
+
+    done_embed = discord.Embed(
+        description="⏹ บอทถูกตัดการเชื่อมต่อจาก Voice Channel — หยุดเล่นเพลงแล้ว",
+        color=discord.Color.orange())
+
+    if now_playing_msg:
+        try:
+            await now_playing_msg.edit(embed=done_embed, view=None)
+            queue_done_msgs[guild.id] = now_playing_msg
+            return
+        except Exception:
+            pass
+
+    try:
+        done_msg = await channel.send(embed=done_embed)
+        queue_done_msgs[guild.id] = done_msg
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────
@@ -1979,7 +2128,14 @@ def register(tree: app_commands.CommandTree, loop_getter):
             voice_channel = interaction.user.voice.channel
             vc = interaction.guild.voice_client
             if not vc:
-                vc = await voice_channel.connect()
+                try:
+                    vc = await _connect_with_retry(voice_channel)
+                except Exception as connect_error:
+                    log("▶️ /play CONNECT ERROR", interaction, str(connect_error))
+                    await _del_search()
+                    return await interaction.followup.send(embed=discord.Embed(
+                        description="❌ เชื่อมต่อ Voice Channel ไม่สำเร็จ (เน็ตบอทไม่เสถียร) กรุณาลองใหม่อีกครั้ง",
+                        color=discord.Color.red()), ephemeral=True)
             elif vc.channel != voice_channel:
                 await vc.move_to(voice_channel)
 
@@ -2157,17 +2313,24 @@ def register(tree: app_commands.CommandTree, loop_getter):
             queue_done_msgs[interaction.guild.id] = done_msg
 
     @tree.command(name="clear", description="ลบข้อความในช่อง")
-    @app_commands.describe(amount="จำนวนข้อความที่ต้องการลบ (1-100)")
+    @app_commands.describe(amount="จำนวนข้อความที่ต้องการลบ (1-100) — ไม่ระบุ = ลบสูงสุด 100")
     @app_commands.checks.has_permissions(manage_messages=True)
-    async def slash_clear(interaction: discord.Interaction, amount: int):
+    async def slash_clear(interaction: discord.Interaction, amount: int = 100):
         if not 1 <= amount <= 100:
             return await safe_respond(interaction, "❌ ใส่จำนวน 1-100 เท่านั้น", ephemeral=True)
 
         await interaction.response.send_message(embed=discord.Embed(
             description="🧹 กำลังลบข้อความ", color=0x1a1a2e), ephemeral=True)
 
+        # กันไม่ให้ลบข้อความ Now Playing ที่กำลังทำงานอยู่ (มีปุ่มควบคุมเพลง)
+        # ส่วนข้อความอื่นๆ เช่น "เพิ่มใน Queue", ผลการค้นหา, เล่นครบ Queue ฯลฯ ลบได้ตามปกติ
+        active_view = active_views.get(interaction.guild.id)
+        protected_msg_id = active_view.now_playing_msg.id if active_view and active_view.now_playing_msg else None
+
         cutoff = discord.utils.utcnow() - datetime.timedelta(days=14)
-        messages = [msg async for msg in interaction.channel.history(limit=amount)]
+        fetched = [msg async for msg in interaction.channel.history(limit=amount)]
+        messages = [m for m in fetched if m.id != protected_msg_id]
+        skipped_now_playing = len(fetched) != len(messages)
         bulk = [m for m in messages if m.created_at > cutoff]
         old_msgs = [m for m in messages if m.created_at <= cutoff]
         deleted = 0
@@ -2189,7 +2352,12 @@ def register(tree: app_commands.CommandTree, loop_getter):
                     await asyncio.sleep(1.2)
                 except (discord.NotFound, discord.HTTPException): pass
 
-        note = f" (รวมข้อความเก่า {len(old_msgs)} ข้อความ)" if old_msgs else ""
+        note_parts = []
+        if old_msgs:
+            note_parts.append(f"รวมข้อความเก่า {len(old_msgs)} ข้อความ")
+        if skipped_now_playing:
+            note_parts.append("เว้นเครื่องเล่นเพลงที่กำลังทำงานอยู่")
+        note = f" ({' · '.join(note_parts)})" if note_parts else ""
         result_embed = discord.Embed(
             description=f"🗑️ ลบข้อความไปแล้ว {deleted} ข้อความ{note}", color=0x1a1a2e)
         try:
