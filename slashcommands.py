@@ -686,13 +686,32 @@ def make_queue_embed(guild_id: int, current_idx: int = None):
     for i, t in enumerate(q):
         no = display_no(guild_id, i)
         display_title = queue_display_titles.get(t[0], t[1])
+        duration = t[2]
         if i == idx:
             t_cut = _truncate_display_width(display_title, _QUEUE_TITLE_PLAYING)
-            lines.append(f"**▶ {no}. {t_cut} ◀ กำลังเล่น**")
+            lines.append(f"**▶ {no}. {t_cut} ⏱ {duration} ◀ กำลังเล่น**")
         else:
             t_cut = _truncate_display_width(display_title, _QUEUE_TITLE_NORMAL)
-            lines.append(f"`{no}.` {t_cut}")
-    embed = discord.Embed(title="📋 Queue เพลง", description="\n".join(lines), color=0x5865F2)
+            lines.append(f"`{no}.` {t_cut} ⏱ `{duration}`")
+
+    # จำกัดแสดงสูงสุด 50 คิว กันบรรทัดยาวเกิน Discord embed limit (4096 ตัวอักษร)
+    # ถ้าคิวยาวกว่านี้ ตัดที่ 50 แล้วเติมข้อความสรุปจำนวนที่เหลือแทน
+    _QUEUE_DISPLAY_LIMIT = 50
+    if len(lines) > _QUEUE_DISPLAY_LIMIT:
+        kept = lines[:_QUEUE_DISPLAY_LIMIT]
+        omitted_count = len(lines) - _QUEUE_DISPLAY_LIMIT
+        # ถ้าเพลงที่กำลังเล่นหลุดไปอยู่นอกส่วนที่ตัดมา ให้แนบบรรทัดนั้นแทรกไว้ท้ายสุดเสมอ
+        # (ผู้ใช้ควรเห็นว่ากำลังเล่นเพลงไหนอยู่แม้คิวจะยาวเกินจะแสดงหมด)
+        if idx >= _QUEUE_DISPLAY_LIMIT and idx < len(lines):
+            kept.append(lines[idx])
+            omitted_count -= 1
+        if omitted_count > 0:
+            kept.append(f"\nและอีก {omitted_count} เพลง")
+        description = "\n".join(kept)
+    else:
+        description = "\n".join(lines)
+
+    embed = discord.Embed(title="📋 Queue เพลง", description=description, color=0x5865F2)
     embed.set_footer(text=f"กำลังเล่น #{display_no(guild_id, idx)} จาก {get_total_added(guild_id)} เพลง")
     return embed
 
@@ -961,7 +980,7 @@ class VolumeModal(discord.ui.Modal, title="🔊 ปรับระดับเ�
         set_guild_volume(self.player_view.guild.id, vol_level)
         if self.vc.source:
             self.vc.source.volume = vol_level
-        log("🔊 VOLUME", interaction, f"ระดับเสียง: {vol}%")
+        log("🔊 VOLUME", interaction, f"Volume: {vol}%")
         await interaction.response.send_message(f"🔊 ระดับเสียง: **{vol}%**", ephemeral=True)
 
 
@@ -997,6 +1016,7 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
 
     async def on_submit(self, interaction: discord.Interaction):
         query_str = str(self.query).strip()
+        log("🔍 SEARCH", interaction, f"query: {_trunc(query_str, 50)}")
         await interaction.response.send_message(
             embed=discord.Embed(description=f"🔍 กำลังค้นหา **{query_str}**", color=0x1a1a2e))
         searching_msg = await interaction.original_response()
@@ -1582,6 +1602,17 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
             add_to_queue(guild.id, track)
             added.append(track)
         await _refresh_queue_msg(guild.id)
+        # อัปเดต now playing embed ให้เลข "จาก X เพลง" ตรงกับจำนวนจริงทันที
+        # ไม่งั้นเลขจะค้างที่ตอนเพลงแรกเริ่มเล่น จนกว่าจะ skip/prev หรือเพลงเปลี่ยนเอง
+        old_view = active_views.get(guild.id)
+        if old_view and old_view.now_playing_msg and old_view.current_track:
+            _u, _ti, _du, _rq, *_th = old_view.current_track
+            _tn = _th[0] if _th else None
+            try:
+                await old_view.now_playing_msg.edit(embed=make_now_playing_embed(
+                    _ti, _du, _rq, _tn, _queue_pos_str(guild.id, get_now_idx(guild.id))))
+            except Exception:
+                pass
 
     await _send_playlist_added_summary(guild.id, channel, requester, added)
 
@@ -1698,9 +1729,16 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
     vc.stop()
     # ไม่ discard ที่นี่ — play_next จะ discard เอง
 
-    vc.play(source, after=lambda e, _idx=idx, _track=track:
-            asyncio.run_coroutine_threadsafe(
-                play_next(view.guild, view.channel, view.loop, current_track=_track, current_idx=_idx, error=e), view.loop))
+    try:
+        vc.play(source, after=lambda e, _idx=idx, _track=track:
+                asyncio.run_coroutine_threadsafe(
+                    play_next(view.guild, view.channel, view.loop, current_track=_track, current_idx=_idx, error=e), view.loop))
+    except Exception:
+        # vc.play() พังก่อนตั้ง callback สำเร็จ (เช่น ffmpeg spawn ไม่ได้) —
+        # ไม่มี play_next callback มา discard flag นี้ ต้อง discard เองกันค้าง
+        # (ค้างแล้วเพลงถัดไปทุกเพลงจะไม่เล่นต่อเลย)
+        guild_changing.discard(view.guild.id)
+        raise
 
     embed = make_now_playing_embed(title, duration, requester, thumbnail,
                                    _queue_pos_str(view.guild.id, idx))
@@ -1770,13 +1808,13 @@ class PlayerView(discord.ui.View):
         if vc.is_playing():
             vc.pause()
             button.emoji = "▶️"
-            log("⏸ PAUSE", interaction, f"เพลง: {title}")
+            log("⏸ PAUSE", interaction, f"Track: {title}")
             try: await interaction.response.edit_message(view=self)
             except Exception: pass
         elif vc.is_paused():
             vc.resume()
             button.emoji = "⏸"
-            log("▶️ RESUME", interaction, f"เพลง: {title}")
+            log("▶️ RESUME", interaction, f"Track: {title}")
             try: await interaction.response.edit_message(view=self)
             except Exception: pass
         else:
@@ -1809,7 +1847,7 @@ class PlayerView(discord.ui.View):
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
         vc = self.guild.voice_client
-        log("⏹ STOP", interaction, f"เพลง: {_trunc(self.current_track[1]) if self.current_track else '?'}")
+        log("⏹ STOP", interaction, f"Track: {_trunc(self.current_track[1]) if self.current_track else '?'}")
 
         # ตอบ interaction ทันที ก่อนงานลบ/disconnect ที่ใช้เวลา กัน Discord ฟ้อง "ปุ่มไม่ตอบสนอง"
         try: await interaction.response.defer()
@@ -1849,7 +1887,6 @@ class PlayerView(discord.ui.View):
                        custom_id="player_search")
     async def search(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
-        log("🔍 SEARCH", interaction)
         loop = self.loop_getter()
         modal = SearchModal(self.guild, self.channel, loop, self.loop_getter)
         await interaction.response.send_modal(modal)
@@ -2096,8 +2133,8 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
 
 def register(tree: app_commands.CommandTree, loop_getter):
 
-    @tree.command(name="play", description="เล่นเพลง YouTube/Spotify หรือ Playlist")
-    @app_commands.describe(query="ชื่อเพลง URL YouTube/Spotify/Playlist Link")
+    @tree.command(name="play", description="เล่นเพลงหรือค้นหาเพลง รองรับ YouTube/Spotify/SoundCloud/Bandcamp และ Playlist")
+    @app_commands.describe(query="ชื่อเพลงที่จะค้นหา หรือ URL เพลง/Playlist จาก YouTube, Spotify, SoundCloud, Bandcamp")
     async def slash_play(interaction: discord.Interaction, query: str):
         if not interaction.user.voice:
             return await safe_respond(interaction, embed=discord.Embed(
@@ -2270,7 +2307,7 @@ def register(tree: app_commands.CommandTree, loop_getter):
                 color=discord.Color.red()), ephemeral=True)
         cur = active_views.get(interaction.guild.id)
         log("⏹ /stop", interaction,
-            f"เพลง: {_trunc(cur.current_track[1]) if cur and cur.current_track else '?'}")
+            f"Track: {_trunc(cur.current_track[1]) if cur and cur.current_track else '?'}")
 
         # ลบข้อความเก่าของบอทใน channel นี้
         asyncio.create_task(_cleanup_channel(interaction.channel))
