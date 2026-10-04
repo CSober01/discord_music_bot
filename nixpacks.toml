@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["ffmpeg", "libsodium"]
+nixPkgs = ["ffmpeg", "libsodium", "deno"]
 
 [phases.install]
-cmds = ["pip install -U discord.py[voice] PyNaCl --break-system-packages"]
+cmds = ["pip install -U \"discord.py[voice]\" \"yt-dlp[default]\" PyNaCl --break-system-packages"]

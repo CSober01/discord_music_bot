@@ -2013,10 +2013,14 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             if 0 <= current_idx < len(q_now):
                 failed_title = q_now[current_idx][1]
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(
+        glog(
+            guild.id,
+            guild.name,
             f"[{ts}] ✗ PLAYBACK_ERROR\n"
             f"  {'Track':<9}: {_trunc(failed_title or '?', 60)}\n"
-            f"  {'Error':<9}: {_trunc(str(error), 120)}"
+            f"  {'Error':<9}: {_trunc(str(error), 120)}",
+            level="error",
+            console=False,
         )
         try:
             await channel.send(embed=discord.Embed(
