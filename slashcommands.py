@@ -662,8 +662,9 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
 
     embed = discord.Embed(color=0x5865F2)
     embed.set_author(name="🎵  NOW PLAYING")
+    display_title = _clean_player_title(title)
     embed.description = (
-        f"**{_truncate_display_width(title, 58)}**\n"
+        f"**{display_title}**\n"
         f"{_truncate_display_width(artist, 44)}  •  YouTube\n"
         f"👤 {requester_str}  •  {duration}\n"
     )
@@ -730,6 +731,56 @@ def _char_display_width(char: str) -> int:
     if unicodedata.combining(char):
         return 0
     return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+def _clean_player_title(text: str) -> str:
+    """Remove common YouTube video metadata while preserving the actual song title."""
+    if not text:
+        return text
+
+    cleaned = html.unescape(text).strip()
+
+    # Remove common leading metadata tags such as [MV], [Official Video], [Lyrics].
+    leading_patterns = (
+        r"^\s*[\[(]\s*(?:mv|music\s+video|official(?:\s+music)?\s+video|official\s+audio|"
+        r"official\s+lyric(?:s)?\s+video|lyrics?|lyric\s+video|audio|visualizer|"
+        r"performance|live|4k|hd|uhd)\s*[\])]\s*",
+    )
+    for pattern in leading_patterns:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+
+    # Remove parenthesized/bracketed metadata anywhere in the title.
+    metadata_group = (
+        r"official(?:\s+music)?\s+video|official\s+audio|official\s+lyric(?:s)?\s+video|"
+        r"music\s+video|lyric(?:s)?(?:\s+video)?|audio|visualizer|performance|live|"
+        r"mv|amv|fmv|4k|hd|uhd|remaster(?:ed)?"
+    )
+    cleaned = re.sub(
+        rf"\s*[\[(]\s*(?:{metadata_group})\s*[\])]\s*",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    # If an AMV/FMV label is followed by extra video context, drop that suffix.
+    cleaned = re.sub(
+        r"\s+(?:AMV|FMV)\b.*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    # Remove trailing separators followed only by common video metadata.
+    cleaned = re.sub(
+        rf"\s*(?:\||•|[-–—])\s*(?:{metadata_group})(?:\s+.*)?$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    # Collapse whitespace left behind by removed tags.
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" -–—|•")
+    return cleaned
+
 
 def _truncate_display_width(text: str, max_width: int) -> str:
     """ตัดข้อความตามความกว้างที่มองเห็น แทนการนับจำนวนตัวอักษรล้วน ๆ."""
