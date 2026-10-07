@@ -85,15 +85,8 @@ DEFAULT_VOLUME = 0.10  # 10%
 
 full_queues: dict[int, list] = {}
 now_playing_idx: dict[int, int] = {}
-# queue_seq_offset = เลขลำดับสะสมของเพลงแรก (index 0) ใน full_queues ตอนนี้
-# ใช้แสดงผลเลขลำดับเพลงแบบนับต่อเนื่อง ไม่รีเซ็ตเมื่อตัดเพลงเก่าออก
-# เช่น ถ้าตัดเพลง #1-13 ออก เพลงที่เหลือ index 0 จะมี seq_offset = 13
-# แสดงผลเป็น #14 (= index 0 + 1 + offset 13)
-queue_seq_offset: dict[int, int] = {}
-
-# guild_total_added = จำนวนเพลงสะสมทั้งหมดที่เพิ่มเข้า queue (ไม่รีเซ็ตเมื่อตัดเพลงเก่า)
-# ใช้แสดง "กำลังเล่น #X จาก Y เพลง" ให้ Y = จำนวนจริงเสมอ
-guild_total_added: dict[int, int] = {}
+# Queue numbering is always based on the current in-memory queue.
+# The player position and Queue list therefore use the exact same numbering.
 
 active_views: dict[int, "PlayerView"] = {}
 queue_done_msgs: dict[int, object] = {}
@@ -155,12 +148,9 @@ def bump_playback_generation(guild_id: int) -> int:
 def set_guild_volume(guild_id: int, vol: float):
     guild_volumes[guild_id] = vol
 
-def get_seq_offset(guild_id: int) -> int:
-    return queue_seq_offset.get(guild_id, 0)
-
 def display_no(guild_id: int, idx: int) -> int:
-    """แปลง list-index เป็นเลขลำดับสะสมที่จะแสดงให้ผู้ใช้เห็น (ไม่รีเซ็ตเมื่อตัดเพลงเก่า)"""
-    return idx + 1 + get_seq_offset(guild_id)
+    """แปลง list-index เป็นเลขลำดับใน Queue ปัจจุบัน (1-based)."""
+    return idx + 1
 
 def _trim_queue(guild_id: int):
     """ตัดเพลงเก่าออกจากบนสุดของคิว ถ้าคิวยาวเกิน MAX_QUEUE
@@ -177,7 +167,6 @@ def _trim_queue(guild_id: int):
     if trim_count > 0:
         del q[:trim_count]
         set_now_idx(guild_id, now_idx - trim_count)
-        queue_seq_offset[guild_id] = get_seq_offset(guild_id) + trim_count
 
         # ปรับ key ของ queue_add_msgs (ข้อความ "เพิ่มใน Queue #") ให้ตรงกับตำแหน่งใหม่
         # ไม่งั้นข้อความจะไม่ถูกลบตอนเพลงนั้นเริ่มเล่นจริง เพราะ key เดิมอ้างถึง index ที่ไม่มีอยู่แล้ว
@@ -194,16 +183,9 @@ def _trim_queue(guild_id: int):
                     pass
             queue_add_msgs[guild_id] = shifted
 
-def get_total_added(guild_id: int) -> int:
-    return guild_total_added.get(guild_id, 0)
-
-def increment_total_added(guild_id: int, count: int = 1):
-    guild_total_added[guild_id] = guild_total_added.get(guild_id, 0) + count
-
 def add_to_queue(guild_id: int, track) -> int:
     q = get_full_queue(guild_id)
     q.append(track)
-    increment_total_added(guild_id)
     _trim_queue(guild_id)
     return len(q) - 1
 
@@ -216,8 +198,6 @@ def clear_guild(guild_id: int):
             queue_display_titles.pop(track[0], None)
     full_queues[guild_id] = []
     now_playing_idx[guild_id] = 0
-    queue_seq_offset[guild_id] = 0
-    guild_total_added[guild_id] = 0
     guild_volumes.pop(guild_id, None)
     loop_modes.pop(guild_id, None)
     shuffle_enabled.discard(guild_id)
@@ -226,7 +206,8 @@ def clear_guild(guild_id: int):
     search_result_msgs.pop(guild_id, None)
 
 def _queue_pos_str(guild_id: int, idx: int) -> str:
-    return f"กำลังเล่น #{display_no(guild_id, idx)} จาก {get_total_added(guild_id)} เพลง"
+    q = get_full_queue(guild_id)
+    return f"กำลังเล่น #{display_no(guild_id, idx)} จาก {len(q)} เพลง"
 
 def get_ydl_options(include_playlist: bool = False) -> dict:
     """Use yt-dlp's current YouTube client defaults and shared retry settings."""
@@ -1073,7 +1054,85 @@ class VolumeModal(discord.ui.Modal, title="🔊 ปรับระดับเ�
         if self.vc.source:
             self.vc.source.volume = vol_level
         log("🔊 VOLUME", interaction, f"Volume: {vol}%")
-        await interaction.response.send_message(f"🔊 ระดับเสียง: **{vol}%**", ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+
+
+class PlaylistAmountModal(discord.ui.Modal, title="➕ เพิ่มเพลงจาก Playlist"):
+    def __init__(self, playlist_tracks, on_select):
+        super().__init__(custom_id="playlist_amount_modal")
+        self.playlist_tracks = playlist_tracks
+        self.on_select = on_select
+        self.amount_input = discord.ui.TextInput(
+            label="จำนวนเพลงที่จะเพิ่ม",
+            placeholder="ใส่จำนวน 1-50",
+            min_length=1,
+            max_length=2,
+            custom_id="playlist_amount_input",
+        )
+        self.add_item(self.amount_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            amount = int(str(self.amount_input).strip())
+            if not 1 <= amount <= 50:
+                raise ValueError
+        except ValueError:
+            return await interaction.response.send_message(
+                "❌ กรุณาใส่จำนวน 1-50", ephemeral=True
+            )
+        await interaction.response.defer(ephemeral=True)
+        await self.on_select(interaction, min(amount, max(0, len(self.playlist_tracks) - 1)))
+
+
+class PlaylistAmountView(discord.ui.View):
+    def __init__(self, owner_id, playlist_tracks, on_select):
+        super().__init__(timeout=60)
+        self.owner_id = owner_id
+        self.playlist_tracks = playlist_tracks
+        self.on_select = on_select
+
+    async def _choose(self, interaction: discord.Interaction, amount: int):
+        if interaction.user.id != self.owner_id:
+            return await safe_respond(
+                interaction,
+                "❌ เฉพาะผู้ที่เรียก Playlist นี้เท่านั้นที่เลือกได้",
+                ephemeral=True,
+            )
+        await interaction.response.defer(ephemeral=True)
+        amount = min(amount, max(0, len(self.playlist_tracks) - 1))
+        await self.on_select(interaction, amount)
+        self.stop()
+
+    @discord.ui.button(label="ไม่เพิ่ม", style=discord.ButtonStyle.secondary, row=0)
+    async def none(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._choose(interaction, 0)
+
+    @discord.ui.button(label="10", style=discord.ButtonStyle.primary, row=0)
+    async def ten(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._choose(interaction, 10)
+
+    @discord.ui.button(label="20", style=discord.ButtonStyle.primary, row=0)
+    async def twenty(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._choose(interaction, 20)
+
+    @discord.ui.button(label="50", style=discord.ButtonStyle.primary, row=0)
+    async def fifty(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._choose(interaction, 50)
+
+    @discord.ui.button(label="เลือกจำนวน", style=discord.ButtonStyle.success, row=1)
+    async def custom(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            return await safe_respond(
+                interaction,
+                "❌ เฉพาะผู้ที่เรียก Playlist นี้เท่านั้นที่เลือกได้",
+                ephemeral=True,
+            )
+        await interaction.response.send_modal(
+            PlaylistAmountModal(self.playlist_tracks, self.on_select)
+        )
 
 
 # ─────────────────────────────────────────────
@@ -2582,16 +2641,60 @@ def register(tree: app_commands.CommandTree, loop_getter):
                         return await interaction.followup.send(embed=discord.Embed(
                             description="❌ ไม่พบเพลงในเพลย์ลิสต์", color=discord.Color.red()), ephemeral=True)
                     
-                    added_results = await _add_playlist_to_queue(
+                    await _del_search()
+                    if not playlist_tracks:
+                        return await interaction.followup.send(embed=discord.Embed(
+                            description="❌ ไม่พบเพลงในเพลย์ลิสต์",
+                            color=discord.Color.red()), ephemeral=True)
+
+                    async def _apply_playlist_amount(choice_interaction, extra_count):
+                        selected_tracks = playlist_tracks[:1 + extra_count]
+                        try:
+                            result = await _add_playlist_to_queue(
+                                vc, interaction.guild, interaction.channel, loop_getter,
+                                selected_tracks, interaction.user)
+                            if not result:
+                                await choice_interaction.followup.send(
+                                    "❌ ไม่สามารถดึงเพลงจากเพลย์ลิสต์ได้เลย",
+                                    ephemeral=True,
+                                )
+                        except Exception as e:
+                            print(f"Playlist selection error: {str(e)}")
+                            try:
+                                await choice_interaction.followup.send(
+                                    "❌ ไม่สามารถโหลดเพลงจากเพลย์ลิสต์ได้",
+                                    ephemeral=True,
+                                )
+                            except Exception:
+                                pass
+
+                    if len(playlist_tracks) > 1:
+                        available = len(playlist_tracks) - 1
+                        prompt = (
+                            f"📋 Playlist นี้มี **{len(playlist_tracks)} เพลง**\n"
+                            f"เพลงแรกจะเล่นก่อนทันที\n"
+                            f"ต้องการเพิ่มเพลงอื่นอีกกี่เพลง? (สูงสุด {available} เพลง)"
+                        )
+                        prompt_view = PlaylistAmountView(
+                            interaction.user.id, playlist_tracks, _apply_playlist_amount
+                        )
+                        await interaction.followup.send(
+                            embed=discord.Embed(
+                                description=prompt,
+                                color=discord.Color.blurple(),
+                            ),
+                            view=prompt_view,
+                            ephemeral=True,
+                        )
+                        return
+
+                    result = await _add_playlist_to_queue(
                         vc, interaction.guild, interaction.channel, loop_getter,
                         playlist_tracks, interaction.user)
-                    
-                    await _del_search()
-                    if not added_results:
+                    if not result:
                         return await interaction.followup.send(embed=discord.Embed(
-                            description="❌ ไม่สามารถดึงเพลงจากเพลย์ลิสต์ได้เลย", color=discord.Color.red()), ephemeral=True)
-                    # เพลงแรกเล่นทันทีแล้ว (เห็นจาก Now Playing embed)
-                    # เพลงที่เหลือกำลังโหลดในพื้นหลัง จะมีข้อความสรุปตามมาเอง
+                            description="❌ ไม่สามารถดึงเพลงจากเพลย์ลิสต์ได้เลย",
+                            color=discord.Color.red()), ephemeral=True)
                     return
                     
                 except ValueError as e:
