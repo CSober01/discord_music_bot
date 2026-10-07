@@ -1164,7 +1164,10 @@ class VolumeModal(discord.ui.Modal, title="🔊 ปรับระดับเ�
             self.vc.source.volume = vol_level
         await _refresh_player(self.player_view.guild.id)
         log("🔊 VOLUME", interaction, f"Volume: {vol}%")
-        await interaction.response.send_message(f"🔊 ระดับเสียง: **{vol}%**", ephemeral=True)
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────
