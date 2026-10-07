@@ -1872,11 +1872,7 @@ async def _send_playlist_added_summary(guild_id: int, channel, requester, tracks
 # ─────────────────────────────────────────────
 
 async def _do_play_at_idx(view: "PlayerView", idx: int):
-    """
-    เล่นเพลงที่ idx โดยไม่สร้าง message ใหม่ — edit embed เดิม
-    ต้องเรียกหลัง interaction.response.defer() หรือ edit_message แล้ว
-    """
-    # อัปเดต now_idx แล้วลอง trim ก่อนดึง track ออกมา กัน index เพี้ยนหลัง trim
+    """Play a queue item and refresh the existing Player/Queue UI."""
     set_now_idx(view.guild.id, idx)
     _trim_queue(view.guild.id)
     idx = get_now_idx(view.guild.id)
@@ -1888,6 +1884,7 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
 
     view.current_track = track
     view.current_idx = idx
+    view.volume_level = get_guild_volume(view.guild.id)
     active_views[view.guild.id] = view
 
     source = discord.PCMVolumeTransformer(
@@ -1896,40 +1893,21 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
     # guild_changing กัน play_next callback เก่า (ที่ยิงมาจาก vc.stop())
     guild_changing.add(view.guild.id)
     vc.stop()
-    # ไม่ discard ที่นี่ — play_next จะ discard เอง
 
     try:
         vc.play(source, after=lambda e, _idx=idx, _track=track:
                 asyncio.run_coroutine_threadsafe(
                     play_next(view.guild, view.channel, view.loop, current_track=_track, current_idx=_idx, error=e), view.loop))
     except Exception:
-        # vc.play() พังก่อนตั้ง callback สำเร็จ (เช่น ffmpeg spawn ไม่ได้) —
-        # ไม่มี play_next callback มา discard flag นี้ ต้อง discard เองกันค้าง
-        # (ค้างแล้วเพลงถัดไปทุกเพลงจะไม่เล่นต่อเลย)
         guild_changing.discard(view.guild.id)
         raise
 
-    embed = make_now_playing_embed(title, duration, requester, thumbnail,
-                                   _queue_pos_str(view.guild.id, idx))
-
-    # ลบ "เพิ่มใน Queue" ของเพลงที่เริ่มเล่น
     add_msg = queue_add_msgs.get(view.guild.id, {}).pop(idx, None)
     if add_msg:
         try: await add_msg.delete()
         except Exception: pass
 
-    # Edit embed ของ now_playing_msg เดิม
-    if view.now_playing_msg:
-        try:
-            await view.now_playing_msg.edit(embed=embed, view=view)
-        except Exception:
-            view.now_playing_msg = None
-            msg = await view.channel.send(embed=embed, view=view)
-            view.now_playing_msg = msg
-    else:
-        msg = await view.channel.send(embed=embed, view=view)
-        view.now_playing_msg = msg
-
+    await _refresh_player(view.guild.id)
     await _refresh_queue_msg(view.guild.id)
 
 
