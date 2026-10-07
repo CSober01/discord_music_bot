@@ -1267,6 +1267,8 @@ class PlaylistCountView(discord.ui.View):
 
 
 class RadioChoiceView(discord.ui.View):
+    """ตัวเลือกแรกของ YouTube Radio/Mix — แสดงทันทีโดยยังไม่เชื่อมต่อ VC/โหลด playlist."""
+
     def __init__(self, query, guild, channel, loop_getter, requester, loop):
         super().__init__(timeout=30)
         self.query = query
@@ -1277,6 +1279,25 @@ class RadioChoiceView(discord.ui.View):
         self.loop = loop
         self.message = None
         self._busy = False
+
+        # ใช้ dynamic buttons เพื่อให้แน่ใจว่า Discord ส่ง components ไปพร้อม View
+        single = discord.ui.Button(
+            emoji="▶️",
+            label="เล่นเพลงนี้เท่านั้น",
+            style=discord.ButtonStyle.primary,
+            custom_id="youtube_radio_single",
+        )
+        single.callback = self.single_btn
+        self.add_item(single)
+
+        playlist = discord.ui.Button(
+            emoji="📋",
+            label="โหลดเพลงจาก Radio",
+            style=discord.ButtonStyle.secondary,
+            custom_id="youtube_radio_playlist",
+        )
+        playlist.callback = self.radio_btn
+        self.add_item(playlist)
 
     async def _check_requester(self, interaction):
         if interaction.user.id != self.requester.id:
@@ -1312,19 +1333,19 @@ class RadioChoiceView(discord.ui.View):
             except Exception:
                 pass
 
-    @discord.ui.button(emoji="▶️", label="เล่นเพลงนี้เท่านั้น", style=discord.ButtonStyle.primary,
-                       custom_id="youtube_radio_single")
-    async def single_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def single_btn(self, interaction: discord.Interaction):
         if not await self._check_requester(interaction):
             return
         if self._busy:
             return await interaction.response.defer()
+
         self._busy = True
         try:
             await interaction.response.defer()
             vc = await self._connect_voice(interaction)
             if not vc:
                 return
+
             single_url = _remove_youtube_list_param(self.query)
             url, title, duration, thumbnail = await asyncio.to_thread(fetch_track, single_url)
             track = (url, title, duration, interaction.user, thumbnail)
@@ -1339,22 +1360,26 @@ class RadioChoiceView(discord.ui.View):
         finally:
             self._busy = False
 
-    @discord.ui.button(emoji="📋", label="โหลดเพลงจาก Radio", style=discord.ButtonStyle.secondary,
-                       custom_id="youtube_radio_playlist")
-    async def radio_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def radio_btn(self, interaction: discord.Interaction):
         if not await self._check_requester(interaction):
             return
         if self._busy:
             return await interaction.response.defer()
+
         self._busy = True
         try:
             await interaction.response.defer()
+
+            # เชื่อมต่อ VC หลังผู้ใช้เลือก "โหลด Radio" เท่านั้น
             vc = await self._connect_voice(interaction)
             if not vc:
                 return
+
+            # ดึง metadata แบบ flat เพื่อสร้างตัวเลือกจำนวนเพลง
             playlist_tracks = await asyncio.to_thread(fetch_playlist_tracks, self.query)
             if not playlist_tracks:
-                await interaction.followup.send("❌ ไม่พบเพลงจาก Radio/Mix นี้", ephemeral=True)
+                await interaction.followup.send(
+                    "❌ ไม่พบเพลงจาก Radio/Mix นี้", ephemeral=True)
                 return
 
             await self._close()
@@ -1381,7 +1406,8 @@ class RadioChoiceView(discord.ui.View):
         except Exception as e:
             log("📻 RADIO PLAYLIST ERROR", interaction, str(e))
             try:
-                await interaction.followup.send("❌ ไม่สามารถโหลดเพลงจาก Radio/Mix นี้ได้", ephemeral=True)
+                await interaction.followup.send(
+                    "❌ ไม่สามารถโหลดเพลงจาก Radio/Mix นี้ได้", ephemeral=True)
             except Exception:
                 pass
         finally:
@@ -1443,6 +1469,30 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
             except Exception: pass
 
         try:
+            # ตรวจ URL ก่อนเชื่อมต่อ VC เพื่อให้ Radio/Mix แสดงตัวเลือกทันที
+            is_url = query_str.startswith("http://") or query_str.startswith("https://")
+
+            # Radio/Mix: ไม่ต้องเชื่อม VC ก่อนแสดงตัวเลือก
+            if is_url and is_youtube_radio_url(query_str):
+                await _ack_done()
+                await self._delete_done_msg()
+                view = RadioChoiceView(
+                    query_str, self.guild, self.channel, self.loop_getter,
+                    interaction.user, self.loop,
+                )
+                prompt = await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="📻 YouTube Radio / Mix",
+                        description="ต้องการเล่นแบบไหน?",
+                        color=0x1a1a2e,
+                    ),
+                    view=view,
+                    ephemeral=True,
+                    wait=True,
+                )
+                view.message = prompt
+                return
+
             vc = self.guild.voice_client
             if not vc:
                 if not interaction.user.voice:
@@ -1465,11 +1515,6 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                     await _send_error("❌ ไม่สามารถย้ายบอทไป Voice Channel ของคุณได้")
                     return
 
-            if not vc:
-                await _ack_done()
-                await _send_error("❌ เกิดปัญหาในการเชื่อมต่อ Voice Channel")
-                return
-
             # ตรวจสอบว่าเป็น URL หรือไม่
             is_url = query_str.startswith("http://") or query_str.startswith("https://")
 
@@ -1480,65 +1525,6 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                 await _send_error(f"❌ URL ไม่ถูกต้อง (`{query_str[:40]}`)\n💡 ลองวาง URL ใหม่อีกครั้ง")
                 return
 
-            # YouTube Mix/Radio (list=RD...) ให้ผู้ใช้เลือกก่อนว่า
-            # จะเล่นเพลงนี้อย่างเดียว หรือโหลดรายการ Radio ต่อ
-            if is_url and is_youtube_radio_url(query_str):
-                await _ack_done()
-                await self._delete_done_msg()
-                view = RadioChoiceView(
-                    query_str, self.guild, self.channel, self.loop_getter,
-                    interaction.user, self.loop,
-                )
-                prompt = await interaction.followup.send(
-                    embed=discord.Embed(
-                        title="📻 YouTube Radio / Mix",
-                        description="ต้องการเล่นแบบไหน?",
-                        color=0x1a1a2e,
-                    ),
-                    view=view,
-                    ephemeral=True,
-                    wait=True,
-                )
-                view.message = prompt
-                return
-
-            # YouTube Music album/playlist (list=OLAK...) ให้เลือกจำนวนเพลงก่อนเพิ่ม
-            if is_url and is_youtube_music_album_url(query_str):
-                try:
-                    playlist_tracks = await asyncio.to_thread(fetch_playlist_tracks, query_str)
-                    if not playlist_tracks:
-                        await _ack_done()
-                        await _send_error("❌ ไม่พบเพลงใน YouTube Music album")
-                        return
-
-                    await _ack_done()
-                    await self._delete_done_msg()
-                    count_view = PlaylistCountView(
-                        playlist_tracks,
-                        self.guild,
-                        self.channel,
-                        self.loop_getter,
-                        interaction.user,
-                        vc,
-                        source_label=" YouTube Music album",
-                    )
-                    prompt = await interaction.followup.send(
-                        embed=discord.Embed(
-                            title="💿 YouTube Music Album",
-                            description=f"พบ **{len(playlist_tracks)} เพลง**\nต้องการเพิ่มกี่เพลง?",
-                            color=0x1a1a2e,
-                        ),
-                        view=count_view,
-                        ephemeral=True,
-                        wait=True,
-                    )
-                    count_view.message = prompt
-                    return
-                except Exception as e:
-                    log("🔍 YOUTUBE MUSIC ALBUM ERROR", interaction, str(e))
-                    await _ack_done()
-                    await _send_error("❌ ไม่สามารถโหลด YouTube Music album ได้")
-                    return
 
             # ตรวจสอบว่าเป็น playlist หรือไม่
             if is_url and is_playlist_url(query_str):
@@ -2876,32 +2862,9 @@ def register(tree: app_commands.CommandTree, loop_getter):
                 except Exception: pass
 
         try:
-            voice_channel = interaction.user.voice.channel
-            vc = interaction.guild.voice_client
-            if not vc:
-                try:
-                    vc = await _connect_with_retry(voice_channel)
-                except Exception as connect_error:
-                    log("▶️ /play CONNECT ERROR", interaction, str(connect_error))
-                    await _del_search()
-                    return await interaction.followup.send(embed=discord.Embed(
-                        description="❌ เชื่อมต่อ Voice Channel ไม่สำเร็จ (เน็ตบอทไม่เสถียร) กรุณาลองใหม่อีกครั้ง",
-                        color=discord.Color.red()), ephemeral=True)
-            elif vc.channel != voice_channel:
-                await vc.move_to(voice_channel)
-
             is_url = query.strip().startswith("http://") or query.strip().startswith("https://")
 
-            # ตรวจ URL scheme ผิด เช่น ttps:// หรือ htp://
-            looks_like_url = re.search(r'^[a-zA-Z]{2,10}://', query.strip())
-            if looks_like_url and not is_url:
-                await _del_search()
-                return await interaction.followup.send(embed=discord.Embed(
-                    description=f"❌ URL ไม่ถูกต้อง (`{query.strip()[:40]}`)\n💡 ลองวาง URL ใหม่อีกครั้ง",
-                    color=discord.Color.red()), ephemeral=True)
-            
-            # YouTube Mix/Radio (list=RD...) ให้ผู้ใช้เลือกก่อนว่า
-            # จะเล่นเพลงนี้อย่างเดียว หรือโหลดรายการ Radio ต่อ
+            # Radio/Mix: แสดงตัวเลือกทันที ไม่ต้องเชื่อมต่อ VC หรือเรียก yt-dlp ก่อน
             if is_url and is_youtube_radio_url(query):
                 await _del_search()
                 view = RadioChoiceView(
@@ -2925,43 +2888,30 @@ def register(tree: app_commands.CommandTree, loop_getter):
                 view.message = prompt
                 return
 
-            # YouTube Music album/playlist (list=OLAK...) ให้เลือกจำนวนเพลงก่อนเพิ่ม
-            if is_url and is_youtube_music_album_url(query):
+            # OLAK ก็ต้องตรวจรายการก่อนเลือกจำนวนเพลง แต่ยังไม่เชื่อมต่อ VC จนกว่าจะเลือก
+            # flow นี้ยังใช้ logic เดิมของ PlaylistCountView ด้านล่าง
+            voice_channel = interaction.user.voice.channel
+            vc = interaction.guild.voice_client
+            if not vc:
                 try:
-                    playlist_tracks = await asyncio.to_thread(fetch_playlist_tracks, query)
-                    if not playlist_tracks:
-                        await _del_search()
-                        return await interaction.followup.send(embed=discord.Embed(
-                            description="❌ ไม่พบเพลงใน YouTube Music album", color=discord.Color.red()), ephemeral=True)
-
-                    await _del_search()
-                    count_view = PlaylistCountView(
-                        playlist_tracks,
-                        interaction.guild,
-                        interaction.channel,
-                        loop_getter,
-                        interaction.user,
-                        vc,
-                        source_label=" YouTube Music album",
-                    )
-                    prompt = await interaction.followup.send(
-                        embed=discord.Embed(
-                            title="💿 YouTube Music Album",
-                            description=f"พบ **{len(playlist_tracks)} เพลง**\nต้องการเพิ่มกี่เพลง?",
-                            color=0x1a1a2e,
-                        ),
-                        view=count_view,
-                        ephemeral=True,
-                        wait=True,
-                    )
-                    count_view.message = prompt
-                    return
-                except Exception as e:
-                    print(f"YouTube Music album error: {str(e)}")
+                    vc = await _connect_with_retry(voice_channel)
+                except Exception as connect_error:
+                    log("▶️ /play CONNECT ERROR", interaction, str(connect_error))
                     await _del_search()
                     return await interaction.followup.send(embed=discord.Embed(
-                        description="❌ ไม่สามารถโหลด YouTube Music album ได้",
+                        description="❌ เชื่อมต่อ Voice Channel ไม่สำเร็จ (เน็ตบอทไม่เสถียร) กรุณาลองใหม่อีกครั้ง",
                         color=discord.Color.red()), ephemeral=True)
+            elif vc.channel != voice_channel:
+                await vc.move_to(voice_channel)
+
+            # ตรวจ URL scheme ผิด เช่น ttps:// หรือ htp://
+            looks_like_url = re.search(r'^[a-zA-Z]{2,10}://', query.strip())
+            if looks_like_url and not is_url:
+                await _del_search()
+                return await interaction.followup.send(embed=discord.Embed(
+                    description=f"❌ URL ไม่ถูกต้อง (`{query.strip()[:40]}`)\n💡 ลองวาง URL ใหม่อีกครั้ง",
+                    color=discord.Color.red()), ephemeral=True)
+            
 
             # ตรวจสอบว่าเป็น playlist หรือไม่
             if is_url and is_playlist_url(query):
