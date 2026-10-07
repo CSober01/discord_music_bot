@@ -98,7 +98,7 @@ guild_total_added: dict[int, int] = {}
 active_views: dict[int, "PlayerView"] = {}
 queue_done_msgs: dict[int, object] = {}
 queue_add_msgs: dict[int, dict[int, object]] = {}
-queue_view_msgs: dict[int, object] = {}
+queue_view_msgs: dict[tuple[int, int], tuple[object, "QueueView"]] = {}
 search_result_msgs: dict[int, list] = {}
 
 # เก็บชื่อแบบสั้นสำหรับแสดงใน Queue โดยผูกกับ stream URL
@@ -206,7 +206,8 @@ def clear_guild(guild_id: int):
     loop_modes.pop(guild_id, None)
     shuffle_enabled.discard(guild_id)
     active_views.pop(guild_id, None)
-    queue_view_msgs.pop(guild_id, None)
+    for key in [key for key in queue_view_msgs if key[0] == guild_id]:
+        queue_view_msgs.pop(key, None)
     search_result_msgs.pop(guild_id, None)
 
 def _queue_pos_str(guild_id: int, idx: int) -> str:
@@ -639,7 +640,7 @@ async def send_search_results(results, guild, channel, loop, loop_getter, reques
 
 
 def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queue_pos=None):
-    """Modern Discord music player card — compact static UI."""
+    """Modern Discord music player card — compact, structured, static UI."""
     requester_str = requester.mention if requester else "ไม่ทราบชื่อ"
 
     guild_id = None
@@ -660,12 +661,15 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         if display_meta and " — " in display_meta:
             artist = display_meta.split(" — ", 1)[0]
 
+    display_title = _clean_player_title(title)
+
     embed = discord.Embed(color=0x5865F2)
     embed.set_author(name="🎵  NOW PLAYING")
     embed.description = (
-        f"**{_truncate_display_width(title, 58)}**\n"
-        f"{_truncate_display_width(artist, 44)}  •  YouTube\n"
-        f"👤 {requester_str}  •  {duration}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"**{display_title}**\n"
+        f"{_truncate_display_width(artist, 44)} • YouTube\n"
+        f"👤 {requester_str} • {duration}"
     )
 
     if guild_id is not None:
@@ -678,18 +682,15 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         elif mode == "queue":
             active_modes.append("🔁")
 
-        if active_modes:
-            embed.description += "\n" + " ".join(active_modes)
-
         volume_pct = round(get_guild_volume(guild_id) * 100)
-        embed.description += f"\n🔊 General  •  {volume_pct}%"
-        embed.description += "\n\n━━━━━━━━━━━"
+        mode_prefix = " ".join(active_modes)
+        status_line = f"{mode_prefix}  🔊 {volume_pct}%" if mode_prefix else f"🔊 {volume_pct}%"
+        embed.description += f"\n{status_line}"
+        embed.description += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
         if upcoming:
             next_count = len(upcoming)
-            embed.description += (
-                f"\n\n📋  QUEUE  •  {next_count} NEXT"
-            )
+            embed.description += f"\n📋 QUEUE • {next_count} NEXT"
             music_icons = ("🎧", "🎵", "🎶", "🎼")
             queue_lines = []
             for display_index, track in enumerate(upcoming, start=1):
@@ -698,9 +699,9 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
                 queue_title = _truncate_display_width(queue_title, 31)
                 icon = music_icons[(display_index - 1) % len(music_icons)]
                 queue_lines.append(
-                    f"**{display_index:02d}**  {icon} {_pad_queue_title(queue_title, 31)}  " + "`" + f"{track_duration}" + "`"
+                    f"**{display_index:02d}** {icon} {_pad_queue_title(queue_title, 31)} " + bt + f"{track_duration}" + bt
                 )
-            embed.description += "\n\n" + "\n".join(queue_lines)
+            embed.description += "\n" + "\n".join(queue_lines)
 
         if queue_pos:
             embed.set_footer(text=queue_pos)
@@ -709,7 +710,6 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         embed.set_thumbnail(url=thumbnail)
 
     return embed
-
 def _pad_queue_title(text: str, width: int) -> str:
     """Pad queue text by estimated display width for a stable Discord layout."""
     current_width = sum(_char_display_width(char) for char in text)
@@ -730,6 +730,56 @@ def _char_display_width(char: str) -> int:
     if unicodedata.combining(char):
         return 0
     return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+def _clean_player_title(text: str) -> str:
+    """Remove common YouTube video metadata while preserving the actual song title."""
+    if not text:
+        return text
+
+    cleaned = html.unescape(text).strip()
+
+    # Remove common leading metadata tags such as [MV], [Official Video], [Lyrics].
+    leading_patterns = (
+        r"^\s*[\[(]\s*(?:mv|music\s+video|official(?:\s+music)?\s+video|official\s+audio|"
+        r"official\s+lyric(?:s)?\s+video|lyrics?|lyric\s+video|audio|visualizer|"
+        r"performance|live|4k|hd|uhd)\s*[\])]\s*",
+    )
+    for pattern in leading_patterns:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+
+    # Remove parenthesized/bracketed metadata anywhere in the title.
+    metadata_group = (
+        r"official(?:\s+music)?\s+video|official\s+audio|official\s+lyric(?:s)?\s+video|"
+        r"music\s+video|lyric(?:s)?(?:\s+video)?|audio|visualizer|performance|live|"
+        r"mv|amv|fmv|4k|hd|uhd|remaster(?:ed)?"
+    )
+    cleaned = re.sub(
+        rf"\s*[\[(]\s*(?:{metadata_group})\s*[\])]\s*",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    # If an AMV/FMV label is followed by extra video context, drop that suffix.
+    cleaned = re.sub(
+        r"\s+(?:AMV|FMV)\b.*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    # Remove trailing separators followed only by common video metadata.
+    cleaned = re.sub(
+        rf"\s*(?:\||•|[-–—])\s*(?:{metadata_group})(?:\s+.*)?$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    # Collapse whitespace left behind by removed tags.
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip(" -–—|•")
+    return cleaned
+
 
 def _truncate_display_width(text: str, max_width: int) -> str:
     """ตัดข้อความตามความกว้างที่มองเห็น แทนการนับจำนวนตัวอักษรล้วน ๆ."""
@@ -870,20 +920,27 @@ async def safe_respond(interaction: discord.Interaction, content=None, embed=Non
             pass
 
 async def _refresh_queue_msg(guild_id: int):
-    wmsg = queue_view_msgs.get(guild_id)
-    if not wmsg:
+    """Refresh every open ephemeral Queue for this guild and keep each user page."""
+    targets = [(key, value) for key, value in queue_view_msgs.items() if key[0] == guild_id]
+    if not targets:
         return
-    try:
-        await wmsg.edit(embed=make_queue_embed(guild_id))
-    except Exception:
-        queue_view_msgs.pop(guild_id, None)
+    for key, (wmsg, view) in targets:
+        try:
+            view._sync_buttons()
+            embed = make_queue_embed(guild_id, current_idx=get_now_idx(guild_id), page=view.page)
+            await wmsg.edit(embed=embed, view=view)
+        except Exception:
+            queue_view_msgs.pop(key, None)
 
 async def _delete_queue_view_msg(guild_id: int):
-    wmsg = queue_view_msgs.pop(guild_id, None)
-    if wmsg:
-        try: await wmsg.delete()
-        except Exception: pass
-
+    """Delete all tracked ephemeral Queue views for this guild."""
+    targets = [(key, value) for key, value in queue_view_msgs.items() if key[0] == guild_id]
+    for key, (wmsg, _view) in targets:
+        queue_view_msgs.pop(key, None)
+        try:
+            await wmsg.delete()
+        except Exception:
+            pass
 async def _delete_search_result_msgs(guild_id: int):
     msgs = search_result_msgs.pop(guild_id, [])
     if not msgs:
@@ -920,7 +977,7 @@ async def cleanup_old_messages(bot=None):
     queue_add_msgs.clear()
     all_msgs.extend(queue_done_msgs.values())
     queue_done_msgs.clear()
-    all_msgs.extend(queue_view_msgs.values())
+    all_msgs.extend(value[0] for value in queue_view_msgs.values())
     queue_view_msgs.clear()
 
     if all_msgs:
@@ -1858,6 +1915,7 @@ class QueueView(discord.ui.View):
 
     def _sync_buttons(self):
         total_pages = self._page_count()
+        self.page = max(0, min(self.page, total_pages - 1))
         for item in self.children:
             if item.custom_id == "queue_previous_page":
                 item.disabled = self.page <= 0
@@ -1868,31 +1926,22 @@ class QueueView(discord.ui.View):
                 item.disabled = self.page >= total_pages - 1
 
     async def _update(self, interaction: discord.Interaction):
-        total_pages = self._page_count()
-        self.page = max(0, min(self.page, total_pages - 1))
         self._sync_buttons()
-        embed = make_queue_embed(
-            self.guild.id,
-            current_idx=get_now_idx(self.guild.id),
-            page=self.page,
-        )
+        embed = make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=self.page)
         await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary,
-                       custom_id="queue_previous_page", row=0)
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="queue_previous_page", row=0)
     async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.page <= 0:
             return await interaction.response.defer()
         self.page -= 1
         await self._update(interaction)
 
-    @discord.ui.button(label="1 / 1", style=discord.ButtonStyle.secondary, disabled=True,
-                       custom_id="queue_page", row=0)
+    @discord.ui.button(label="1 / 1", style=discord.ButtonStyle.secondary, disabled=True, custom_id="queue_page", row=0)
     async def page_indicator(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
 
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary,
-                       custom_id="queue_next_page", row=0)
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="queue_next_page", row=0)
     async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.page >= self._page_count() - 1:
             return await interaction.response.defer()
@@ -2062,7 +2111,17 @@ class PlayerView(discord.ui.View):
         embed = make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=0)
         try:
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-        except Exception: pass
+            message = await interaction.original_response()
+            key = (self.guild.id, interaction.user.id)
+            old_entry = queue_view_msgs.get(key)
+            if old_entry:
+                try:
+                    await old_entry[0].delete()
+                except Exception:
+                    pass
+            queue_view_msgs[key] = (message, view)
+        except Exception:
+            pass
 
     @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=1, custom_id="player_stop")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
