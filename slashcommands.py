@@ -433,6 +433,14 @@ def get_spotify_artist_top_tracks(artist_id: str, max_tracks: int = 10) -> list:
             return tracks
     return None
 
+def is_youtube_music_album_url(query: str) -> bool:
+    """ตรวจสอบ YouTube Music album/playlist URL ที่ใช้ list=OLAK..."""
+    if "youtube.com" not in query.lower() and "youtu.be" not in query.lower():
+        return False
+    list_match = re.search(r"[?&]list=([^&#]+)", query, re.IGNORECASE)
+    return bool(list_match and list_match.group(1).upper().startswith("OLAK"))
+
+
 def is_youtube_radio_url(query: str) -> bool:
     """ตรวจสอบว่าเป็น YouTube Mix/Radio URL (list=RD...)."""
     if "youtube.com" not in query.lower() and "youtu.be" not in query.lower():
@@ -1174,6 +1182,90 @@ class VolumeModal(discord.ui.Modal, title="🔊 ปรับระดับเ�
 #  YouTube Radio / Mix Choice View
 # ─────────────────────────────────────────────
 
+class PlaylistCountView(discord.ui.View):
+    """ให้ผู้ใช้เลือกจำนวนเพลงจาก playlist ที่ตรวจพบจริง (สูงสุด MAX_PLAYLIST_FETCH)."""
+
+    def __init__(self, playlist_tracks, guild, channel, loop_getter, requester,
+                 vc, parent_view=None, source_label="เพลย์ลิสต์"):
+        super().__init__(timeout=30)
+        self.playlist_tracks = playlist_tracks
+        self.guild = guild
+        self.channel = channel
+        self.loop_getter = loop_getter
+        self.requester = requester
+        self.vc = vc
+        self.parent_view = parent_view
+        self.source_label = source_label
+        self.message = None
+        self._busy = False
+        self._build_buttons()
+
+    def _build_buttons(self):
+        count = len(self.playlist_tracks)
+        choices = [n for n in (5, 10, 20, 30, 50) if n <= count]
+        if count < 5:
+            choices = [count]
+        elif count not in choices and count < 50:
+            choices.append(count)
+
+        for index, amount in enumerate(choices):
+            button = discord.ui.Button(
+                label=str(amount),
+                style=discord.ButtonStyle.primary if index == 0 else discord.ButtonStyle.secondary,
+                custom_id=f"playlist_count_{amount}",
+            )
+            button.callback = self._make_callback(amount)
+            self.add_item(button)
+
+    def _make_callback(self, amount):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.requester.id:
+                return await interaction.response.send_message(
+                    "❌ เฉพาะผู้ที่ส่งลิงก์เท่านั้นที่เลือกได้", ephemeral=True)
+            if self._busy:
+                return await interaction.response.defer()
+
+            self._busy = True
+            try:
+                await interaction.response.defer()
+                selected = self.playlist_tracks[:amount]
+                await _add_playlist_to_queue(
+                    self.vc,
+                    self.guild,
+                    self.channel,
+                    self.loop_getter,
+                    selected,
+                    interaction.user,
+                )
+                await self._close()
+                if self.parent_view:
+                    await self.parent_view._close()
+            except Exception as e:
+                log("📋 PLAYLIST COUNT ERROR", interaction, str(e))
+                try:
+                    await interaction.followup.send(
+                        f"❌ ไม่สามารถโหลด {amount} เพลงจาก{self.source_label}ได้",
+                        ephemeral=True,
+                    )
+                except Exception:
+                    pass
+            finally:
+                self._busy = False
+
+        return callback
+
+    async def _close(self):
+        self.stop()
+        if self.message:
+            try:
+                await self.message.edit(view=None)
+            except Exception:
+                pass
+
+    async def on_timeout(self):
+        await self._close()
+
+
 class RadioChoiceView(discord.ui.View):
     def __init__(self, query, guild, channel, loop_getter, requester, loop):
         super().__init__(timeout=30)
@@ -1264,11 +1356,28 @@ class RadioChoiceView(discord.ui.View):
             if not playlist_tracks:
                 await interaction.followup.send("❌ ไม่พบเพลงจาก Radio/Mix นี้", ephemeral=True)
                 return
-            await _add_playlist_to_queue(
-                vc, self.guild, self.channel, self.loop_getter,
-                playlist_tracks, interaction.user,
-            )
+
             await self._close()
+            count_view = PlaylistCountView(
+                playlist_tracks,
+                self.guild,
+                self.channel,
+                self.loop_getter,
+                interaction.user,
+                vc,
+                source_label=" Radio/Mix",
+            )
+            prompt = await interaction.followup.send(
+                embed=discord.Embed(
+                    title="📋 เลือกจำนวนเพลง",
+                    description=f"พบ **{len(playlist_tracks)} เพลง**\nต้องการเพิ่มกี่เพลง?",
+                    color=0x1a1a2e,
+                ),
+                view=count_view,
+                ephemeral=True,
+                wait=True,
+            )
+            count_view.message = prompt
         except Exception as e:
             log("📻 RADIO PLAYLIST ERROR", interaction, str(e))
             try:
@@ -1393,6 +1502,44 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                 view.message = prompt
                 return
 
+            # YouTube Music album/playlist (list=OLAK...) ให้เลือกจำนวนเพลงก่อนเพิ่ม
+            if is_url and is_youtube_music_album_url(query_str):
+                try:
+                    playlist_tracks = await asyncio.to_thread(fetch_playlist_tracks, query_str)
+                    if not playlist_tracks:
+                        await _ack_done()
+                        await _send_error("❌ ไม่พบเพลงใน YouTube Music album")
+                        return
+
+                    await _ack_done()
+                    await self._delete_done_msg()
+                    count_view = PlaylistCountView(
+                        playlist_tracks,
+                        self.guild,
+                        self.channel,
+                        self.loop_getter,
+                        interaction.user,
+                        vc,
+                        source_label=" YouTube Music album",
+                    )
+                    prompt = await interaction.followup.send(
+                        embed=discord.Embed(
+                            title="💿 YouTube Music Album",
+                            description=f"พบ **{len(playlist_tracks)} เพลง**\nต้องการเพิ่มกี่เพลง?",
+                            color=0x1a1a2e,
+                        ),
+                        view=count_view,
+                        ephemeral=True,
+                        wait=True,
+                    )
+                    count_view.message = prompt
+                    return
+                except Exception as e:
+                    log("🔍 YOUTUBE MUSIC ALBUM ERROR", interaction, str(e))
+                    await _ack_done()
+                    await _send_error("❌ ไม่สามารถโหลด YouTube Music album ได้")
+                    return
+
             # ตรวจสอบว่าเป็น playlist หรือไม่
             if is_url and is_playlist_url(query_str):
                 # Handle playlist
@@ -1412,8 +1559,6 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                     
                     if not added_results:
                         await _send_error("❌ ไม่สามารถดึงเพลงจากเพลย์ลิสต์ได้เลย")
-                    # เพลงแรกเล่นทันทีแล้ว (เห็นจาก Now Playing embed)
-                    # เพลงที่เหลือกำลังโหลดในพื้นหลัง จะมีข้อความสรุปตามมาเอง
                     return
                     
                 except ValueError as e:
@@ -2780,6 +2925,44 @@ def register(tree: app_commands.CommandTree, loop_getter):
                 view.message = prompt
                 return
 
+            # YouTube Music album/playlist (list=OLAK...) ให้เลือกจำนวนเพลงก่อนเพิ่ม
+            if is_url and is_youtube_music_album_url(query):
+                try:
+                    playlist_tracks = await asyncio.to_thread(fetch_playlist_tracks, query)
+                    if not playlist_tracks:
+                        await _del_search()
+                        return await interaction.followup.send(embed=discord.Embed(
+                            description="❌ ไม่พบเพลงใน YouTube Music album", color=discord.Color.red()), ephemeral=True)
+
+                    await _del_search()
+                    count_view = PlaylistCountView(
+                        playlist_tracks,
+                        interaction.guild,
+                        interaction.channel,
+                        loop_getter,
+                        interaction.user,
+                        vc,
+                        source_label=" YouTube Music album",
+                    )
+                    prompt = await interaction.followup.send(
+                        embed=discord.Embed(
+                            title="💿 YouTube Music Album",
+                            description=f"พบ **{len(playlist_tracks)} เพลง**\nต้องการเพิ่มกี่เพลง?",
+                            color=0x1a1a2e,
+                        ),
+                        view=count_view,
+                        ephemeral=True,
+                        wait=True,
+                    )
+                    count_view.message = prompt
+                    return
+                except Exception as e:
+                    print(f"YouTube Music album error: {str(e)}")
+                    await _del_search()
+                    return await interaction.followup.send(embed=discord.Embed(
+                        description="❌ ไม่สามารถโหลด YouTube Music album ได้",
+                        color=discord.Color.red()), ephemeral=True)
+
             # ตรวจสอบว่าเป็น playlist หรือไม่
             if is_url and is_playlist_url(query):
                 # Handle Playlist
@@ -2798,8 +2981,6 @@ def register(tree: app_commands.CommandTree, loop_getter):
                     if not added_results:
                         return await interaction.followup.send(embed=discord.Embed(
                             description="❌ ไม่สามารถดึงเพลงจากเพลย์ลิสต์ได้เลย", color=discord.Color.red()), ephemeral=True)
-                    # เพลงแรกเล่นทันทีแล้ว (เห็นจาก Now Playing embed)
-                    # เพลงที่เหลือกำลังโหลดในพื้นหลัง จะมีข้อความสรุปตามมาเอง
                     return
                     
                 except ValueError as e:
