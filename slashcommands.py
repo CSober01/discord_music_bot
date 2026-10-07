@@ -140,24 +140,35 @@ def _queue_pos_str(guild_id: int, idx: int) -> str:
     return f"กำลังเล่น #{display_no(guild_id, idx)} จาก {get_total_added(guild_id)} เพลง"
 
 def get_ydl_options(include_playlist: bool = False) -> dict:
+    """Shared yt-dlp configuration.
+
+    Keep YouTube client selection on yt-dlp's defaults so extractor updates can
+    choose the most compatible client instead of hard-coding a client that may
+    become blocked or change behavior.
+    """
     opts = {
         "format": "bestaudio/best",
         "quiet": True,
-        "no_warnings": True,  # ปิด warnings
+        "no_warnings": True,
         "default_search": "ytsearch",
         "source_address": "0.0.0.0",
+
+        # Current yt-dlp YouTube extraction may require EJS challenge solving.
+        # The [default] extra installs the required Python-side support and the
+        # runtime (Deno) is supplied by the deployment image / local machine.
         "remote_components": ["ejs:github"],
-        "socket_timeout": 60,  # เพิ่ม timeout
-        "retries": 5,  # เพิ่ม retries
+
+        "socket_timeout": 60,
+        "retries": 5,
         "fragment_retries": 5,
+        "file_access_retries": 3,
+        "extractor_retries": 3,
         "skip_unavailable_fragments": True,
-        "extractor_args": {"youtube": {
-            "client_name": "web",  # ระบุ client อย่างชัดเจน เพื่อหลีกเลี่ยง web_safari
-            "player_skip": ["webpage", "configs"],
-            "skip": ["hls", "dash"],
-        }},
+
+        # Do not force extractor_args["client_name"], player_skip, or skip
+        # values here. yt-dlp's current defaults are safer as YouTube changes.
     }
-    # ถ้า include_playlist เป็น True จะดึง playlist ทั้งหมด
+
     opts["noplaylist"] = not include_playlist
     return opts
 
