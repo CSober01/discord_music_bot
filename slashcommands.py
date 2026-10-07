@@ -118,7 +118,7 @@ guild_changing: set[int] = set()
 # Player UI state
 loop_modes: dict[int, str] = {}
 shuffle_enabled: set[int] = set()
-QUEUE_PAGE_SIZE = 10
+QUEUE_PAGE_SIZE = 20
 
 MAX_QUEUE = 20   # เก็บเพลงใน memory สูงสุด 20 อัน (ย้อนกลับได้สูงสุด 20 เพลง)
 MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
