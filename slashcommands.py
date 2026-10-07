@@ -663,7 +663,7 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
     embed = discord.Embed(color=0x5865F2)
     embed.set_author(name="🎵  NOW PLAYING")
     embed.description = (
-        f"**{_truncate_display_width(title, 44)}**\n"
+        f"**{_truncate_display_width(title, 58)}**\n"
         f"{_truncate_display_width(artist, 44)}  •  YouTube\n"
         f"👤 {requester_str}  •  {duration}\n"
     )
@@ -683,7 +683,7 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
 
         volume_pct = round(get_guild_volume(guild_id) * 100)
         embed.description += f"\n🔊 General  •  {volume_pct}%"
-        embed.description += "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        embed.description += "\n\n━━━━━━━━━━━"
 
         if upcoming:
             next_count = len(upcoming)
