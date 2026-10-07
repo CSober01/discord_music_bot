@@ -2018,7 +2018,6 @@ class PlayerView(discord.ui.View):
         try: await interaction.response.edit_message(embed=self._current_embed(), view=self)
         except Exception: pass
         await _refresh_queue_msg(self.guild.id)
-        except Exception: pass
 
     @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_previous")
     async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
