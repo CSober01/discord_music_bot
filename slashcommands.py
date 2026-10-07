@@ -2050,10 +2050,12 @@ class PlayerView(discord.ui.View):
         random.shuffle(upcoming)
         q[idx + 1:] = upcoming
         shuffle_enabled.add(self.guild.id)
-        button.style = discord.ButtonStyle.success
         log("🔀 SHUFFLE", interaction, f"upcoming={len(upcoming)}")
-        try: await interaction.response.edit_message(embed=self._current_embed(), view=self)
-        except Exception: pass
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+        await _refresh_player(self.guild.id)
         await _refresh_queue_msg(self.guild.id)
 
     @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_previous")
@@ -2075,19 +2077,18 @@ class PlayerView(discord.ui.View):
         title = _trunc(self.current_track[1]) if self.current_track else "?"
         if vc.is_playing():
             vc.pause()
-            button.emoji = "▶️"
             log("⏸ PAUSE", interaction, f"Track: {title}")
-            try: await interaction.response.edit_message(embed=self._current_embed(), view=self)
-            except Exception: pass
         elif vc.is_paused():
             vc.resume()
-            button.emoji = "⏸️"
             log("▶️ RESUME", interaction, f"Track: {title}")
-            try: await interaction.response.edit_message(embed=self._current_embed(), view=self)
-            except Exception: pass
         else:
-            await safe_respond(interaction, embed=discord.Embed(
+            return await safe_respond(interaction, embed=discord.Embed(
                 description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red()), ephemeral=True)
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+        await _refresh_player(self.guild.id)
 
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2115,16 +2116,14 @@ class PlayerView(discord.ui.View):
         current = loop_modes.get(self.guild.id, "off")
         next_mode = {"off": "track", "track": "queue", "queue": "off"}[current]
         loop_modes[self.guild.id] = next_mode
-        button.emoji = {"off": "🔁", "track": "🔂", "queue": "🔁"}[next_mode]
-        button.style = (
-            discord.ButtonStyle.success
-            if next_mode != "off"
-            else discord.ButtonStyle.secondary
-        )
         mode_text = {"off": "ปิด Loop", "track": "วนเพลงนี้", "queue": "วน Queue"}[next_mode]
         log("🔁 LOOP", interaction, mode_text)
-        try: await interaction.response.edit_message(embed=self._current_embed(), view=self)
-        except Exception: pass
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+        await _refresh_player(self.guild.id)
+        await _refresh_queue_msg(self.guild.id)
 
     @discord.ui.button(emoji="🔍", style=discord.ButtonStyle.secondary, row=1, custom_id="player_search")
     async def search(self, interaction: discord.Interaction, button: discord.ui.Button):
