@@ -941,6 +941,42 @@ async def _delete_queue_view_msg(guild_id: int):
             await wmsg.delete()
         except Exception:
             pass
+async def _refresh_player(guild_id: int):
+    """Refresh the existing Player message with the latest guild state."""
+    view = active_views.get(guild_id)
+    if not view or not view.current_track:
+        return False
+
+    try:
+        vc = view.guild.voice_client
+        view.volume_level = get_guild_volume(guild_id)
+        view._sync_state_buttons()
+
+        # Keep Play/Pause icon synchronized with the actual voice state.
+        for item in view.children:
+            if item.custom_id == "player_pause_resume":
+                if vc and vc.is_paused():
+                    item.emoji = "▶️"
+                else:
+                    item.emoji = "⏸️"
+
+        _url, title, duration, requester, thumbnail, *_rest = view.current_track
+        embed = make_now_playing_embed(
+            title, duration, requester, thumbnail,
+            _queue_pos_str(guild_id, get_now_idx(guild_id)),
+        )
+
+        if view.now_playing_msg:
+            try:
+                await view.now_playing_msg.edit(embed=embed, view=view)
+                return True
+            except Exception:
+                view.now_playing_msg = None
+
+        view.now_playing_msg = await view.channel.send(embed=embed, view=view)
+        return True
+    except Exception:
+        return False
 async def _delete_search_result_msgs(guild_id: int):
     msgs = search_result_msgs.pop(guild_id, [])
     if not msgs:
@@ -1112,6 +1148,7 @@ class VolumeModal(discord.ui.Modal, title="🔊 ปรับระดับเ�
         set_guild_volume(self.player_view.guild.id, vol_level)
         if self.vc.source:
             self.vc.source.volume = vol_level
+        await _refresh_player(self.player_view.guild.id)
         log("🔊 VOLUME", interaction, f"Volume: {vol}%")
         await interaction.response.send_message(f"🔊 ระดับเสียง: **{vol}%**", ephemeral=True)
 
