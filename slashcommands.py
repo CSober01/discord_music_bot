@@ -211,7 +211,6 @@ def clear_guild(guild_id: int):
     # Invalidate every outstanding playback callback before clearing state.
     bump_playback_generation(guild_id)
     guild_changing.discard(guild_id)
-    guild_stopped.discard(guild_id)
     for track in full_queues.get(guild_id, []):
         if track:
             queue_display_titles.pop(track[0], None)
@@ -1620,9 +1619,12 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
             loop = loop_getter()
             view = PlayerView(guild, channel, loop, current_track=track, current_idx=track_idx, loop_getter=loop_getter)
             active_views[guild.id] = view
-            vc.play(source, after=lambda e, _t=track, _ti=track_idx:
+            guild_stopped.discard(guild.id)
+            playback_gen = bump_playback_generation(guild.id)
+            vc.play(source, after=lambda e, _t=track, _ti=track_idx, pg=playback_gen:
                     asyncio.run_coroutine_threadsafe(
-                        play_next(guild, channel, loop, current_track=_t, current_idx=_ti, error=e), loop))
+                        play_next(guild, channel, loop, current_track=_t, current_idx=_ti, error=e,
+                                  playback_generation=pg), loop))
             embed = make_now_playing_embed(title, duration, requester, thumbnail,
                                            _queue_pos_str(guild.id, track_idx))
             msg = await channel.send(embed=embed, view=view)
@@ -1734,6 +1736,7 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
                         _ti, _du, _rq, _tn, _queue_pos_str(guild.id, get_now_idx(guild.id))))
                 except Exception: pass
         else:
+            guild_stopped.discard(guild.id)
             set_now_idx(guild.id, track_idx)
             _trim_queue(guild.id)
             track_idx = get_now_idx(guild.id)
@@ -2148,6 +2151,7 @@ async def handle_external_voice_disconnect(guild: discord.Guild):
     if old_view:
         old_view.now_playing_msg = None
 
+    guild_stopped.add(guild.id)
     clear_guild(guild.id)
 
     await asyncio.gather(
