@@ -119,7 +119,7 @@ shuffle_enabled: set[int] = set()
 QUEUE_PAGE_SIZE = 10
 
 MAX_QUEUE = 20   # เก็บเพลงใน memory สูงสุด 20 อัน (ย้อนกลับได้สูงสุด 20 เพลง)
-MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
+MAX_PLAYLIST_FETCH = 51  # ดึง 51 อันเพื่อแยกกรณี playlist มีมากกว่า 50 เพลง
 PLAYLIST_FETCH_CONCURRENCY = 4  # จำกัดจำนวน request พร้อมกันไปหา YouTube กันโดน rate-limit (HTTP 429)
 
 
@@ -1093,6 +1093,16 @@ class PlaylistAmountView(discord.ui.View):
         self.owner_id = owner_id
         self.playlist_tracks = playlist_tracks
         self.on_select = on_select
+
+        # ปุ่ม "50" ปรับตามจำนวนเพลงจริง:
+        # - 21-50 เพลง → แสดงเป็นจำนวนเพลงจริง เช่น 30
+        # - ต่ำกว่า 21 เพลง → ไม่แสดงปุ่มนี้
+        # - มากกว่า 50 เพลง → แสดง 50
+        total = len(playlist_tracks)
+        if 21 <= total <= 50:
+            self.fifty.label = str(total)
+        elif total < 21:
+            self.remove_item(self.fifty)
 
     async def _choose(self, interaction: discord.Interaction, amount: int):
         if interaction.user.id != self.owner_id:
@@ -2669,9 +2679,12 @@ def register(tree: app_commands.CommandTree, loop_getter):
                                 pass
 
                     if len(playlist_tracks) > 1:
-                        available = len(playlist_tracks) - 1
+                        # fetch 51 เพลงเพื่อรู้ว่า playlist มีมากกว่า 50 หรือไม่
+                        is_over_50 = len(playlist_tracks) > 50
+                        display_count = "มากกว่า 50" if is_over_50 else str(len(playlist_tracks))
+                        available = 50 if is_over_50 else len(playlist_tracks) - 1
                         prompt = (
-                            f"📋 Playlist นี้มี **{len(playlist_tracks)} เพลง**\n"
+                            f"📋 Playlist นี้มี **{display_count} เพลง**\n"
                             f"เพลงแรกจะเล่นก่อนทันที\n"
                             f"ต้องการเพิ่มเพลงอื่นอีกกี่เพลง? (สูงสุด {available} เพลง)"
                         )
