@@ -206,7 +206,8 @@ def clear_guild(guild_id: int):
     loop_modes.pop(guild_id, None)
     shuffle_enabled.discard(guild_id)
     active_views.pop(guild_id, None)
-    queue_view_msgs.pop(guild_id, None)
+    for key in [key for key in queue_view_msgs if key[0] == guild_id]:
+        queue_view_msgs.pop(key, None)
     search_result_msgs.pop(guild_id, None)
 
 def _queue_pos_str(guild_id: int, idx: int) -> str:
@@ -2111,7 +2112,14 @@ class PlayerView(discord.ui.View):
         try:
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             message = await interaction.original_response()
-            queue_view_msgs[(self.guild.id, interaction.user.id)] = (message, view)
+            key = (self.guild.id, interaction.user.id)
+            old_entry = queue_view_msgs.get(key)
+            if old_entry:
+                try:
+                    await old_entry[0].delete()
+                except Exception:
+                    pass
+            queue_view_msgs[key] = (message, view)
         except Exception:
             pass
 
