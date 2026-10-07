@@ -683,12 +683,12 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
 
         volume_pct = round(get_guild_volume(guild_id) * 100)
         embed.description += f"\n🔊 General  •  {volume_pct}%"
+        embed.description += "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
         if upcoming:
             next_count = len(upcoming)
             embed.description += (
-                f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📋  QUEUE  •  {next_count} NEXT"
+                f"\n\n📋  QUEUE  •  {next_count} NEXT"
             )
             music_icons = ("🎧", "🎵", "🎶", "🎼")
             queue_lines = []
