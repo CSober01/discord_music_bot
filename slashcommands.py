@@ -115,6 +115,11 @@ guild_volumes: dict[int, float] = {}
 guild_stopped:  set[int] = set()
 guild_changing: set[int] = set()
 
+# Monotonic generation invalidates stale VoiceClient.after callbacks.
+playback_generation: dict[int, int] = {}
+# Marks an intentional /stop disconnect so on_voice_state_update does not treat it as external.
+intentional_voice_disconnect: set[int] = set()
+
 # Player UI state
 loop_modes: dict[int, str] = {}
 shuffle_enabled: set[int] = set()
@@ -138,6 +143,14 @@ def set_now_idx(guild_id: int, idx: int):
 
 def get_guild_volume(guild_id: int) -> float:
     return guild_volumes.get(guild_id, DEFAULT_VOLUME)
+
+def get_playback_generation(guild_id: int) -> int:
+    return playback_generation.get(guild_id, 0)
+
+def bump_playback_generation(guild_id: int) -> int:
+    generation = get_playback_generation(guild_id) + 1
+    playback_generation[guild_id] = generation
+    return generation
 
 def set_guild_volume(guild_id: int, vol: float):
     guild_volumes[guild_id] = vol
@@ -195,6 +208,10 @@ def add_to_queue(guild_id: int, track) -> int:
     return len(q) - 1
 
 def clear_guild(guild_id: int):
+    # Invalidate every outstanding playback callback before clearing state.
+    bump_playback_generation(guild_id)
+    guild_changing.discard(guild_id)
+    guild_stopped.discard(guild_id)
     for track in full_queues.get(guild_id, []):
         if track:
             queue_display_titles.pop(track[0], None)
@@ -1011,7 +1028,7 @@ class QueueDoneView(discord.ui.View):
                 _delete_queue_view_msg(self.guild.id),
                 _delete_queue_add_msgs(self.guild.id),
             )
-            guild_stopped.add(self.guild.id)
+            intentional_voice_disconnect.add(self.guild.id)
             clear_guild(self.guild.id)
             vc.stop()
             await vc.disconnect()
@@ -1726,9 +1743,11 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
             view = PlayerView(guild, channel, loop, current_track=track, current_idx=track_idx, loop_getter=loop_getter)
             active_views[guild.id] = view
             _g, _ch, _lp, _t, _ti = guild, channel, loop, track, track_idx
-            vc.play(source, after=lambda e, g=_g, ch=_ch, lp=_lp, t=_t, ti=_ti:
+            playback_gen = bump_playback_generation(guild.id)
+            vc.play(source, after=lambda e, g=_g, ch=_ch, lp=_lp, t=_t, ti=_ti, pg=playback_gen:
                     asyncio.run_coroutine_threadsafe(
-                        play_next(g, ch, lp, current_track=t, current_idx=ti, error=e), lp))
+                        play_next(g, ch, lp, current_track=t, current_idx=ti, error=e,
+                                  playback_generation=pg), lp))
             embed = make_now_playing_embed(title, duration, requester, thumbnail,
                                            _queue_pos_str(guild.id, track_idx))
             msg = await channel.send(embed=embed, view=view)
@@ -1782,6 +1801,9 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
     เล่นเพลงที่ idx โดยไม่สร้าง message ใหม่ — edit embed เดิม
     ต้องเรียกหลัง interaction.response.defer() หรือ edit_message แล้ว
     """
+    # Invalidate the callback of the track being stopped before vc.stop().
+    playback_gen = bump_playback_generation(view.guild.id)
+
     # อัปเดต now_idx แล้วลอง trim ก่อนดึง track ออกมา กัน index เพี้ยนหลัง trim
     set_now_idx(view.guild.id, idx)
     _trim_queue(view.guild.id)
@@ -1799,20 +1821,15 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
     source = discord.PCMVolumeTransformer(
         discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=view.volume_level)
 
-    # guild_changing กัน play_next callback เก่า (ที่ยิงมาจาก vc.stop())
-    guild_changing.add(view.guild.id)
     vc.stop()
-    # ไม่ discard ที่นี่ — play_next จะ discard เอง
 
     try:
-        vc.play(source, after=lambda e, _idx=idx, _track=track:
+        vc.play(source, after=lambda e, _idx=idx, _track=track, pg=playback_gen:
                 asyncio.run_coroutine_threadsafe(
-                    play_next(view.guild, view.channel, view.loop, current_track=_track, current_idx=_idx, error=e), view.loop))
+                    play_next(view.guild, view.channel, view.loop,
+                              current_track=_track, current_idx=_idx, error=e,
+                              playback_generation=pg), view.loop))
     except Exception:
-        # vc.play() พังก่อนตั้ง callback สำเร็จ (เช่น ffmpeg spawn ไม่ได้) —
-        # ไม่มี play_next callback มา discard flag นี้ ต้อง discard เองกันค้าง
-        # (ค้างแล้วเพลงถัดไปทุกเพลงจะไม่เล่นต่อเลย)
-        guild_changing.discard(view.guild.id)
         raise
 
     embed = make_now_playing_embed(title, duration, requester, thumbnail,
@@ -2076,7 +2093,7 @@ class PlayerView(discord.ui.View):
             _delete_search_result_msgs(self.guild.id),
             _delete_queue_view_msg(self.guild.id),
         )
-        guild_stopped.add(self.guild.id)
+        intentional_voice_disconnect.add(self.guild.id)
         now_playing_msg = self.now_playing_msg
         self.now_playing_msg = None
         clear_guild(self.guild.id)
@@ -2109,6 +2126,11 @@ async def handle_external_voice_disconnect(guild: discord.Guild):
     ไม่เรียก vc.stop()/vc.disconnect() เพราะการเชื่อมต่อหลุดไปแล้วจริง (เรียกซ้ำจะพัง/ไม่มีผล)
     ไม่มี interaction ในสถานการณ์นี้ จึงต้องหา channel จาก active_view ที่เก็บไว้ก่อน clear_guild
     """
+    # Ignore the voice-state event caused by our own intentional disconnect.
+    if guild.id in intentional_voice_disconnect:
+        intentional_voice_disconnect.discard(guild.id)
+        return
+
     old_view = active_views.get(guild.id)
     channel = old_view.channel if old_view else None
     now_playing_msg = old_view.now_playing_msg if old_view else None
@@ -2126,7 +2148,6 @@ async def handle_external_voice_disconnect(guild: discord.Guild):
     if old_view:
         old_view.now_playing_msg = None
 
-    guild_stopped.add(guild.id)
     clear_guild(guild.id)
 
     await asyncio.gather(
@@ -2167,8 +2188,13 @@ async def handle_external_voice_disconnect(guild: discord.Guild):
 # ─────────────────────────────────────────────
 
 async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
-                    current_track=None, current_idx: int = None, error=None):
-    # กำลัง skip/prev → callback เก่านี้ต้องข้ามไป
+                    current_track=None, current_idx: int = None, error=None,
+                    playback_generation: int = None):
+    # Ignore callbacks from older VoiceClient.play() calls.
+    if playback_generation is not None and playback_generation != get_playback_generation(guild.id):
+        return
+
+    # Legacy guard kept for safety during migration.
     if guild.id in guild_changing:
         guild_changing.discard(guild.id)
         return
@@ -2220,6 +2246,9 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
 
     # Acquire lock ก่อนจะแก้ index ป้องกัน race condition กับ skip/prev
     async with get_queue_lock(guild.id):
+        # Re-check after acquiring the lock; another callback may have won the race.
+        if playback_generation is not None and playback_generation != get_playback_generation(guild.id):
+            return
         q = get_full_queue(guild.id)
         has_next = next_idx < len(q)
 
@@ -2258,15 +2287,17 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                 msg = await channel.send(embed=embed, view=view)
                 view.now_playing_msg = msg
 
+            next_playback_gen = bump_playback_generation(guild.id)
             guild.voice_client.play(
                 source,
-                after=lambda e, _idx=next_idx, _track=track:
+                after=lambda e, _idx=next_idx, _track=track, pg=next_playback_gen:
                     asyncio.run_coroutine_threadsafe(
                         play_next(
                             guild, channel, loop,
                             current_track=_track,
                             current_idx=_idx,
                             error=e,
+                            playback_generation=pg,
                         ),
                         loop,
                     ),
@@ -2304,9 +2335,11 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                 msg = await channel.send(embed=embed, view=view)
                 view.now_playing_msg = msg
 
-            guild.voice_client.play(source, after=lambda e, _idx=next_idx, _track=track:
+            next_playback_gen = bump_playback_generation(guild.id)
+            guild.voice_client.play(source, after=lambda e, _idx=next_idx, _track=track, pg=next_playback_gen:
                 asyncio.run_coroutine_threadsafe(
-                    play_next(guild, channel, loop, current_track=_track, current_idx=_idx, error=e), loop))
+                    play_next(guild, channel, loop, current_track=_track, current_idx=_idx, error=e,
+                              playback_generation=pg), loop))
 
             # ลบ "เพิ่มใน Queue" ของเพลงนี้
             add_msg = queue_add_msgs.get(guild.id, {}).pop(next_idx, None)
@@ -2321,6 +2354,9 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
     # ถ้าทำในนั้น lock จะถูกถือค้าง 5 นาที ทำให้ /play หรือปุ่มค้นหาเพลงใหม่
     # ขอเพลงไม่ได้เลยจนกว่าจะครบ 300 วิ หรือมีคน /stop (นี่คือ bug ตัวเดิมที่ทำให้ค้าง)
     if not has_next:
+        # Invalidate this generation before queue-end cleanup.
+        if playback_generation is not None and playback_generation == get_playback_generation(guild.id):
+            bump_playback_generation(guild.id)
         glog(
             guild.id,
             guild.name,
@@ -2671,7 +2707,7 @@ def register(tree: app_commands.CommandTree, loop_getter):
         if old_view:
             old_view.now_playing_msg = None
 
-        guild_stopped.add(interaction.guild.id)
+        intentional_voice_disconnect.add(interaction.guild.id)
         clear_guild(interaction.guild.id)
         vc.stop()
         await vc.disconnect()
