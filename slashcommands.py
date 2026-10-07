@@ -688,7 +688,7 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
     embed = discord.Embed(color=0x5865F2)
     embed.set_author(name="🎵  NOW PLAYING")
     embed.description = (
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"**{display_title}**\n"
         f"{_truncate_display_width(artist, 44)} • YouTube\n"
         f"👤 {requester_str} • {duration}"
@@ -708,7 +708,7 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         mode_prefix = " ".join(active_modes)
         status_line = f"{mode_prefix}  🔊 {volume_pct}%" if mode_prefix else f"🔊 {volume_pct}%"
         embed.description += f"\n{status_line}"
-        embed.description += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        embed.description += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
         if upcoming:
             next_count = len(upcoming)
@@ -723,10 +723,7 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
                 queue_lines.append(
                     f"**{display_index:02d}** {icon} {_pad_queue_title(queue_title, 31)} " + "`" + f"{track_duration}" + "`"
                 )
-            embed.description += "\n" + "\n".join(queue_lines)
-
-        if queue_pos:
-            embed.set_footer(text=queue_pos)
+            embed.description += "\n" + "\n".join(queue_lines)    embed.set_footer(text=queue_pos)
 
     if thumbnail:
         embed.set_thumbnail(url=thumbnail)
