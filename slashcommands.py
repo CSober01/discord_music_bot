@@ -2755,6 +2755,31 @@ def register(tree: app_commands.CommandTree, loop_getter):
                     description=f"❌ URL ไม่ถูกต้อง (`{query.strip()[:40]}`)\n💡 ลองวาง URL ใหม่อีกครั้ง",
                     color=discord.Color.red()), ephemeral=True)
             
+            # YouTube Mix/Radio (list=RD...) ให้ผู้ใช้เลือกก่อนว่า
+            # จะเล่นเพลงนี้อย่างเดียว หรือโหลดรายการ Radio ต่อ
+            if is_url and is_youtube_radio_url(query):
+                await _del_search()
+                view = RadioChoiceView(
+                    query,
+                    interaction.guild,
+                    interaction.channel,
+                    loop_getter,
+                    interaction.user,
+                    loop_getter(),
+                )
+                prompt = await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="📻 YouTube Radio / Mix",
+                        description="ต้องการเล่นแบบไหน?",
+                        color=0x1a1a2e,
+                    ),
+                    view=view,
+                    ephemeral=True,
+                    wait=True,
+                )
+                view.message = prompt
+                return
+
             # ตรวจสอบว่าเป็น playlist หรือไม่
             if is_url and is_playlist_url(query):
                 # Handle Playlist
