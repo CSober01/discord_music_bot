@@ -639,25 +639,83 @@ async def send_search_results(results, guild, channel, loop, loop_getter, reques
 
 
 def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queue_pos=None):
-    """Modern Discord player card — static UI, no periodic progress updates."""
+    """Modern Discord music player card — compact static UI."""
     requester_str = requester.mention if requester else "ไม่ทราบชื่อ"
+
+    guild_id = None
+    if requester is not None and hasattr(requester, "guild"):
+        guild_id = requester.guild.id
+
+    current_idx = get_now_idx(guild_id) if guild_id is not None else 0
+    upcoming = []
+    if guild_id is not None:
+        q = get_full_queue(guild_id)
+        if 0 <= current_idx < len(q):
+            upcoming = q[current_idx + 1:current_idx + 6]
+
+    artist = "YouTube"
+    if guild_id is not None and 0 <= current_idx < len(get_full_queue(guild_id)):
+        current_url = get_full_queue(guild_id)[current_idx][0]
+        display_meta = queue_display_titles.get(current_url)
+        if display_meta and " — " in display_meta:
+            artist = display_meta.split(" — ", 1)[0]
 
     embed = discord.Embed(color=0x5865F2)
     embed.set_author(name="🎵  NOW PLAYING")
     embed.description = (
-        f"### {title}\n"
-        f"🎵 **{duration}**\n"
-        f"👤 **Requested by:** {requester_str}"
+        f"**{_truncate_display_width(title, 44)}**\n"
+        f"{_truncate_display_width(artist, 44)}  •  YouTube\n"
+        f"👤 {requester_str}  •  {duration}\n"
     )
+
+    if guild_id is not None:
+        active_modes = []
+        if guild_id in shuffle_enabled:
+            active_modes.append("🔀")
+        mode = loop_modes.get(guild_id, "off")
+        if mode == "track":
+            active_modes.append("🔂")
+        elif mode == "queue":
+            active_modes.append("🔁")
+
+        if active_modes:
+            embed.description += "\n" + " ".join(active_modes)
+
+        volume_pct = round(get_guild_volume(guild_id) * 100)
+        embed.description += f"\n🔊 General  •  {volume_pct}%"
+
+        next_count = min(5, len(upcoming))
+        embed.description += f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📋  QUEUE  •  {next_count} NEXT"
+
+        if upcoming:
+            music_icons = ("🎧", "🎵", "🎶", "🎼")
+            queue_lines = []
+            for display_index, track in enumerate(upcoming, start=1):
+                url, track_title, track_duration, _requester, *_rest = track
+                queue_title = queue_display_titles.get(url, track_title)
+                queue_title = _truncate_display_width(queue_title, 31)
+                icon = music_icons[(display_index - 1) % len(music_icons)]
+                queue_lines.append(
+                    f"**{display_index:02d}**  {icon} {_pad_queue_title(queue_title, 31)}  " + "`" + f"{track_duration}" + "`"
+                )
+            embed.description += "\n\n" + "\n".join(queue_lines)
+        else:
+            embed.description += "\n\n`ไม่มีเพลงถัดไป`"
+
+        if queue_pos:
+            embed.set_footer(text=queue_pos)
+
     if thumbnail:
         embed.set_thumbnail(url=thumbnail)
 
-    footer_parts = ["SEa Music"]
-    if queue_pos:
-        footer_parts.append(queue_pos)
-    embed.set_footer(text="  •  ".join(footer_parts))
     return embed
 
+def _pad_queue_title(text: str, width: int) -> str:
+    """Pad queue text by estimated display width for a stable Discord layout."""
+    current_width = sum(_char_display_width(char) for char in text)
+    if current_width >= width:
+        return text
+    return text + " " * (width - current_width)
 def make_done_embed():
     return discord.Embed(
         description="⏹ หยุดเพลงและออกจาก Voice Channel แล้ว",
@@ -690,7 +748,7 @@ def _truncate_display_width(text: str, max_width: int) -> str:
     return "".join(chars) + "…"
 
 def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
-    """Full Queue embed: upcoming tracks only, paginated for an ephemeral message."""
+    """Full Queue embed: upcoming tracks only, compact single-line rows, paginated."""
     q = get_full_queue(guild_id)
     idx = current_idx if current_idx is not None else get_now_idx(guild_id)
 
@@ -699,7 +757,7 @@ def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
 
     if total == 0:
         embed = discord.Embed(
-            title="📋 QUEUE",
+            title="📋  QUEUE",
             description="ไม่มีเพลงถัดไปใน Queue",
             color=0x5865F2,
         )
@@ -711,25 +769,27 @@ def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
     start = page * QUEUE_PAGE_SIZE
     page_items = upcoming[start:start + QUEUE_PAGE_SIZE]
 
+    music_icons = ("🎧", "🎵", "🎶", "🎼")
     lines = []
     for offset, track in enumerate(page_items, start=start + 1):
         actual_idx = idx + offset
         url, title, duration, requester, *_rest = track
-        display_title = _truncate_display_width(queue_display_titles.get(url, title), 48)
-        requester_name = requester.mention if hasattr(requester, "mention") else str(requester)
+        display_title = _truncate_display_width(
+            queue_display_titles.get(url, title), 31
+        )
+        line_no = display_no(guild_id, actual_idx)
+        icon = music_icons[(offset - 1) % len(music_icons)]
         lines.append(
-            f"**{display_no(guild_id, actual_idx):02d}  {display_title}**\n"
-            f"   👤 {requester_name}  •  `{duration}`"
+            f"**{line_no:02d}**  {icon} {_pad_queue_title(display_title, 31)}  " + "`" + f"{duration}" + "`"
         )
 
     embed = discord.Embed(
-        title="📋 QUEUE",
-        description="\n\n".join(lines),
+        title="📋  QUEUE",
+        description="\n".join(lines),
         color=0x5865F2,
     )
-    embed.set_footer(text=f"Page {page + 1} / {total_pages}  •  {total} songs in queue")
+    embed.set_footer(text=f"Page {page + 1} / {total_pages}  •  {total} songs")
     return embed
-
 MAX_TITLE_LOG = 40
 
 def _trunc(text: str, n: int = MAX_TITLE_LOG) -> str:
@@ -1801,6 +1861,9 @@ class QueueView(discord.ui.View):
         for item in self.children:
             if item.custom_id == "queue_previous_page":
                 item.disabled = self.page <= 0
+            elif item.custom_id == "queue_page":
+                item.label = f"{self.page + 1} / {total_pages}"
+                item.disabled = True
             elif item.custom_id == "queue_next_page":
                 item.disabled = self.page >= total_pages - 1
 
@@ -1822,6 +1885,11 @@ class QueueView(discord.ui.View):
             return await interaction.response.defer()
         self.page -= 1
         await self._update(interaction)
+
+    @discord.ui.button(label="1 / 1", style=discord.ButtonStyle.secondary, disabled=True,
+                       custom_id="queue_page", row=0)
+    async def page_indicator(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary,
                        custom_id="queue_next_page", row=0)
@@ -1845,6 +1913,28 @@ class PlayerView(discord.ui.View):
         self.current_idx = current_idx if current_idx is not None else get_now_idx(guild.id)
         self.now_playing_msg: discord.Message | None = None
         self.volume_level: float = get_guild_volume(guild.id)
+        self._sync_state_buttons()
+
+    def _sync_state_buttons(self):
+        for item in self.children:
+            if item.custom_id == "player_shuffle":
+                item.style = (
+                    discord.ButtonStyle.success
+                    if self.guild.id in shuffle_enabled
+                    else discord.ButtonStyle.secondary
+                )
+            elif item.custom_id == "player_loop":
+                mode = loop_modes.get(self.guild.id, "off")
+                item.style = (
+                    discord.ButtonStyle.success
+                    if mode != "off"
+                    else discord.ButtonStyle.secondary
+                )
+                item.emoji = {"off": "🔁", "track": "🔂", "queue": "🔁"}[mode]
+            elif item.custom_id == "player_stop":
+                item.style = discord.ButtonStyle.danger
+            elif item.custom_id == "player_show_queue":
+                item.style = discord.ButtonStyle.primary
 
     async def delete_now_playing(self):
         if self.now_playing_msg:
@@ -1914,7 +2004,7 @@ class PlayerView(discord.ui.View):
         except Exception: pass
         await _do_play_at_idx(self, idx + 1)
 
-    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=0, custom_id="player_shuffle")
+    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=1, custom_id="player_shuffle")
     async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
         q = get_full_queue(self.guild.id)
@@ -1927,17 +2017,23 @@ class PlayerView(discord.ui.View):
         random.shuffle(upcoming)
         q[idx + 1:] = upcoming
         shuffle_enabled.add(self.guild.id)
+        button.style = discord.ButtonStyle.success
         log("🔀 SHUFFLE", interaction, f"upcoming={len(upcoming)}")
         try: await interaction.response.edit_message(embed=self._current_embed(), view=self)
         except Exception: pass
 
-    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=0, custom_id="player_loop")
+    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=1, custom_id="player_loop")
     async def loop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
         current = loop_modes.get(self.guild.id, "off")
         next_mode = {"off": "track", "track": "queue", "queue": "off"}[current]
         loop_modes[self.guild.id] = next_mode
         button.emoji = {"off": "🔁", "track": "🔂", "queue": "🔁"}[next_mode]
+        button.style = (
+            discord.ButtonStyle.success
+            if next_mode != "off"
+            else discord.ButtonStyle.secondary
+        )
         mode_text = {"off": "ปิด Loop", "track": "วนเพลงนี้", "queue": "วน Queue"}[next_mode]
         log("🔁 LOOP", interaction, mode_text)
         try: await interaction.response.edit_message(embed=self._current_embed(), view=self)
@@ -1977,14 +2073,14 @@ class PlayerView(discord.ui.View):
             done_msg = await self.channel.send(embed=done_embed)
             queue_done_msgs[self.guild.id] = done_msg
 
-    @discord.ui.button(emoji="🔍", style=discord.ButtonStyle.secondary, row=1, custom_id="player_search")
+    @discord.ui.button(emoji="🔍", style=discord.ButtonStyle.secondary, row=2, custom_id="player_search")
     async def search(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
         loop = self.loop_getter()
         modal = SearchModal(self.guild, self.channel, loop, self.loop_getter)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(emoji="📋", label="VIEW FULL QUEUE", style=discord.ButtonStyle.primary, row=1, custom_id="player_show_queue")
+    @discord.ui.button(emoji="📋", style=discord.ButtonStyle.primary, row=2, custom_id="player_show_queue")
     async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = QueueView(self.guild, page=0)
         embed = make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=0)
@@ -1992,7 +2088,7 @@ class PlayerView(discord.ui.View):
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         except Exception: pass
 
-    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=1, custom_id="player_volume")
+    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=2, custom_id="player_volume")
     async def volume_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
         vc = self.guild.voice_client
