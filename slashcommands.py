@@ -1028,6 +1028,7 @@ class QueueDoneView(discord.ui.View):
                 _delete_queue_add_msgs(self.guild.id),
             )
             intentional_voice_disconnect.add(self.guild.id)
+            guild_stopped.add(self.guild.id)
             clear_guild(self.guild.id)
             vc.stop()
             await vc.disconnect()
@@ -2097,6 +2098,7 @@ class PlayerView(discord.ui.View):
             _delete_queue_view_msg(self.guild.id),
         )
         intentional_voice_disconnect.add(self.guild.id)
+        guild_stopped.add(self.guild.id)
         now_playing_msg = self.now_playing_msg
         self.now_playing_msg = None
         clear_guild(self.guild.id)
@@ -2712,6 +2714,7 @@ def register(tree: app_commands.CommandTree, loop_getter):
             old_view.now_playing_msg = None
 
         intentional_voice_disconnect.add(interaction.guild.id)
+        guild_stopped.add(interaction.guild.id)
         clear_guild(interaction.guild.id)
         vc.stop()
         await vc.disconnect()
