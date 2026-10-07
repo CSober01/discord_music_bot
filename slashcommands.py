@@ -22,13 +22,6 @@ def _html_unescape(text: str) -> str:
     return html.unescape(text) if text else text
 
 
-class _YtdlpSilentLogger:
-    """ปิดเสียง WARNING/ERROR ที่ yt-dlp พิมพ์เองออกจอ (เก็บไว้แค่ exception ให้โค้ดเราจัดการ/log เอง)"""
-    def debug(self, msg): pass
-    def warning(self, msg): pass
-    def error(self, msg): pass
-
-
 logging.getLogger("discord.player").setLevel(logging.ERROR)
 logging.getLogger("discord.voice_state").setLevel(logging.WARNING)
 
@@ -212,15 +205,21 @@ def _queue_pos_str(guild_id: int, idx: int) -> str:
     return f"กำลังเล่น #{display_no(guild_id, idx)} จาก {get_total_added(guild_id)} เพลง"
 
 def get_ydl_options(include_playlist: bool = False) -> dict:
+    """Use yt-dlp's current YouTube client defaults and shared retry settings."""
     opts = {
         "format": "bestaudio/best",
         "quiet": True,
         "no_warnings": True,
-        "logger": _YtdlpSilentLogger(),
         "default_search": "ytsearch",
         "source_address": "0.0.0.0",
+        "remote_components": ["ejs:github"],
+        "socket_timeout": 60,
+        "retries": 5,
+        "fragment_retries": 5,
+        "file_access_retries": 3,
+        "extractor_retries": 3,
+        "skip_unavailable_fragments": True,
     }
-    # ถ้า include_playlist เป็น True จะดึง playlist ทั้งหมด
     opts["noplaylist"] = not include_playlist
     return opts
 
@@ -2087,48 +2086,154 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
     # ถ้าทำในนั้น lock จะถูกถือค้าง 5 นาที ทำให้ /play หรือปุ่มค้นหาเพลงใหม่
     # ขอเพลงไม่ได้เลยจนกว่าจะครบ 300 วิ หรือมีคน /stop (นี่คือ bug ตัวเดิมที่ทำให้ค้าง)
     if not has_next:
+        glog(
+            guild.id,
+            guild.name,
+            f"[QUEUE_END] Queue finished. current_idx={current_idx}, "
+            f"next_idx={next_idx}, queue_len={len(get_full_queue(guild.id))}",
+            level="info",
+            console=True,
+        )
+
+        # ถ้าเป็น stop จริง ให้ callback นี้จบ
         if guild.id in guild_stopped:
             guild_stopped.discard(guild.id)
             return
 
+        # ลบ Player เดิม
         old_view = active_views.pop(guild.id, None)
         if old_view and old_view.now_playing_msg:
-            try: await old_view.now_playing_msg.delete()
-            except Exception: pass
-            old_view.now_playing_msg = None
+            try:
+                await old_view.now_playing_msg.delete()
+            except Exception as e:
+                glog(
+                    guild.id,
+                    guild.name,
+                    f"[QUEUE_END] Delete player message failed: {e}",
+                    level="error",
+                    console=True,
+                )
+            finally:
+                old_view.now_playing_msg = None
 
-        await _delete_queue_view_msg(guild.id)
-        await _delete_queue_add_msgs(guild.id)
-        await _delete_search_result_msgs(guild.id)
+        # ล้างข้อความ Queue/Search
+        try:
+            await _delete_queue_view_msg(guild.id)
+        except Exception as e:
+            glog(
+                guild.id,
+                guild.name,
+                f"[QUEUE_END] Delete queue view failed: {e}",
+                level="error",
+                console=True,
+            )
 
-        await asyncio.sleep(1)
-        vc = guild.voice_client
-        if not vc or not vc.is_playing():
+        try:
+            await _delete_queue_add_msgs(guild.id)
+        except Exception as e:
+            glog(
+                guild.id,
+                guild.name,
+                f"[QUEUE_END] Delete queue add messages failed: {e}",
+                level="error",
+                console=True,
+            )
+
+        try:
+            await _delete_search_result_msgs(guild.id)
+        except Exception as e:
+            glog(
+                guild.id,
+                guild.name,
+                f"[QUEUE_END] Delete search results failed: {e}",
+                level="error",
+                console=True,
+            )
+
+        # แสดง Queue Done
+        try:
             old_done = queue_done_msgs.pop(guild.id, None)
             if old_done:
-                try: await old_done.delete()
-                except Exception: pass
+                try:
+                    await old_done.delete()
+                except Exception:
+                    pass
 
             done_msg_ref = [None]
             view = QueueDoneView(guild, channel, lambda: loop, done_msg_ref=done_msg_ref)
-            msg = await channel.send(embed=discord.Embed(
-                description="✅ เล่นเพลงครบ Queue แล้ว — บอทจะออกใน 5 นาทีถ้าไม่มีเพลงใหม่",
-                color=discord.Color.green()), view=view)
+            done_embed = discord.Embed(
+                description=(
+                    "✅ เล่นเพลงครบ Queue แล้ว — "
+                    "บอทจะออกใน 5 นาทีถ้าไม่มีเพลงใหม่"
+                ),
+                color=discord.Color.green(),
+            )
+
+            msg = await channel.send(embed=done_embed, view=view)
             done_msg_ref[0] = msg
             queue_done_msgs[guild.id] = msg
 
-            await asyncio.sleep(300)
-            vc = guild.voice_client
-            if vc and not vc.is_playing() and not vc.is_paused() \
-                    and next_idx >= len(get_full_queue(guild.id)):
+            glog(
+                guild.id,
+                guild.name,
+                "[QUEUE_END] Queue Done message sent successfully.",
+                level="info",
+                console=True,
+            )
+
+        except Exception as e:
+            glog(
+                guild.id,
+                guild.name,
+                f"[QUEUE_END] FAILED TO SEND QUEUE DONE: {e}",
+                level="error",
+                console=True,
+            )
+            return
+
+        # รอ 5 นาที แล้วตรวจว่ามีเพลงใหม่เข้ามาหรือยัง
+        await asyncio.sleep(300)
+
+        q_after_wait = get_full_queue(guild.id)
+        vc = guild.voice_client
+
+        if (
+            vc
+            and not vc.is_playing()
+            and not vc.is_paused()
+            and next_idx >= len(q_after_wait)
+        ):
+            try:
                 await _delete_search_result_msgs(guild.id)
+            except Exception:
+                pass
+
+            try:
                 await _delete_queue_view_msg(guild.id)
+            except Exception:
+                pass
+
+            try:
                 await vc.disconnect()
-                clear_guild(guild.id)
-                done_msg = queue_done_msgs.pop(guild.id, None)
-                if done_msg:
-                    try: await done_msg.delete()
-                    except Exception: pass
+            except Exception:
+                pass
+
+            clear_guild(guild.id)
+
+            done_msg = queue_done_msgs.pop(guild.id, None)
+            if done_msg:
+                try:
+                    await done_msg.delete()
+                except Exception:
+                    pass
+
+            glog(
+                guild.id,
+                guild.name,
+                "[QUEUE_END] Disconnected after 5 minutes.",
+                level="info",
+                console=True,
+            )
 
 
 # ─────────────────────────────────────────────
