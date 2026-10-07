@@ -1951,6 +1951,24 @@ class PlayerView(discord.ui.View):
             _queue_pos_str(self.guild.id, get_now_idx(self.guild.id)),
         )
 
+    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=0, custom_id="player_shuffle")
+    async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_in_voice(interaction): return
+        q = get_full_queue(self.guild.id)
+        idx = get_now_idx(self.guild.id)
+        upcoming = q[idx + 1:]
+        if len(upcoming) < 2:
+            return await safe_respond(interaction, embed=discord.Embed(
+                description="❌ ต้องมีเพลงถัดไปอย่างน้อย 2 เพลงจึงจะ Shuffle ได้",
+                color=discord.Color.orange()), ephemeral=True)
+        random.shuffle(upcoming)
+        q[idx + 1:] = upcoming
+        shuffle_enabled.add(self.guild.id)
+        button.style = discord.ButtonStyle.success
+        log("🔀 SHUFFLE", interaction, f"upcoming={len(upcoming)}")
+        try: await interaction.response.edit_message(embed=self._current_embed(), view=self)
+        except Exception: pass
+
     @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_previous")
     async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
@@ -2004,25 +2022,7 @@ class PlayerView(discord.ui.View):
         except Exception: pass
         await _do_play_at_idx(self, idx + 1)
 
-    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=1, custom_id="player_shuffle")
-    async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_in_voice(interaction): return
-        q = get_full_queue(self.guild.id)
-        idx = get_now_idx(self.guild.id)
-        upcoming = q[idx + 1:]
-        if len(upcoming) < 2:
-            return await safe_respond(interaction, embed=discord.Embed(
-                description="❌ ต้องมีเพลงถัดไปอย่างน้อย 2 เพลงจึงจะ Shuffle ได้",
-                color=discord.Color.orange()), ephemeral=True)
-        random.shuffle(upcoming)
-        q[idx + 1:] = upcoming
-        shuffle_enabled.add(self.guild.id)
-        button.style = discord.ButtonStyle.success
-        log("🔀 SHUFFLE", interaction, f"upcoming={len(upcoming)}")
-        try: await interaction.response.edit_message(embed=self._current_embed(), view=self)
-        except Exception: pass
-
-    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=1, custom_id="player_loop")
+    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=0, custom_id="player_loop")
     async def loop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
         current = loop_modes.get(self.guild.id, "off")
@@ -2037,6 +2037,31 @@ class PlayerView(discord.ui.View):
         mode_text = {"off": "ปิด Loop", "track": "วนเพลงนี้", "queue": "วน Queue"}[next_mode]
         log("🔁 LOOP", interaction, mode_text)
         try: await interaction.response.edit_message(embed=self._current_embed(), view=self)
+        except Exception: pass
+
+    @discord.ui.button(emoji="🔍", style=discord.ButtonStyle.secondary, row=1, custom_id="player_search")
+    async def search(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_in_voice(interaction): return
+        loop = self.loop_getter()
+        modal = SearchModal(self.guild, self.channel, loop, self.loop_getter)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=1, custom_id="player_volume")
+    async def volume_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_in_voice(interaction): return
+        vc = self.guild.voice_client
+        if not vc.source:
+            return await safe_respond(interaction, embed=discord.Embed(
+                description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red()), ephemeral=True)
+        modal = VolumeModal(vc, self)
+        await interaction.response.send_modal(modal)
+
+    @discord.ui.button(emoji="📋", style=discord.ButtonStyle.primary, row=1, custom_id="player_show_queue")
+    async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = QueueView(self.guild, page=0)
+        embed = make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=0)
+        try:
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         except Exception: pass
 
     @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=1, custom_id="player_stop")
@@ -2072,32 +2097,6 @@ class PlayerView(discord.ui.View):
         else:
             done_msg = await self.channel.send(embed=done_embed)
             queue_done_msgs[self.guild.id] = done_msg
-
-    @discord.ui.button(emoji="🔍", style=discord.ButtonStyle.secondary, row=2, custom_id="player_search")
-    async def search(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_in_voice(interaction): return
-        loop = self.loop_getter()
-        modal = SearchModal(self.guild, self.channel, loop, self.loop_getter)
-        await interaction.response.send_modal(modal)
-
-    @discord.ui.button(emoji="📋", style=discord.ButtonStyle.primary, row=2, custom_id="player_show_queue")
-    async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
-        view = QueueView(self.guild, page=0)
-        embed = make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=0)
-        try:
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-        except Exception: pass
-
-    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=2, custom_id="player_volume")
-    async def volume_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_in_voice(interaction): return
-        vc = self.guild.voice_client
-        if not vc.source:
-            return await safe_respond(interaction, embed=discord.Embed(
-                description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red()), ephemeral=True)
-        modal = VolumeModal(vc, self)
-        await interaction.response.send_modal(modal)
-
 
 #  handle_external_voice_disconnect#  handle_external_voice_disconnect
 #  เรียกจาก bot.py เมื่อบอทถูก kick/disconnect จาก VC โดยไม่ได้ตั้งใจ
