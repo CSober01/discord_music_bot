@@ -684,10 +684,12 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         volume_pct = round(get_guild_volume(guild_id) * 100)
         embed.description += f"\n🔊 General  •  {volume_pct}%"
 
-        next_count = min(5, len(upcoming))
-        embed.description += f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n📋  QUEUE  •  {next_count} NEXT"
-
         if upcoming:
+            next_count = len(upcoming)
+            embed.description += (
+                f"\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📋  QUEUE  •  {next_count} NEXT"
+            )
             music_icons = ("🎧", "🎵", "🎶", "🎼")
             queue_lines = []
             for display_index, track in enumerate(upcoming, start=1):
@@ -699,8 +701,6 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
                     f"**{display_index:02d}**  {icon} {_pad_queue_title(queue_title, 31)}  " + "`" + f"{track_duration}" + "`"
                 )
             embed.description += "\n\n" + "\n".join(queue_lines)
-        else:
-            embed.description += "\n\n`ไม่มีเพลงถัดไป`"
 
         if queue_pos:
             embed.set_footer(text=queue_pos)
