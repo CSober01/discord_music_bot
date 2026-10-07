@@ -699,7 +699,7 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
                 queue_title = _truncate_display_width(queue_title, 31)
                 icon = music_icons[(display_index - 1) % len(music_icons)]
                 queue_lines.append(
-                    f"**{display_index:02d}** {icon} {_pad_queue_title(queue_title, 31)} " + bt + f"{track_duration}" + bt
+                    f"**{display_index:02d}** {icon} {_pad_queue_title(queue_title, 31)} " + "`" + f"{track_duration}" + "`"
                 )
             embed.description += "\n" + "\n".join(queue_lines)
 
@@ -2016,6 +2016,8 @@ class PlayerView(discord.ui.View):
         button.style = discord.ButtonStyle.success
         log("🔀 SHUFFLE", interaction, f"upcoming={len(upcoming)}")
         try: await interaction.response.edit_message(embed=self._current_embed(), view=self)
+        except Exception: pass
+        await _refresh_queue_msg(self.guild.id)
         except Exception: pass
 
     @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_previous")
