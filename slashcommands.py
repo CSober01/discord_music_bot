@@ -639,7 +639,7 @@ async def send_search_results(results, guild, channel, loop, loop_getter, reques
 
 
 def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queue_pos=None):
-    """Modern Discord music player card — compact static UI."""
+    """Modern Discord music player card — compact, structured, static UI."""
     requester_str = requester.mention if requester else "ไม่ทราบชื่อ"
 
     guild_id = None
@@ -660,13 +660,15 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         if display_meta and " — " in display_meta:
             artist = display_meta.split(" — ", 1)[0]
 
+    display_title = _clean_player_title(title)
+
     embed = discord.Embed(color=0x5865F2)
     embed.set_author(name="🎵  NOW PLAYING")
-    display_title = _clean_player_title(title)
     embed.description = (
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"**{display_title}**\n"
-        f"{_truncate_display_width(artist, 44)}  •  YouTube\n"
-        f"👤 {requester_str}  •  {duration}\n"
+        f"{_truncate_display_width(artist, 44)} • YouTube\n"
+        f"👤 {requester_str} • {duration}"
     )
 
     if guild_id is not None:
@@ -679,18 +681,15 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         elif mode == "queue":
             active_modes.append("🔁")
 
-        if active_modes:
-            embed.description += "\n" + " ".join(active_modes)
-
         volume_pct = round(get_guild_volume(guild_id) * 100)
-        embed.description += f"\n🔊 General  •  {volume_pct}%"
-        embed.description += "\n\n━━━━━━━━━━━"
+        mode_prefix = " ".join(active_modes)
+        status_line = f"{mode_prefix}  🔊 {volume_pct}%" if mode_prefix else f"🔊 {volume_pct}%"
+        embed.description += f"\n{status_line}"
+        embed.description += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
         if upcoming:
             next_count = len(upcoming)
-            embed.description += (
-                f"\n\n📋  QUEUE  •  {next_count} NEXT"
-            )
+            embed.description += f"\n📋 QUEUE • {next_count} NEXT"
             music_icons = ("🎧", "🎵", "🎶", "🎼")
             queue_lines = []
             for display_index, track in enumerate(upcoming, start=1):
@@ -699,9 +698,9 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
                 queue_title = _truncate_display_width(queue_title, 31)
                 icon = music_icons[(display_index - 1) % len(music_icons)]
                 queue_lines.append(
-                    f"**{display_index:02d}**  {icon} {_pad_queue_title(queue_title, 31)}  " + "`" + f"{track_duration}" + "`"
+                    f"**{display_index:02d}** {icon} {_pad_queue_title(queue_title, 31)} " + bt + f"{track_duration}" + bt
                 )
-            embed.description += "\n\n" + "\n".join(queue_lines)
+            embed.description += "\n" + "\n".join(queue_lines)
 
         if queue_pos:
             embed.set_footer(text=queue_pos)
@@ -710,7 +709,6 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         embed.set_thumbnail(url=thumbnail)
 
     return embed
-
 def _pad_queue_title(text: str, width: int) -> str:
     """Pad queue text by estimated display width for a stable Discord layout."""
     current_width = sum(_char_display_width(char) for char in text)
