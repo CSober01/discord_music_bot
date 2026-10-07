@@ -1258,9 +1258,13 @@ class PlaylistCountView(discord.ui.View):
         self.stop()
         if self.message:
             try:
-                await self.message.edit(view=None)
+                await self.message.delete()
             except Exception:
-                pass
+                try:
+                    await self.message.edit(view=None)
+                except Exception:
+                    pass
+            self.message = None
 
     async def on_timeout(self):
         await self._close()
@@ -1329,9 +1333,13 @@ class RadioChoiceView(discord.ui.View):
         self.stop()
         if self.message:
             try:
-                await self.message.edit(view=None)
+                await self.message.delete()
             except Exception:
-                pass
+                try:
+                    await self.message.edit(view=None)
+                except Exception:
+                    pass
+            self.message = None
 
     async def single_btn(self, interaction: discord.Interaction):
         if not await self._check_requester(interaction):
