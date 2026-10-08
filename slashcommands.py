@@ -516,7 +516,7 @@ def is_playlist_url(query: str) -> bool:
     return False
 
 def fetch_playlist_tracks(query: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> list:
-    """ดึง tracks จาก playlist (YouTube/Spotify) - สูงสุด 20 เพลงต่อ playlist
+    """ดึง tracks จาก playlist (YouTube/Spotify) - สูงสุด MAX_PLAYLIST_FETCH เพลงต่อ playlist
     Returns: list of dicts with keys: id, title, duration, url (ถ้าเป็น YouTube)
              หรือ title, artist (ถ้าเป็น Spotify)
     """
