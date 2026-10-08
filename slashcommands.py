@@ -1144,16 +1144,19 @@ async def _cleanup_channel(channel: discord.TextChannel):
 # ─────────────────────────────────────────────
 
 class QueueDoneView(discord.ui.View):
-    def __init__(self, guild, channel, loop_getter, done_msg_ref: list = None):
+    def __init__(self, guild, channel, loop_getter, done_msg_ref: list = None, player_id=None):
         super().__init__(timeout=None)
         self.guild = guild
         self.channel = channel
         self.loop_getter = loop_getter
         self.done_msg_ref = done_msg_ref
+        self.player_id = player_id or _get_player_session(guild.id)
 
     @discord.ui.button(emoji="🔍", label="ค้นหาเพลง", style=discord.ButtonStyle.primary,
                        custom_id="queue_done_search")
     async def search_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.player_id and self.player_id != _get_player_session(self.guild.id):
+            return await safe_respond(interaction, content="❌ Player session นี้หมดอายุแล้ว", ephemeral=True)
         if not interaction.user.voice:
             return await safe_respond(
                 interaction,
@@ -1182,6 +1185,8 @@ class QueueDoneView(discord.ui.View):
     @discord.ui.button(emoji="⏹", label="หยุดและออก", style=discord.ButtonStyle.danger,
                        custom_id="queue_done_stop")
     async def stop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.player_id and self.player_id != _get_player_session(self.guild.id):
+            return await safe_respond(interaction, content="❌ Player session นี้หมดอายุแล้ว", ephemeral=True)
         log("⏹ STOP", interaction, "Queue done stop")
 
         # ตอบ interaction ทันที กัน Discord ฟ้องว่าปุ่มไม่ตอบสนอง
@@ -2611,11 +2616,15 @@ class PlayerView(discord.ui.View):
 
     @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=1, custom_id="player_stop")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _is_current_player(self):
+            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
         if not await check_in_voice(interaction): return
         vc = self.guild.voice_client
         log("⏹ STOP", interaction, f"Track: {_trunc(self.current_track[1]) if self.current_track else '?'}")
-        try: await interaction.response.defer()
-        except Exception: pass
         async with get_navigation_lock(self.guild.id):
             await asyncio.gather(
                 _delete_queue_add_msgs(self.guild.id),
@@ -2979,7 +2988,11 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                     pass
 
             done_msg_ref = [None]
-            view = QueueDoneView(guild, channel, lambda: loop, done_msg_ref=done_msg_ref)
+            view = QueueDoneView(
+                guild, channel, lambda: loop,
+                done_msg_ref=done_msg_ref,
+                player_id=_get_player_session(guild.id),
+            )
             done_embed = discord.Embed(
                 description=(
                     "✅ เล่นเพลงครบ Queue แล้ว — "
