@@ -111,9 +111,14 @@ queue_display_titles: dict[str, str] = {}
 guild_volumes: dict[int, float] = {}
 
 # guild_stopped  = หยุดจงใจ (⏹ stop / /stop) → play_next ต้องหยุด
-# guild_changing = กำลัง skip/prev → play_next callback เก่าต้องข้ามไป
-guild_stopped:  set[int] = set()
-guild_changing: set[int] = set()
+# Playback generation per guild. Delayed callbacks from older sources are ignored.
+guild_stopped: set[int] = set()
+playback_generation: dict[int, int] = {}
+
+def _next_playback_generation(guild_id: int) -> int:
+    token = playback_generation.get(guild_id, 0) + 1
+    playback_generation[guild_id] = token
+    return token
 
 # Player UI state
 loop_modes: dict[int, str] = {}
@@ -210,6 +215,7 @@ def clear_guild(guild_id: int):
     loop_modes.pop(guild_id, None)
     shuffle_enabled.discard(guild_id)
     active_views.pop(guild_id, None)
+    playback_generation.pop(guild_id, None)
     for key in [key for key in queue_view_msgs if key[0] == guild_id]:
         queue_view_msgs.pop(key, None)
     search_result_msgs.pop(guild_id, None)
@@ -2194,12 +2200,7 @@ async def _send_playlist_added_summary(guild_id: int, channel, requester, tracks
 # ─────────────────────────────────────────────
 
 async def _do_play_at_idx(view: "PlayerView", idx: int):
-    """Switch Current to an existing queue item and start playback safely.
-
-    This is the single transition path used by Previous/Next (Skip). The queue
-    index is changed before stopping the old source so a delayed callback from
-    the old source can be identified and ignored by play_next().
-    """
+    """Switch to an existing queue item and start playback safely."""
     guild_id = view.guild.id
 
     async with get_queue_lock(guild_id):
@@ -2231,29 +2232,23 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
             volume=view.volume_level,
         )
 
-        # Mark the transition before vc.stop(). The old source callback may run
-        # immediately or slightly later; play_next() validates its track/index.
-        guild_changing.add(guild_id)
-        try:
-            vc.stop()
-            vc.play(
-                source,
-                after=lambda e, _idx=idx, _track=track:
-                    asyncio.run_coroutine_threadsafe(
-                        play_next(
-                            view.guild,
-                            view.channel,
-                            view.loop,
-                            current_track=_track,
-                            current_idx=_idx,
-                            error=e,
-                        ),
-                        view.loop,
+        # Generate a unique token before stopping the old source.
+        token = _next_playback_generation(guild_id)
+        vc.stop()
+        vc.play(
+            source,
+            after=lambda e, _token=token, _idx=idx, _track=track:
+                asyncio.run_coroutine_threadsafe(
+                    play_next(
+                        view.guild, view.channel, view.loop,
+                        current_track=_track,
+                        current_idx=_idx,
+                        error=e,
+                        playback_token=_token,
                     ),
-            )
-        except Exception:
-            guild_changing.discard(guild_id)
-            raise
+                    view.loop,
+                ),
+        )
 
         add_msg = queue_add_msgs.get(guild_id, {}).pop(idx, None)
 
@@ -2594,10 +2589,10 @@ async def handle_external_voice_disconnect(guild: discord.Guild):
 # ─────────────────────────────────────────────
 
 async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
-                    current_track=None, current_idx: int = None, error=None):
-    # กำลัง skip/prev → callback เก่านี้ต้องข้ามไป
-    if guild.id in guild_changing:
-        guild_changing.discard(guild.id)
+                    current_track=None, current_idx: int = None, error=None,
+                    playback_token: int = None):
+    # Ignore callbacks from an older playback generation.
+    if playback_token is not None and playback_token != playback_generation.get(guild.id):
         return
 
     # หยุดจงใจ (stop)
@@ -2605,9 +2600,6 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
         guild_stopped.discard(guild.id)
         return
 
-    # Ignore delayed callbacks from an older source. This is the important
-    # guard for rapid Previous/Next presses: the callback carries the queue
-    # item that actually finished, so it must match the current queue state.
     q_current = get_full_queue(guild.id)
     if current_idx is not None:
         if current_idx != get_now_idx(guild.id):
@@ -2697,15 +2689,17 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                 msg = await channel.send(embed=embed, view=view)
                 view.now_playing_msg = msg
 
+            token = _next_playback_generation(guild.id)
             guild.voice_client.play(
                 source,
-                after=lambda e, _idx=next_idx, _track=track:
+                after=lambda e, _token=token, _idx=next_idx, _track=track:
                     asyncio.run_coroutine_threadsafe(
                         play_next(
                             guild, channel, loop,
                             current_track=_track,
                             current_idx=_idx,
                             error=e,
+                            playback_token=_token,
                         ),
                         loop,
                     ),
