@@ -2047,8 +2047,6 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
             source = discord.PCMVolumeTransformer(
                 discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
             loop = loop_getter()
-            view = PlayerView(guild, channel, loop, current_track=track, current_idx=track_idx, loop_getter=loop_getter)
-            active_views[guild.id] = view
             session_id = _new_player_session(guild.id)
             view = PlayerView(
                 guild, channel, loop,
@@ -2072,7 +2070,8 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
                             player_session_id=_session_id,
                         ),
                         loop,
-                    )
+                    ),
+            )
             embed = make_now_playing_embed(title, duration, requester, thumbnail,
                                            _queue_pos_str(guild.id, track_idx))
             msg = await channel.send(embed=embed, view=view)
