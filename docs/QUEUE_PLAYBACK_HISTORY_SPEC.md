@@ -1092,6 +1092,31 @@ Queue Page refresh
 logical numbers #2-#... ยังถูกต้อง
 Current marker ไม่ผิดตำแหน่ง
 
+### Test 8 — External Voice Disconnect
+A กำลังเล่นอยู่ และอาจมี Playlist background fetch ทำงาน
+→ ผู้ใช้ตัด Bot ออกจาก Voice Channel
+→ ระบบตรวจพบ External Disconnect
+→ Player session เดิมถูก invalidate
+→ playback generation เดิมถูก invalidate
+→ background Playlist fetch เดิมถูก invalidate
+→ Queue / History / Current ถูก clear
+→ Queue/Search UI references ของ session เดิมถูกล้าง
+→ /play B
+→ สร้าง session ใหม่สำหรับ B
+→ callback ของ A มาถึงภายหลัง
+→ callback A ต้องถูก ignore
+→ Playlist task ของ A ที่ยังจบภายหลังต้องไม่เติมเพลง
+→ Current ต้องยังเป็น B
+→ Queue ต้องมีเฉพาะ state ของ session ใหม่
+
+### Test 9 — External Disconnect ระหว่างกำลังเพิ่ม Playlist
+เริ่มเพิ่ม Playlist
+→ เพลงแรกเริ่มเล่น
+→ เพลงที่เหลือกำลัง fetch ใน background
+→ Bot ถูกตัดออกจาก Voice
+→ งาน fetch ที่กำลังรออยู่ต้องไม่ commit ผลกลับเข้า Queue หลัง session ถูก invalidate
+→ /play ใหม่ต้องสร้าง state ใหม่โดยไม่รับผลจาก Playlist เดิม
+
 ## 48. Documentation Rule for Future Development
 
 เมื่อมีการเพิ่มหรือแก้ UI/Logic:
@@ -1258,6 +1283,30 @@ The count-selection View must follow these rules:
 - 🔍 เปิด Search ได้
 - ⏹ หยุด/ออกได้
 - session เก่าต้องไม่ถูกนำกลับมาโดย callback เก่า
+
+**Scenario N — External Voice Disconnect**
+กรณี Bot ถูกผู้ใช้เตะ/ตัดออกจาก Voice Channel หรือ Voice connection หลุดโดยไม่ได้เกิดจากปุ่ม Stop
+
+ต้อง:
+1. ตรวจว่า Bot ไม่ได้อยู่ใน Voice Channel เดิมแล้ว
+2. invalidate Player session เดิม
+3. invalidate playback generation เดิม
+4. invalidate background Playlist fetch ของ session เดิม
+5. clear Queue / History / Current และ session state ตาม `clear_guild()`
+6. ล้าง Queue/Search UI references ที่ติดตาม session เดิม
+7. Player เดิมต้องไม่สามารถเปลี่ยน playback, Queue หรือ Current ได้อีก
+8. ห้ามเรียก `vc.stop()` หรือ `vc.disconnect()` ซ้ำกับ Voice Client ที่หลุดไปแล้ว
+9. หากมี `/play` ใหม่ ต้องสร้าง Player session และ playback generation ใหม่
+10. callback/task จาก session เดิมต้องไม่มีสิทธิ์เติมเพลง เปลี่ยน Current หรือสร้าง playback ใหม่ใน session ใหม่
+
+ผลลัพธ์ที่ต้องได้:
+- Queue = empty
+- History = empty
+- Current = none
+- Upcoming = empty
+- Player session เดิม = invalid
+- background Playlist task เดิม = invalid
+- playback callback เดิม = ignored
 
 ### 49.4 Acceptance rule
 
