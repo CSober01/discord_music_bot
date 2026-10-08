@@ -1366,3 +1366,106 @@ The count-selection View must follow these rules:
 - Branch: `fix/clean-player-title`
 - ล่าสุด: Main Player order correction
 - ต้องทดสอบจริงหลัง pull PR ก่อน merge `main`
+
+
+## 51. Player / Queue UI Contract — 2026-10-08
+
+### Main Player layout
+
+Main Player must use this visual structure:
+
+```
+🎵 NOW PLAYING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+เพลงที่กำลังเล่น
+_Artist_ • YouTube
+
+👤 SEA_Beach  •  ⏱ 3:42
+🔊 10%  •  🔀  •  🔂
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📚 HISTORY
+01 🎵 เพลงก่อนหน้า 1                 `3:21`
+02 🎵 เพลงก่อนหน้า 2                 `4:05`
+03 🎵 เพลงก่อนหน้า 3                 `2:58`
+
+⏭️ NEXT
+05 🎵 เพลงถัดไป 1                    `4:12`
+06 🎵 เพลงถัดไป 2                    `3:36`
+07 🎵 เพลงถัดไป 3                    `5:01`
+
+⏳ กำลังโหลดเพลงเพิ่มเติม • 10 / 20
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+กำลังเล่น #4 จาก 20 เพลง
+```
+
+Rules:
+- Use `QUEUE_DIVIDER` as the single standard divider: `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━` (49 characters).
+- Do not render a separate CURRENT list item in Main Player; the current track is already the Now Playing section.
+- History uses `📚 HISTORY`; each history item uses `🎵`.
+- Next uses `⏭️ NEXT`; each upcoming item uses `🎵`.
+- Do not cycle `🎧`, `🎶`, and `🎼` for queue items.
+- Main Player shows up to 10 History items and 5 Upcoming items.
+- Thumbnail remains supported through the current track's thumbnail and is shown on the Embed when available.
+
+### Queue page layout
+
+Queue page uses one consistent item icon:
+- Current track: `▶️` and the entire row is bold.
+- All other tracks: `🎵`.
+- The current marker moves with the real `now_playing_idx`.
+- There must be exactly one current marker.
+- Current marker and logical queue number must stay synchronized with Main Player.
+
+Example:
+
+```
+📋 QUEUE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+01 🎵 เพลงก่อนหน้า                    `3:21`
+02 🎵 เพลงก่อนหน้า                    `4:05`
+03 **▶️ เพลงที่กำลังเล่น                `3:42`**
+04 🎵 เพลงถัดไป                       `4:12`
+05 🎵 เพลงถัดไป                       `3:36`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Page 1 / 1  •  5 songs  •  กำลังเล่น #3
+```
+
+### Playlist loading status
+
+Background playlist fetch must not block playback of the first playable track.
+
+- `PLAYLIST_FETCH_CONCURRENCY = 5`.
+- Main Player shows loading status while additional playlist tracks are being fetched:
+  `⏳ กำลังโหลดเพลงเพิ่มเติม • X / N`
+- `X` means the number of playlist entries whose fetch attempt has completed, including skipped/failed entries.
+- Update the Player loading status every 5 completed entries.
+- When the background fetch finishes, refresh Player and Queue immediately.
+- When loading finishes, remove the temporary loading line.
+- If a playlist has only one playable entry and no background work remains, no loading line is shown.
+- Loading state is session-aware and must not leak into a newer Player session.
+
+### Queue-add UI synchronization
+
+When a track is appended to an already-playing Queue:
+1. Update Queue state.
+2. Refresh Main Player so Next/Previous/Repeat/Shuffle/Queue button states are recalculated.
+3. Refresh open Queue views.
+4. Do not manually edit only the Embed while leaving the View stale.
+
+This specifically prevents the Next button from remaining disabled after adding another track.
+
+### UI icon contract
+
+| Area | Icon |
+|---|---|
+| Main Player header | 🎵 |
+| History header | 📚 |
+| History item | 🎵 |
+| Next header | ⏭️ |
+| Next item | 🎵 |
+| Queue current item | ▶️ + bold |
+| Queue other item | 🎵 |
+| Loading | ⏳ |
+
