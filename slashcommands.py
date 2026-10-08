@@ -773,7 +773,8 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
 
         loading = playlist_loading_status.get(guild_id)
         if loading and loading.done < loading.total:
-            queue_lines.append("")
+            if queue_lines:
+                queue_lines.append("")
             queue_lines.append(f"⏳ กำลังโหลดเพลงเพิ่มเติม • {loading.done} / {loading.total}")
 
         if queue_lines:
