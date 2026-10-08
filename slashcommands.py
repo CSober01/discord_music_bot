@@ -114,6 +114,13 @@ guild_volumes: dict[int, float] = {}
 # Playback generation per guild. Delayed callbacks from older sources are ignored.
 guild_stopped: set[int] = set()
 playback_generation: dict[int, int] = {}
+# Serialize user-driven Previous/Next transitions per guild.
+navigation_locks: dict[int, asyncio.Lock] = {}
+
+def get_navigation_lock(guild_id: int) -> asyncio.Lock:
+    if guild_id not in navigation_locks:
+        navigation_locks[guild_id] = asyncio.Lock()
+    return navigation_locks[guild_id]
 
 def _next_playback_generation(guild_id: int) -> int:
     token = playback_generation.get(guild_id, 0) + 1
@@ -216,6 +223,7 @@ def clear_guild(guild_id: int):
     shuffle_enabled.discard(guild_id)
     active_views.pop(guild_id, None)
     playback_generation.pop(guild_id, None)
+    navigation_locks.pop(guild_id, None)
     for key in [key for key in queue_view_msgs if key[0] == guild_id]:
         queue_view_msgs.pop(key, None)
     search_result_msgs.pop(guild_id, None)
@@ -2025,9 +2033,11 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
             loop = loop_getter()
             view = PlayerView(guild, channel, loop, current_track=track, current_idx=track_idx, loop_getter=loop_getter)
             active_views[guild.id] = view
-            vc.play(source, after=lambda e, _t=track, _ti=track_idx:
+            token = _next_playback_generation(guild.id)
+            vc.play(source, after=lambda e, _t=track, _ti=track_idx, _token=token:
                     asyncio.run_coroutine_threadsafe(
-                        play_next(guild, channel, loop, current_track=_t, current_idx=_ti, error=e), loop))
+                        play_next(guild, channel, loop, current_track=_t, current_idx=_ti, error=e,
+                                  playback_token=_token), loop))
             embed = make_now_playing_embed(title, duration, requester, thumbnail,
                                            _queue_pos_str(guild.id, track_idx))
             msg = await channel.send(embed=embed, view=view)
@@ -2148,9 +2158,11 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
             view = PlayerView(guild, channel, loop, current_track=track, current_idx=track_idx, loop_getter=loop_getter)
             active_views[guild.id] = view
             _g, _ch, _lp, _t, _ti = guild, channel, loop, track, track_idx
-            vc.play(source, after=lambda e, g=_g, ch=_ch, lp=_lp, t=_t, ti=_ti:
+            token = _next_playback_generation(guild.id)
+            vc.play(source, after=lambda e, g=_g, ch=_ch, lp=_lp, t=_t, ti=_ti, _token=token:
                     asyncio.run_coroutine_threadsafe(
-                        play_next(g, ch, lp, current_track=t, current_idx=ti, error=e), lp))
+                        play_next(g, ch, lp, current_track=t, current_idx=ti, error=e,
+                                  playback_token=_token), lp))
             embed = make_now_playing_embed(title, duration, requester, thumbnail,
                                            _queue_pos_str(guild.id, track_idx))
             msg = await channel.send(embed=embed, view=view)
@@ -2386,15 +2398,19 @@ class PlayerView(discord.ui.View):
 
     @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_previous")
     async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_in_voice(interaction): return
-        idx = get_now_idx(self.guild.id)
-        if idx <= 0:
-            return await safe_respond(interaction, embed=discord.Embed(
-                description="❌ ไม่มีเพลงก่อนหน้าแล้ว", color=discord.Color.red()), ephemeral=True)
-        log("⏮ PREV", interaction, f"idx {idx} → {idx-1}")
-        try: await interaction.response.defer()
-        except Exception: pass
-        await _do_play_at_idx(self, idx - 1)
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+        if not await check_in_voice(interaction):
+            return
+        async with get_navigation_lock(self.guild.id):
+            idx = get_now_idx(self.guild.id)
+            if idx <= 0:
+                return await safe_respond(interaction, embed=discord.Embed(
+                    description="❌ ไม่มีเพลงก่อนหน้าแล้ว", color=discord.Color.red()), ephemeral=True)
+            log("⏮ PREV", interaction, f"idx {idx} → {idx-1}")
+            await _do_play_at_idx(self, idx - 1)
 
     @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_pause_resume")
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2418,23 +2434,25 @@ class PlayerView(discord.ui.View):
 
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await check_in_voice(interaction): return
-        vc = self.guild.voice_client
-        if not (vc.is_playing() or vc.is_paused()):
-            return await safe_respond(interaction, embed=discord.Embed(
-                description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red()), ephemeral=True)
-        idx = get_now_idx(self.guild.id)
-        q = get_full_queue(self.guild.id)
-        if idx + 1 >= len(q):
-            log("⏭ SKIP", interaction, f"idx {idx} → end")
-            try: await interaction.response.defer()
-            except Exception: pass
-            vc.stop()
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+        if not await check_in_voice(interaction):
             return
-        log("⏭ SKIP", interaction, f"idx {idx} → {idx+1}")
-        try: await interaction.response.defer()
-        except Exception: pass
-        await _do_play_at_idx(self, idx + 1)
+        async with get_navigation_lock(self.guild.id):
+            vc = self.guild.voice_client
+            if not (vc.is_playing() or vc.is_paused()):
+                return await safe_respond(interaction, embed=discord.Embed(
+                    description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red()), ephemeral=True)
+            idx = get_now_idx(self.guild.id)
+            q = get_full_queue(self.guild.id)
+            if idx + 1 >= len(q):
+                log("⏭ SKIP", interaction, f"idx {idx} → end")
+                vc.stop()
+                return
+            log("⏭ SKIP", interaction, f"idx {idx} → {idx+1}")
+            await _do_play_at_idx(self, idx + 1)
 
     @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=0, custom_id="player_loop")
     async def loop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
