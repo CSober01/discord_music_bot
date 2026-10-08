@@ -1423,6 +1423,33 @@ Rules:
 - Thumbnail remains supported through the current track's thumbnail and may be shown on the Embed when available.
 - Interactive playback controls are Discord buttons below the Embed, not text inside the Embed.
 
+### Conditional Queue sections and exact spacing
+
+The Main Player keeps the approved layout and divider positions, but each optional section is rendered only when that section has data.
+
+The rules are:
+
+**Condition 1 — History + Next + Loading**
+- Render `📚 *History*` and its rows.
+- Render `⏭️ *Next*` and its rows.
+- Render `⏳ กำลังโหลดเพลงเพิ่มเติม • X / N`.
+- Keep the same vertical spacing shown in the approved full layout.
+
+**Condition 2 — No History + Next + Loading**
+- Do not render the History heading or any empty History area.
+- Render `⏭️ *Next*` at the same position where the first available queue section begins.
+- Render Loading below Next with the same spacing as the approved layout.
+
+**Condition 3 — No History + No Next + Loading**
+- Do not render History or Next headings/empty areas.
+- Render Loading immediately after the Main Player divider, with no extra blank line before it.
+- Keep the final divider and queue-position line in their approved positions.
+
+General rule:
+- An absent section is removed as a complete section; do not leave an empty heading, placeholder, or artificial blank block.
+- When multiple sections are present, preserve the exact ordering and spacing from the approved layout: History → Next → Loading.
+- The 49-character divider remains unchanged.
+
 ### Main Player buttons
 
 The actual clickable Discord buttons remain below the Embed in exactly two rows:
