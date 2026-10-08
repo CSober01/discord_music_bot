@@ -1140,13 +1140,37 @@ Current marker ไม่ผิดตำแหน่ง
 | Search close | search_result_close | ปิดผลค้นหา |
 | Radio single | youtube_radio_single | เล่นเพลงเดียว |
 | Radio playlist | youtube_radio_playlist | โหลดเพลงจาก Radio |
-| Playlist count | playlist_count_{amount} | เลือกจำนวนเพลงที่จะโหลด |
+| Playlist count | playlist_count_{amount} | เลือกจำนวนเพลงที่จะโหลด โดยแสดงเฉพาะ 5/10/20/30 ที่ไม่เกินจำนวนเพลงที่ค้นพบ |
+| Playlist Add All | playlist_count_all | เพิ่มเพลงทั้งหมดที่ค้นพบ โดยจำนวนที่ค้นพบถูกจำกัดสูงสุด 50 เพลง |
 | Volume modal | volume_modal | Volume modal |
 | Volume input | volume_modal_input | ช่องกรอก 0-100 |
 | Search modal | search_modal | Search modal |
 | Search input | search_modal_input | ช่องค้นหา |
 
 ID ที่ผูกกับ state/handler ต้องไม่ถูกเปลี่ยนชื่อโดยไม่มีการอัปเดตทุกจุดที่อ้างอิง
+
+### 49.3A Playlist count button logic
+
+Playlist metadata is fetched with a hard maximum of 50 tracks (MAX_PLAYLIST_FETCH).
+
+The count-selection View must follow these rules:
+- Numeric buttons are only shown when the discovered track count reaches that amount.
+- Numeric choices are limited to 5, 10, 20, and 30.
+- The old numeric 50 button is removed.
+- Add All (N) is always shown when at least 1 track was discovered.
+- Add All (N) means add all tracks actually discovered by the fetch, where N is at most 50.
+- If fewer than 5 tracks are discovered, show only Add All (N).
+- Examples:
+  - 3 tracks → [Add All (3)]
+  - 8 tracks → [5] [Add All (8)]
+  - 17 tracks → [5] [10] [Add All (17)]
+  - 35 tracks → [5] [10] [20] [30] [Add All (35)]
+  - 120-track playlist with fetch capped at 50 → [5] [10] [20] [30] [Add All (50)]
+- Add All does not mean unlimited playlist loading; it means all tracks successfully discovered in the capped fetch.
+- The displayed N must use the actual discovered track list length, not an external playlist total.
+- Selecting a count must not change the current track; it only appends the selected tracks to Queue.
+- After adding, Main Player and open Queue Page must refresh.
+- Repeated clicks while the operation is busy must not add the same batch twice.
 
 ### 49.3 Main Player scenarios
 
