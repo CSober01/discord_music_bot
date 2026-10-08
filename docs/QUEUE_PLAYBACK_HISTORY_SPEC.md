@@ -708,18 +708,28 @@ _Artist_ • YouTube
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 กำลังเล่น #5 จาก 20 เพลง
 
-ปุ่มหลัก:
-[ ⏮ ] [ ⏸ ] [ ⏭ ] [ ⏹ ]
-[ 🔍 ] [ 📋 ] [ 🔊 ]
+ปุ่มหลัก (Discord UI จริง):
+[ 🔀 ] [ ⏮ ] [ ⏸ ] [ ⏭ ] [ ⏹ ]
+[ 🔁 ] [ 🔍 ] [ 📋 ] [ 🔊 ]
+
+Discord จำกัด Button ได้สูงสุด 5 ปุ่มต่อ row ดังนั้นต้องแบ่งปุ่มเป็น 2 rows ตามด้านบน
 
 ความหมาย:
+- 🔀 = Shuffle เฉพาะ Upcoming
 - ⏮ = Previous
 - ⏸ / ▶️ = Pause / Resume
 - ⏭ = Next / Skip
 - ⏹ = Stop
+- 🔁 / 🔂 = Repeat mode: Queue / Track ตาม state
 - 🔍 = Search
 - 📋 = เปิด Queue Page แยก
 - 🔊 = Volume
+
+สถานะปุ่ม:
+- Shuffle ปิด = secondary, เปิด = success
+- Repeat ปิด = 🔁 / secondary
+- Repeat Track = 🔂 / success
+- Repeat Queue = 🔁 / success
 
 หมายเหตุสำคัญ:
 - เลข 01, 02, ... ในตัวอย่างเป็นลำดับที่แสดงใน Player ไม่ใช่ logical queue number
@@ -842,6 +852,27 @@ State change
 
 ## 43. Player Button Logic Contract
 
+### 🔀 Shuffle
+- Shuffle เฉพาะเพลงที่อยู่ใน Upcoming (`queue[current_index + 1:]`)
+- ห้ามเปลี่ยน Current
+- ห้าม shuffle History
+- ห้ามสร้างหรือ duplicate Queue entry
+- ห้าม renumber logical queue number
+- หาก Upcoming มีน้อยกว่า 2 เพลง ให้ reject/แจ้งผู้ใช้
+- หลัง Shuffle ต้อง refresh Main Player + Queue Page
+
+### 🔁 Repeat
+Repeat มี 3 states และวนตามลำดับ:
+  off → track → queue → off
+
+- **off:** เล่นตาม Queue ปกติ
+- **track:** เล่นเพลง Current ซ้ำ โดยใช้ Queue entry เดิม ห้าม append duplicate
+- **queue:** เมื่อถึงท้าย Queue ให้กลับไปเล่นเพลงแรกที่ยังอยู่ใน memory
+- เพลงที่ถูก trim ออกจาก History แล้วจะไม่ถูกนำกลับมาโดยอัตโนมัติ
+- หลังเปลี่ยน Repeat mode ต้อง refresh Main Player + Queue Page
+- ปุ่มแสดง state ด้วย emoji/style ที่ตรงกับ mode: off = 🔁, track = 🔂, queue = 🔁
+
+### ⏮ Previous
 ### ⏮ Previous
 - ใช้ Current index ปัจจุบัน
 - ถ้าไม่มี History/ไม่มีเพลงก่อนหน้า ให้ disabled หรือ reject
