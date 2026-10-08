@@ -1245,7 +1245,11 @@ class VolumeModal(discord.ui.Modal, title="🔊 ปรับระดับเ�
             vol = int(str(self.vol_input))
             if not 0 <= vol <= 100: raise ValueError
         except ValueError:
-            return await interaction.response.send_message("❌ กรอกตัวเลข 0-100", ephemeral=True)
+            return await safe_respond(
+                interaction,
+                content="❌ กรอกตัวเลข 0-100",
+                ephemeral=True,
+            )
         vol_level = vol / 100
         self.player_view.volume_level = vol_level
         set_guild_volume(self.player_view.guild.id, vol_level)
