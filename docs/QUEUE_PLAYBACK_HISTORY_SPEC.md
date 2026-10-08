@@ -1364,11 +1364,14 @@ The count-selection View must follow these rules:
 ### Current implementation checkpoint
 
 - Branch: `fix/clean-player-title`
-- ล่าสุด: Main Player order correction
+- ล่าสุด: Main Player modern UI applied in `slashcommands.py`
+- UI contract in this section is the source of truth for the approved layout
 - ต้องทดสอบจริงหลัง pull PR ก่อน merge `main`
 
 
 ## 51. Player / Queue UI Contract — 2026-10-08
+
+> **UI decision:** layout below is the approved Main Player visual contract. Future UI changes must preserve this hierarchy and divider length unless the contract is explicitly revised.
 
 ### Main Player visual hierarchy
 
@@ -1415,7 +1418,7 @@ Rules:
 - Do not use large/bold History or Next headings.
 - Main Player shows up to 10 History items and 5 Upcoming items.
 - History and Upcoming list rows remain normal-weight text; duration is rendered as inline code.
-- The visual progress bar is a display element for now. Real-time movement/update behavior is a separate implementation concern and is not required by this UI contract yet.
+- The visual progress bar is part of the approved layout. The sample uses `**1:24**` as an illustration; runtime elapsed time must come from playback state when an elapsed-time tracker is available. Until then, the implementation may use `0:00` as a placeholder and must not invent elapsed values.
 - The standard divider is exactly `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━` (49 characters).
 - Thumbnail remains supported through the current track's thumbnail and may be shown on the Embed when available.
 - Interactive playback controls are Discord buttons below the Embed, not text inside the Embed.
