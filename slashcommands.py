@@ -120,7 +120,7 @@ loop_modes: dict[int, str] = {}
 shuffle_enabled: set[int] = set()
 QUEUE_PAGE_SIZE = 20
 
-MAX_QUEUE = 20   # เก็บเพลงใน memory สูงสุด 20 อัน (ย้อนกลับได้สูงสุด 20 เพลง)
+HISTORY_LIMIT = 10  # เก็บเพลงที่เล่นไปแล้วล่าสุดเพื่อ Previous
 MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
 PLAYLIST_FETCH_CONCURRENCY = 4  # จำกัดจำนวน request พร้อมกันไปหา YouTube กันโดน rate-limit (HTTP 429)
 
@@ -150,36 +150,40 @@ def display_no(guild_id: int, idx: int) -> int:
     return idx + 1 + get_seq_offset(guild_id)
 
 def _trim_queue(guild_id: int):
-    """ตัดเพลงเก่าออกจากบนสุดของคิว ถ้าคิวยาวเกิน MAX_QUEUE
-    ตัดได้มากสุดเท่าที่ไม่กระทบเพลงที่กำลังเล่นอยู่ (now_idx) — ถ้าตัดได้ไม่ครบ
-    ที่เหลือจะถูกตัดในรอบหลัง (ตอนเพลงเปลี่ยน/now_idx ขยับสูงขึ้น) แทน
-    เลขลำดับที่แสดงผล (display_no) ยังนับสะสมต่อเนื่องเสมอ ไม่รีเซ็ต
+    """ตัดเฉพาะ Playback History ที่เกิน HISTORY_LIMIT; Upcoming ไม่ถูกจำกัด.
+
+    Queue แบ่งเป็น:
+      history = q[:now_idx]
+      current = q[now_idx]
+      upcoming = q[now_idx + 1:]
+
+    การ trim จะลบจากด้านหน้าเฉพาะเมื่อจำนวนเพลงก่อน Current เกิน 10 เพลง
+    และเพิ่ม queue_seq_offset เพื่อรักษาเลข Queue เดิมของเพลงที่เหลือ.
     """
     q = get_full_queue(guild_id)
-    if len(q) <= MAX_QUEUE:
+    if not q:
+        set_now_idx(guild_id, 0)
         return
-    now_idx = get_now_idx(guild_id)
-    excess = len(q) - MAX_QUEUE
-    trim_count = min(excess, now_idx)  # กันไม่ให้ตัดเพลงที่กำลังเล่นทิ้ง
-    if trim_count > 0:
-        del q[:trim_count]
-        set_now_idx(guild_id, now_idx - trim_count)
-        queue_seq_offset[guild_id] = get_seq_offset(guild_id) + trim_count
 
-        # ปรับ key ของ queue_add_msgs (ข้อความ "เพิ่มใน Queue #") ให้ตรงกับตำแหน่งใหม่
-        # ไม่งั้นข้อความจะไม่ถูกลบตอนเพลงนั้นเริ่มเล่นจริง เพราะ key เดิมอ้างถึง index ที่ไม่มีอยู่แล้ว
-        old_msgs = queue_add_msgs.get(guild_id, {})
-        if old_msgs:
-            shifted = {}
-            for old_key, msg in old_msgs.items():
-                new_key = old_key - trim_count
-                if new_key >= 0:
-                    shifted[new_key] = msg
-                else:
-                    # เพลงที่ key อ้างถึงถูกตัดออกไปแล้ว (ไม่ควรเกิดขึ้นได้จริง เพราะ
-                    # ตัดได้แค่ไม่เกิน now_idx เท่านั้น แต่กันไว้เผื่อไว้)
-                    pass
-            queue_add_msgs[guild_id] = shifted
+    now_idx = max(0, min(get_now_idx(guild_id), len(q) - 1))
+    history_count = now_idx
+    trim_count = max(0, history_count - HISTORY_LIMIT)
+
+    if trim_count <= 0:
+        return
+
+    del q[:trim_count]
+    set_now_idx(guild_id, now_idx - trim_count)
+    queue_seq_offset[guild_id] = get_seq_offset(guild_id) + trim_count
+
+    old_msgs = queue_add_msgs.get(guild_id, {})
+    if old_msgs:
+        shifted = {}
+        for old_key, msg in old_msgs.items():
+            new_key = old_key - trim_count
+            if new_key >= 0:
+                shifted[new_key] = msg
+        queue_add_msgs[guild_id] = shifted
 
 def get_total_added(guild_id: int) -> int:
     return guild_total_added.get(guild_id, 0)
@@ -662,7 +666,11 @@ async def send_search_results(results, guild, channel, loop, loop_getter, reques
 
 
 def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queue_pos=None):
-    """Modern Discord music player card — compact, structured, static UI."""
+    """Render Player จาก Queue state เดียวกับ /queue.
+
+    แสดง History 10 เพลงล่าสุด + Current + Upcoming 5 เพลง
+    โดยใช้ logical queue number จาก display_no() ทุกบรรทัด.
+    """
     requester_str = requester.mention if requester else "ไม่ทราบชื่อ"
 
     guild_id = None
@@ -670,15 +678,18 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         guild_id = requester.guild.id
 
     current_idx = get_now_idx(guild_id) if guild_id is not None else 0
-    upcoming = []
-    if guild_id is not None:
-        q = get_full_queue(guild_id)
-        if 0 <= current_idx < len(q):
-            upcoming = q[current_idx + 1:current_idx + 6]
+    q = get_full_queue(guild_id) if guild_id is not None else []
+    if q:
+        current_idx = max(0, min(current_idx, len(q) - 1))
+
+    history_start = max(0, current_idx - HISTORY_LIMIT)
+    history = q[history_start:current_idx] if q else []
+    upcoming_start = current_idx + 1
+    upcoming = q[upcoming_start:upcoming_start + 5] if q else []
 
     artist = "YouTube"
-    if guild_id is not None and 0 <= current_idx < len(get_full_queue(guild_id)):
-        current_url = get_full_queue(guild_id)[current_idx][0]
+    if q and 0 <= current_idx < len(q):
+        current_url = q[current_idx][0]
         display_meta = queue_display_titles.get(current_url)
         if display_meta and " — " in display_meta:
             artist = display_meta.split(" — ", 1)[0]
@@ -710,20 +721,45 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         embed.description += f"\n{status_line}"
         embed.description += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-        if upcoming:
-            next_count = len(upcoming)
-            embed.description += f"\n📋 QUEUE • {next_count} NEXT"
-            music_icons = ("🎧", "🎵", "🎶", "🎼")
-            queue_lines = []
-            for display_index, track in enumerate(upcoming, start=1):
+        music_icons = ("🎧", "🎵", "🎶", "🎼")
+        queue_lines = []
+
+        if history:
+            queue_lines.append("📚 **HISTORY • LAST 10**")
+            for offset, track in enumerate(history, start=history_start):
                 url, track_title, track_duration, _requester, *_rest = track
-                queue_title = queue_display_titles.get(url, track_title)
-                queue_title = _truncate_display_width(queue_title, 31)
-                icon = music_icons[(display_index - 1) % len(music_icons)]
+                queue_title = _truncate_display_width(queue_display_titles.get(url, track_title), 31)
                 queue_lines.append(
-                    f"**{display_index:02d}** {icon} {_pad_queue_title(queue_title, 31)} " + "`" + f"{track_duration}" + "`"
+                    f"**{display_no(guild_id, offset):02d}** {music_icons[(offset - history_start) % len(music_icons)]} "
+                    f"{_pad_queue_title(queue_title, 31)} `{track_duration}`"
                 )
-            embed.description += "\n" + "\n".join(queue_lines)    embed.set_footer(text=queue_pos)
+
+        if q and 0 <= current_idx < len(q):
+            url, current_title, current_duration, _requester, *_rest = q[current_idx]
+            current_queue_title = _truncate_display_width(queue_display_titles.get(url, current_title), 31)
+            queue_lines.append("▶️ **CURRENT**")
+            queue_lines.append(
+                f"**{display_no(guild_id, current_idx):02d}** ▶️ "
+                f"{_pad_queue_title(current_queue_title, 31)} `{current_duration}`"
+            )
+
+        if upcoming:
+            queue_lines.append("📋 **NEXT • 5**")
+            for offset, track in enumerate(upcoming, start=upcoming_start):
+                url, track_title, track_duration, _requester, *_rest = track
+                queue_title = _truncate_display_width(queue_display_titles.get(url, track_title), 31)
+                queue_lines.append(
+                    f"**{display_no(guild_id, offset):02d}** {music_icons[(offset - upcoming_start) % len(music_icons)]} "
+                    f"{_pad_queue_title(queue_title, 31)} `{track_duration}`"
+                )
+
+        if queue_lines:
+            embed.description += "\n" + "\n".join(queue_lines)
+
+    embed.set_footer(text=queue_pos or (
+        f"กำลังเล่น #{display_no(guild_id, current_idx)} จาก {get_total_added(guild_id)} เพลง"
+        if guild_id is not None and q else "ไม่มีเพลง"
+    ))
 
     if thumbnail:
         embed.set_thumbnail(url=thumbnail)
@@ -817,37 +853,34 @@ def _truncate_display_width(text: str, max_width: int) -> str:
     return "".join(chars) + "…"
 
 def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
-    """Full Queue embed: upcoming tracks only, compact single-line rows, paginated."""
+    """Render Queue ทั้งหมด: History + Current + Upcoming โดยใช้เลข Queue เดียวกับ Player."""
     q = get_full_queue(guild_id)
     idx = current_idx if current_idx is not None else get_now_idx(guild_id)
 
-    upcoming = q[idx + 1:] if 0 <= idx < len(q) else q
-    total = len(upcoming)
-
-    if total == 0:
+    if not q:
         embed = discord.Embed(
             title="📋  QUEUE",
-            description="ไม่มีเพลงถัดไปใน Queue",
+            description="ไม่มีเพลงใน Queue",
             color=0x5865F2,
         )
         embed.set_footer(text="Queue ว่าง")
         return embed
 
-    total_pages = max(1, (total + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
+    idx = max(0, min(idx, len(q) - 1))
+    total_pages = max(1, (len(q) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
     start = page * QUEUE_PAGE_SIZE
-    page_items = upcoming[start:start + QUEUE_PAGE_SIZE]
+    page_items = q[start:start + QUEUE_PAGE_SIZE]
 
     music_icons = ("🎧", "🎵", "🎶", "🎼")
     lines = []
-    for offset, track in enumerate(page_items, start=start + 1):
-        actual_idx = idx + offset
+    for actual_idx, track in enumerate(page_items, start=start):
         url, title, duration, requester, *_rest = track
         display_title = _truncate_display_width(
             queue_display_titles.get(url, title), 31
         )
         line_no = display_no(guild_id, actual_idx)
-        icon = music_icons[(offset - 1) % len(music_icons)]
+        icon = "▶️" if actual_idx == idx else music_icons[(actual_idx - start) % len(music_icons)]
         lines.append(
             f"**{line_no:02d}**  {icon} {_pad_queue_title(display_title, 31)}  " + "`" + f"{duration}" + "`"
         )
@@ -857,7 +890,9 @@ def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
         description="\n".join(lines),
         color=0x5865F2,
     )
-    embed.set_footer(text=f"Page {page + 1} / {total_pages}  •  {total} songs")
+    embed.set_footer(
+        text=f"Page {page + 1} / {total_pages}  •  {len(q)} songs  •  กำลังเล่น #{display_no(guild_id, idx)}"
+    )
     return embed
 MAX_TITLE_LOG = 40
 
@@ -2211,10 +2246,7 @@ class QueueView(discord.ui.View):
 
     def _page_count(self):
         q = get_full_queue(self.guild.id)
-        idx = get_now_idx(self.guild.id)
-        upcoming = q[idx + 1:] if 0 <= idx < len(q) else q
-        return max(1, (len(upcoming) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
-
+        return max(1, (len(q) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
     def _sync_buttons(self):
         total_pages = self._page_count()
         self.page = max(0, min(self.page, total_pages - 1))
