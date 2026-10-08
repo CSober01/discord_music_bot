@@ -728,10 +728,10 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
     embed = discord.Embed(color=0x5865F2)
     embed.set_author(name="🎵  NOW PLAYING")
     embed.description = (
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"**{display_title}**\n"
-        f"{_truncate_display_width(artist, 44)} • YouTube\n"
-        f"👤 {requester_str} • {duration}"
+        f"_{_truncate_display_width(artist, 44)}_ • YouTube\n"
+        f"👤 {requester_str}  •  ⏱ {duration}"
     )
 
     if guild_id is not None:
@@ -746,9 +746,12 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
 
         volume_pct = round(get_guild_volume(guild_id) * 100)
         mode_prefix = " ".join(active_modes)
-        status_line = f"{mode_prefix}  🔊 {volume_pct}%" if mode_prefix else f"🔊 {volume_pct}%"
+        status_parts = [f"🔊 {volume_pct}%"]
+        if mode_prefix:
+            status_parts.append(mode_prefix)
+        status_line = "  •  ".join(status_parts)
         embed.description += f"\n{status_line}"
-        embed.description += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        embed.description += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
         music_icons = ("🎧", "🎵", "🎶", "🎼")
         queue_lines = []
@@ -766,6 +769,7 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         if q and 0 <= current_idx < len(q):
             url, current_title, current_duration, _requester, *_rest = q[current_idx]
             current_queue_title = _truncate_display_width(queue_display_titles.get(url, current_title), 31)
+            queue_lines.append("")
             queue_lines.append("▶️ **CURRENT**")
             queue_lines.append(
                 f"**{display_no(guild_id, current_idx):02d}** ▶️ "
@@ -773,7 +777,8 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
             )
 
         if upcoming:
-            queue_lines.append("📋 **NEXT • 5**")
+            queue_lines.append("")
+            queue_lines.append("⏭️ **NEXT • 5**")
             for offset, track in enumerate(upcoming, start=upcoming_start):
                 url, track_title, track_duration, _requester, *_rest = track
                 queue_title = _truncate_display_width(queue_display_titles.get(url, track_title), 31)
@@ -889,7 +894,7 @@ def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
     if not q:
         embed = discord.Embed(
             title="📋  QUEUE",
-            description="ไม่มีเพลงใน Queue",
+            description=f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nไม่มีเพลงใน Queue\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             color=0x5865F2,
         )
         embed.set_footer(text="Queue ว่าง")
@@ -897,12 +902,11 @@ def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
 
     idx = max(0, min(idx, len(q) - 1))
     total_pages = max(1, (len(q) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    start = page * QUEUE_PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))    start = page * QUEUE_PAGE_SIZE
     page_items = q[start:start + QUEUE_PAGE_SIZE]
 
     music_icons = ("🎧", "🎵", "🎶", "🎼")
-    lines = []
+    lines = [divider]
     for actual_idx, track in enumerate(page_items, start=start):
         url, title, duration, requester, *_rest = track
         display_title = _truncate_display_width(
@@ -914,6 +918,7 @@ def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
             f"**{line_no:02d}**  {icon} {_pad_queue_title(display_title, 31)}  " + "`" + f"{duration}" + "`"
         )
 
+    lines.append(divider)
     embed = discord.Embed(
         title="📋  QUEUE",
         description="\n".join(lines),
@@ -1797,8 +1802,7 @@ class SearchResultView(discord.ui.View):
         # (จำกัดด้วย PLAYLIST_FETCH_CONCURRENCY) แล้วเพิ่ม/อัปเดตคิวเป็นชุดเดียว
         # จึงไม่ต้องรอ yt-dlp แบบทีละเพลง หรือแก้ข้อความ Now Playing ซ้ำทุกเพลง
         remaining_results = [
-            result for i, result in enumerate(self.results)
-            if i not in self._selected
+            result for i, result in enumerate(self.results)            if i not in self._selected
         ]
         if remaining_results:
             await _add_playlist_to_queue(
@@ -2697,7 +2701,6 @@ async def handle_external_voice_disconnect(guild: discord.Guild):
 
     if not channel:
         return  # ไม่มี channel ให้แจ้งเตือน (เช่นบอทหลุดตอนยังไม่เคยเล่นเพลงเลย) — เคลียร์สถานะพอ
-
     old_done = queue_done_msgs.pop(guild.id, None)
     if old_done:
         try: await old_done.delete()
