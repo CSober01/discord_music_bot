@@ -223,7 +223,6 @@ def clear_guild(guild_id: int):
     shuffle_enabled.discard(guild_id)
     active_views.pop(guild_id, None)
     playback_generation.pop(guild_id, None)
-    navigation_locks.pop(guild_id, None)
     for key in [key for key in queue_view_msgs if key[0] == guild_id]:
         queue_view_msgs.pop(key, None)
     search_result_msgs.pop(guild_id, None)
