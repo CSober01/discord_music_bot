@@ -145,6 +145,7 @@ def _next_playback_generation(guild_id: int) -> int:
 loop_modes: dict[int, str] = {}
 shuffle_enabled: set[int] = set()
 QUEUE_PAGE_SIZE = 20
+QUEUE_DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 HISTORY_LIMIT = 10  # เก็บเพลงที่เล่นไปแล้วล่าสุดเพื่อ Previous
 MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
@@ -237,6 +238,7 @@ def clear_guild(guild_id: int):
     guild_volumes.pop(guild_id, None)
     loop_modes.pop(guild_id, None)
     shuffle_enabled.discard(guild_id)
+    guild_stopped.discard(guild_id)
     active_views.pop(guild_id, None)
     playback_generation.pop(guild_id, None)
     for key in [key for key in queue_view_msgs if key[0] == guild_id]:
@@ -894,7 +896,7 @@ def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
     if not q:
         embed = discord.Embed(
             title="📋  QUEUE",
-            description=f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nไม่มีเพลงใน Queue\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            description=f"{QUEUE_DIVIDER}\nไม่มีเพลงใน Queue\n{QUEUE_DIVIDER}",
             color=0x5865F2,
         )
         embed.set_footer(text="Queue ว่าง")
@@ -902,11 +904,12 @@ def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
 
     idx = max(0, min(idx, len(q) - 1))
     total_pages = max(1, (len(q) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))    start = page * QUEUE_PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+    start = page * QUEUE_PAGE_SIZE
     page_items = q[start:start + QUEUE_PAGE_SIZE]
 
     music_icons = ("🎧", "🎵", "🎶", "🎼")
-    lines = [divider]
+    lines = [QUEUE_DIVIDER]
     for actual_idx, track in enumerate(page_items, start=start):
         url, title, duration, requester, *_rest = track
         display_title = _truncate_display_width(
@@ -918,14 +921,14 @@ def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
             f"**{line_no:02d}**  {icon} {_pad_queue_title(display_title, 31)}  " + "`" + f"{duration}" + "`"
         )
 
-    lines.append(divider)
+    lines.append(QUEUE_DIVIDER)
     embed = discord.Embed(
         title="📋  QUEUE",
         description="\n".join(lines),
         color=0x5865F2,
     )
     embed.set_footer(
-        text=f"Page {page + 1} / {total_pages}  •  {len(q)} songs  •  กำลังเล่น #{display_no(guild_id, idx)}"
+        text=f"Page {page + 1} / {total_pages}  •  {get_total_added(guild_id)} songs  •  กำลังเล่น #{display_no(guild_id, idx)}"
     )
     return embed
 MAX_TITLE_LOG = 40
@@ -1007,7 +1010,7 @@ async def safe_respond(interaction: discord.Interaction, content=None, embed=Non
         except Exception:
             pass
 
-async def _refresh_queue_msg(guild_id: int):
+async async def _refresh_queue_msg(guild_id: int):
     """Refresh every open ephemeral Queue for this guild and keep each user page."""
     targets = [(key, value) for key, value in queue_view_msgs.items() if key[0] == guild_id]
     if not targets:
@@ -2471,32 +2474,6 @@ class PlayerView(discord.ui.View):
             _queue_pos_str(self.guild.id, get_now_idx(self.guild.id)),
         )
 
-    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=0, custom_id="player_shuffle")
-    async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await _is_current_player(self):
-            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
-        if not await check_in_voice(interaction): return
-        try:
-            await interaction.response.defer()
-        except Exception:
-            pass
-        async with get_queue_lock(self.guild.id):
-            q = get_full_queue(self.guild.id)
-            idx = get_now_idx(self.guild.id)
-            upcoming = q[idx + 1:]
-            if len(upcoming) < 2:
-                return await safe_respond(interaction, embed=discord.Embed(
-                    description="❌ ต้องมีเพลงถัดไปอย่างน้อย 2 เพลงจึงจะ Shuffle ได้",
-                    color=discord.Color.orange()), ephemeral=True)
-            random.shuffle(upcoming)
-            q[idx + 1:] = upcoming
-            shuffle_enabled.add(self.guild.id)
-        log("🔀 SHUFFLE", interaction, f"upcoming={len(upcoming)}")
-        await asyncio.gather(
-            _refresh_player(self.guild.id),
-            _refresh_queue_msg(self.guild.id),
-        )
-
     @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_previous")
     async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
@@ -2535,7 +2512,10 @@ class PlayerView(discord.ui.View):
         else:
             return await safe_respond(interaction, embed=discord.Embed(
                 description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red()), ephemeral=True)
-        await _refresh_player(self.guild.id)
+        await asyncio.gather(
+            _refresh_player(self.guild.id),
+            _refresh_queue_msg(self.guild.id),
+        )
 
     @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2560,26 +2540,6 @@ class PlayerView(discord.ui.View):
                 return
             log("⏭ SKIP", interaction, f"idx {idx} → {idx+1}")
             await _do_play_at_idx(self, idx + 1)
-
-    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=0, custom_id="player_loop")
-    async def loop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await _is_current_player(self):
-            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
-        if not await check_in_voice(interaction): return
-        try:
-            await interaction.response.defer()
-        except Exception:
-            pass
-        async with get_queue_lock(self.guild.id):
-            current = loop_modes.get(self.guild.id, "off")
-            next_mode = {"off": "track", "track": "queue", "queue": "off"}[current]
-            loop_modes[self.guild.id] = next_mode
-        mode_text = {"off": "ปิด Loop", "track": "วนเพลงนี้", "queue": "วน Queue"}[next_mode]
-        log("🔁 LOOP", interaction, mode_text)
-        await asyncio.gather(
-            _refresh_player(self.guild.id),
-            _refresh_queue_msg(self.guild.id),
-        )
 
     @discord.ui.button(emoji="🔍", style=discord.ButtonStyle.secondary, row=1, custom_id="player_search")
     async def search(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2606,8 +2566,14 @@ class PlayerView(discord.ui.View):
     async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
-        view = QueueView(self.guild, page=0)
-        embed = make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=0)
+        current_idx = get_now_idx(self.guild.id)
+        current_page = current_idx // QUEUE_PAGE_SIZE if get_full_queue(self.guild.id) else 0
+        view = QueueView(self.guild, page=current_page)
+        embed = make_queue_embed(
+            self.guild.id,
+            current_idx=current_idx,
+            page=current_page,
+        )
         try:
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             message = await interaction.original_response()
@@ -2622,7 +2588,7 @@ class PlayerView(discord.ui.View):
         except Exception:
             pass
 
-    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=1, custom_id="player_stop")
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0, custom_id="player_stop")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
@@ -2854,6 +2820,7 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                         loop,
                     ),
             )
+            await _refresh_queue_msg(guild.id)
             return
 
         if has_next:
@@ -3424,4 +3391,5 @@ def register(tree: app_commands.CommandTree, loop_getter):
         log("⏭ SKIP", interaction, f"idx {idx} → {idx+1}")
         try: await interaction.response.send_message("⏳ กำลังข้าม...", ephemeral=True)
         except Exception: pass
-        await _do_play_at_idx(current_view, idx + 1)
+        async with get_navigation_lock(interaction.guild.id):
+            await _do_play_at_idx(current_view, idx + 1)
