@@ -671,3 +671,410 @@ Player และ /queue เป็นคนละ view ของ state เดี�
 > Player และ /queue อ่าน state เดียวกัน
 >
 > ไม่มี UI ไหนสร้างหมายเลขคิวของตัวเอง
+
+## 41. Discord UI Contract
+
+เอกสารนี้เป็นข้อกำหนดของ UI ที่แสดงจริงใน Discord ไม่ใช่ Web UI
+
+### 41.1 Main Player
+
+Main Player ใช้ Discord Embed + Discord UI View/Buttons โดยโครงสร้างเป้าหมายคือ:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎵  NOW PLAYING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+เพลงที่กำลังเล่น
+_Artist_ • YouTube
+👤 SEA_Beach  •  ⏱ 3:42
+🔊 10%  •  🔀  •  🔂
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📚 HISTORY • LAST 10
+01 🎧 เพลงก่อนหน้า 1                  `3:21`
+02 🎵 เพลงก่อนหน้า 2                  `4:05`
+03 🎶 เพลงก่อนหน้า 3                  `2:58`
+04 🎼 เพลงก่อนหน้า 4                  `3:44`
+...
+
+▶️ CURRENT
+05 ▶️ เพลงที่กำลังเล่น                 `3:42`
+
+⏭️ NEXT • 5
+06 🎧 เพลงถัดไป 1                     `4:12`
+07 🎵 เพลงถัดไป 2                     `3:36`
+08 🎶 เพลงถัดไป 3                     `5:01`
+09 🎼 เพลงถัดไป 4                     `2:49`
+10 🎧 เพลงถัดไป 5                     `3:55`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+กำลังเล่น #5 จาก 20 เพลง
+
+ปุ่มหลัก:
+[ ⏮ ] [ ⏸ ] [ ⏭ ] [ ⏹ ]
+[ 🔍 ] [ 📋 ] [ 🔊 ]
+
+ความหมาย:
+- ⏮ = Previous
+- ⏸ / ▶️ = Pause / Resume
+- ⏭ = Next / Skip
+- ⏹ = Stop
+- 🔍 = Search
+- 📋 = เปิด Queue Page แยก
+- 🔊 = Volume
+
+หมายเหตุสำคัญ:
+- เลข 01, 02, ... ในตัวอย่างเป็นลำดับที่แสดงใน Player ไม่ใช่ logical queue number
+- Logical queue number ที่ใช้ระบุเพลงจริงต้องยังคงตรงกับ /queue
+- Main Player ต้องแสดง History สูงสุด 10 + Current 1 + Next สูงสุด 5
+- History/Current/Next ต้องมาจาก Queue state เดียวกัน
+
+### 41.2 Queue Page
+
+Queue Page คือหน้าที่เปิดจากปุ่ม 📋 โดยเป็น UI แยกจาก Main Player และมีหน้าที่แสดง Queue ทั้งหมดตาม pagination
+
+ตัวอย่างเป้าหมาย:
+
+[📋] QUEUE
+01 ▶️ PREP - Who's Got You Singing A… `4:50`
+02 🎵 PREP - "As It Was" (Harry Styl… `3:46`
+03 🎶 pami - pity dirty (Official Vi… `3:22`
+04 🎼 PREP - Cheapest Flight `4:29`
+05 🎧 PREP - Line By Line feat. Cory… `3:58`
+...
+20 🎼 Rex Orange County - AMAZING (O… `4:20`
+Page 1 / 3  •  50 songs  •  กำลังเล่น #1
+
+ข้อกำหนด:
+- QUEUE แสดง 20 รายการต่อหน้า
+- ต้องแสดงชื่อเพลง + duration
+- ต้องแสดงสถานะเพลงปัจจุบัน
+- ต้องแสดงจำนวนเพลงทั้งหมด
+- ต้องแสดง page ปัจจุบัน/จำนวนหน้าทั้งหมด
+- ต้องแสดง logical queue number ตาม state จริงเมื่อระบบใช้ logical numbering
+- ปุ่ม pagination ต้องเป็น Discord buttons และเปลี่ยนเฉพาะหน้าที่แสดง ไม่เปลี่ยน Current
+
+### 41.3 Current Marker
+
+`▶️` เป็น dynamic Current marker
+
+ห้าม hard-code ให้ #1 เป็น ▶️ ตลอดเวลา
+
+ตัวอย่างเมื่อ #1 เล่น:
+01 ▶️ Song A
+02 🎵 Song B
+03 🎶 Song C
+
+เมื่อ Current เปลี่ยนเป็น #2:
+01 🎧 Song A
+02 ▶️ Song B
+03 🎶 Song C
+
+เมื่อ Current เปลี่ยนเป็น #7:
+- marker ต้องย้ายไป #7
+- #1 ต้องไม่แสดง ▶️
+- Queue Page footer ต้องแสดง `กำลังเล่น #7`
+- Player ต้องเปลี่ยน Current/History/Next ให้ตรงกับ #7
+
+ต้องมี Current marker เพียงหนึ่งรายการต่อ Queue state
+
+### 41.4 Discord Component Rules
+
+UI ทุกส่วนต้องอิง Discord API ที่รองรับจริง:
+- `discord.Embed`
+- `discord.ui.View`
+- `discord.ui.Button`
+- `discord.ui.Modal`
+- `Interaction`
+- `interaction.response`
+- `interaction.followup`
+- `interaction.edit_original_response()`
+- `message.edit()`
+
+ห้ามออกแบบปุ่มหรือ interaction ที่ Discord รองรับไม่ได้
+
+การเปลี่ยน UI ต้องคำนึงถึง:
+- button row/component limits ของ Discord
+- interaction acknowledgement
+- ephemeral response
+- message edit vs followup message
+- View timeout/persistence ตามการใช้งานจริง
+
+## 42. UI Event Synchronization Contract
+
+Main Player และ Queue Page ต้องเป็นคนละ View ของ Queue/Playback state เดียวกัน
+
+ทุก event ที่เปลี่ยน state ที่ผู้ใช้มองเห็นต้องเรียก refresh mechanism กลาง ไม่ควรแก้ Embed หรือ Button เฉพาะจุดแล้วปล่อยอีก UI เป็นข้อมูลเก่า
+
+### Events ที่ต้อง refresh
+
+- เริ่มเพลงใหม่
+- เพลงจบตามธรรมชาติ
+- Skip / Next
+- Previous
+- Pause
+- Resume
+- Stop
+- Volume เปลี่ยน
+- Shuffle
+- Loop mode เปลี่ยน
+- เพิ่มเพลงเข้า Queue
+- เพลงถูกนำออก/Queue เปลี่ยน
+- Queue ถูก consume
+- History ถูก trim
+- Queue ว่าง
+- Playback error แล้วข้ามเพลง
+- Voice connection/disconnect ที่ทำให้ playback state เปลี่ยน
+
+### Refresh rule
+
+State change
+→ update source state
+→ validate invariants
+→ render Main Player
+→ render Queue Page ที่เปิดอยู่
+→ sync button state
+→ edit Discord messages
+
+ห้าม:
+- update UI ก่อน source state เสร็จ
+- ใช้ snapshot เก่า
+- ให้ Player กับ Queue Page คำนวณ Current แยกกัน
+- ให้ UI หนึ่งอัปเดต แต่อีก UI ค้าง state เดิม
+
+## 43. Player Button Logic Contract
+
+### ⏮ Previous
+- ใช้ Current index ปัจจุบัน
+- ถ้าไม่มี History/ไม่มีเพลงก่อนหน้า ให้ disabled หรือ reject
+- เมื่อสำเร็จ Current ต้องย้ายไปเพลงก่อนหน้า
+- เพลงเดิมที่เป็น Current ต้องยังอยู่ใน Queue
+- ห้าม append เพลงเดิมท้าย Queue
+- ต้อง refresh Player + Queue Page
+
+### ⏸ / ▶️ Pause / Resume
+- Pause เมื่อกำลังเล่น
+- Resume เมื่อ paused
+- เปลี่ยนสถานะปุ่มตาม playback state จริง
+- ต้อง refresh Embed ด้วย เพราะสถานะ Player เปลี่ยน
+- ห้ามแก้เฉพาะปุ่มแล้วปล่อย Embed เก่า
+
+### ⏭ Next / Skip
+- เปลี่ยน Current ไปเพลงถัดไป
+- ต้องใช้ transition/generation guard
+- ต้องหยุด source เดิมโดยไม่ให้ callback เก่าเปลี่ยน Current ซ้ำ
+- ต้อง refresh Player + Queue Page
+
+### ⏹ Stop
+- หยุด playback
+- clear guild session ตาม clear_guild()
+- Queue/History/Current ต้องถูกล้างตาม specification
+- Player controls ต้องถูก disable หรือ message ถูกจัดการตาม implementation
+- Queue Page ที่เปิดอยู่ต้องไม่แสดง Current เก่าหลัง state ถูก clear
+
+### 🔍 Search
+- เปิด Discord Modal
+- รับชื่อเพลงหรือ YouTube URL
+- ผลค้นหาต้องผ่าน Discord UI ที่รองรับจริง
+- การเพิ่มเพลงต้องแก้ source Queue ก่อน แล้ว refresh UI
+
+### 📋 Queue
+- เปิด Queue Page แยก
+- ไม่ควรใช้ Queue snapshot แบบถาวร
+- หน้า Queue ต้องอ่าน state ล่าสุดทุกครั้งที่ render/refresh
+
+### 🔊 Volume
+- รับค่าระหว่าง 0-100
+- เปลี่ยน volume ของ audio source
+- บันทึก guild volume state
+- refresh Player เพื่อแสดงค่าปัจจุบัน
+- ส่ง confirmation ให้ผู้ใช้
+- ไม่สร้าง Player message ใหม่เพียงเพราะ Volume เปลี่ยน
+
+## 44. Playback Transition Contract
+
+การเปลี่ยนเพลงต้องมี transition เดียวสำหรับทุกเส้นทางหลัก:
+- Natural End
+- Next/Skip
+- Previous
+- Playback error
+
+ห้ามมี logic คนละชุดที่แก้ Queue/Current คนละแบบ
+
+### Transition sequence
+
+1. ตรวจว่า transition request ยัง valid
+2. invalidate/ignore callback ของ playback generation เดิมถ้าจำเป็น
+3. เลือก target track
+4. update Current
+5. trim History
+6. start target playback
+7. update playback state
+8. refresh Main Player
+9. refresh Queue Page
+10. update button availability
+
+### Race condition
+
+กรณี:
+A กำลังเล่น → ผู้ใช้กด Skip → เริ่ม B → callback ของ A มาถึงภายหลัง
+
+ผลที่ถูกต้อง:
+- callback ของ A ต้องถูก ignore
+- Current ต้องยังเป็น B
+- Queue number ของ B ต้องไม่เปลี่ยน
+- Player ต้องแสดง B
+- Queue Page ต้องแสดง ▶️ ที่ B
+
+กรณี:
+A กำลังเล่น → Previous ไป P → callback ของ A มาถึงภายหลัง
+
+ผลที่ถูกต้อง:
+- callback ของ A ต้องไม่เรียก Next ซ้ำ
+- Current ต้องยังเป็น P
+
+## 45. UI Numbering Clarification
+
+มี numbering สองชนิดและห้ามสับสน:
+
+1. **Logical Queue Number**
+   - หมายเลขถาวรของเพลงใน Queue
+   - ใช้ร่วมกันระหว่าง Queue state และ /queue
+   - ไม่เปลี่ยนเมื่อ History ถูก trim
+
+2. **Player Display Position**
+   - ตำแหน่งภายในส่วน History/Current/Next ของ Player
+   - เช่น 01-16 ตามรายการที่กำลังแสดง
+   - เปลี่ยนได้ตาม Current
+   - ห้ามนำไปใช้แทน logical queue number
+
+ดังนั้น:
+- /queue อาจแสดง #73
+- Player อาจแสดงเพลงเดียวกันเป็นรายการที่ 11 ภายใน Player
+- แต่ข้อมูลอ้างอิงเพลงต้องยังเป็น logical #73
+
+## 46. UI State Examples
+
+### Current #1
+
+Queue Page:
+01 ▶️ Song A
+02 🎵 Song B
+03 🎶 Song C
+
+Footer:
+Page 1 / 3 • 50 songs • กำลังเล่น #1
+
+Player:
+History = none
+Current = #1
+Next = #2-#6
+
+### Current #2
+
+Queue Page:
+01 🎧 Song A
+02 ▶️ Song B
+03 🎶 Song C
+
+Footer:
+Page 1 / 3 • 50 songs • กำลังเล่น #2
+
+Player:
+History = #1
+Current = #2
+Next = #3-#7
+
+### Current #21
+
+Queue Page:
+- Page 2 ต้องเป็นหน้าที่แสดง Current #21 ตาม pagination ของ Queue state
+- marker ▶️ ต้องอยู่ที่ #21
+- footer ต้องแสดง กำลังเล่น #21
+
+Player:
+History = #11-#20
+Current = #21
+Next = #22-#26
+
+### Current #30
+
+Queue Page:
+- marker ▶️ อยู่ที่ #30
+- footer แสดง กำลังเล่น #30
+
+Player:
+History = #20-#29
+Current = #30
+Next = #31-#35
+
+## 47. UI Acceptance Tests
+
+### UI Test 1 — Current marker moves
+เริ่ม #1 → marker อยู่ #1
+เปลี่ยนเป็น #2 → marker ย้าย #2
+เปลี่ยนเป็น #7 → marker ย้าย #7
+ต้องไม่มี ▶️ ซ้ำ
+
+### UI Test 2 — Previous/Next sync
+Current #22
+→ Previous
+→ Player = #21
+→ Queue Page marker = #21
+→ Next
+→ Player = #22
+→ Queue Page marker = #22
+→ ไม่มี duplicate queue entry
+
+### UI Test 3 — Natural end sync
+#30 จบ → #31 เริ่ม
+ต้องพร้อมกัน:
+- Current = #31
+- Player Current = #31
+- Queue marker = #31
+- footer = กำลังเล่น #31
+- History/Upcoming ถูกคำนวณใหม่
+
+### UI Test 4 — Volume sync
+10% → 50%
+- source = 50%
+- Player = 50%
+- Queue state ไม่เปลี่ยน
+- Player message เดิมถูก edit
+
+### UI Test 5 — Queue add sync
+Current #30
+เพิ่ม #51
+- Current ยัง #30
+- Queue มี #51
+- Player Next list ถ้าจำเป็นต้องแสดงการเปลี่ยน
+- Queue Page แสดง #51 ตามหน้าที่ถูกต้อง
+
+### UI Test 6 — Pagination + Current
+Current อยู่ #21
+Queue Page ต้องเปิด/ย้ายไปหน้าที่มี #21 เมื่อ requirement ของ view ระบุให้ตาม Current
+marker ต้องอยู่ #21
+
+### UI Test 7 — Trim + open Queue
+Queue Page เปิดค้าง
+Current เดินจาก #11 → #12
+#1 ถูก trim
+Queue Page refresh
+logical numbers #2-#... ยังถูกต้อง
+Current marker ไม่ผิดตำแหน่ง
+
+## 48. Documentation Rule for Future Development
+
+เมื่อมีการเพิ่มหรือแก้ UI/Logic:
+1. ตรวจเอกสารนี้ก่อน
+2. ตรวจ source state/implementation ปัจจุบัน
+3. ถ้า behavior ใหม่ขัดกับเอกสาร ให้ระบุความขัดแย้งก่อนแก้
+4. แก้ source state ก่อน UI เมื่อเป็น state/logic issue
+5. ให้ UI render จาก source state
+6. เพิ่ม/ปรับ acceptance test
+7. อัปเดตเอกสารนี้เมื่อ contract เปลี่ยน
+
+เมื่อมีคำถามว่า "UI ทำงานอย่างไร" หรือ "logic ของปุ่ม/Queue เป็นอย่างไร" ให้ตอบจาก specification นี้และ implementation ปัจจุบันร่วมกัน โดยแยกให้ชัดว่า:
+- **Specified:** สิ่งที่เอกสารกำหนด
+- **Implemented:** สิ่งที่ code ทำอยู่จริง
+- **Bug/Gap:** จุดที่ code ยังไม่ตรง specification
+
+ห้ามเดา behavior ที่ไม่มีใน specification หรือ source code
