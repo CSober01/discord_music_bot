@@ -120,6 +120,10 @@ playback_generation: dict[int, int] = {}
 # Playback callbacks carry this ID so callbacks from an old Player cannot mutate a new Player.
 player_session_ids: dict[int, str] = {}
 
+# Generation ของงานดึง Playlist แต่ละ guild
+# เมื่อ stop/disconnect จะเพิ่ม generation เพื่อ invalidate background fetch เก่า
+playlist_fetch_generation: dict[int, int] = {}
+
 def _new_player_session(guild_id: int) -> str:
     session_id = f"{guild_id}:{uuid.uuid4().hex}"
     player_session_ids[guild_id] = session_id
@@ -241,6 +245,9 @@ def clear_guild(guild_id: int):
     guild_stopped.discard(guild_id)
     active_views.pop(guild_id, None)
     playback_generation.pop(guild_id, None)
+    # อย่า reset เป็น 0 เพราะ background playlist task เก่าอาจมี token เดิม
+    # การเพิ่ม generation ทำให้ task เก่ารู้ว่าถูก invalidate แม้จะมี /play ใหม่ตามมา
+    playlist_fetch_generation[guild_id] = playlist_fetch_generation.get(guild_id, 0) + 1
     for key in [key for key in queue_view_msgs if key[0] == guild_id]:
         queue_view_msgs.pop(key, None)
     search_result_msgs.pop(guild_id, None)
@@ -2039,6 +2046,10 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
     if not playlist_tracks:
         return []
 
+    # token นี้ใช้เฉพาะตรวจว่า batch นี้ถูก stop/disconnect ระหว่างทางหรือไม่
+    # ไม่ยกเลิก playlist batch อื่นที่กำลังทำงานอยู่โดยอัตโนมัติ
+    fetch_token = playlist_fetch_generation.get(guild.id, 0)
+
     progress = _PlaylistFetchProgress(guild.id, guild.name, len(playlist_tracks))
 
     # ── step 1: ดึงเพลงแรกก่อน (ทีละเพลง) เพื่อเริ่มเล่นให้เร็วที่สุด ──
@@ -2050,8 +2061,8 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
         candidate = remaining_tracks.pop(0)
         result, outcome = await asyncio.to_thread(_fetch_playlist_track_sync, candidate, guild.id, guild.name)
 
-        if guild.id in guild_stopped:
-            print(f"\n[{guild.name}] 🛑 Playlist fetch ยกเลิก — ถูก stop ระหว่าง fetch")
+        if fetch_token != playlist_fetch_generation.get(guild.id, 0):
+            print(f"\n[{guild.name}] 🛑 Playlist fetch ยกเลิก — session เปลี่ยนระหว่าง fetch")
             return []
 
         progress.record(outcome)
@@ -2129,6 +2140,7 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
         asyncio.create_task(_bg_fetch_rest(
             guild, channel, remaining_tracks, requester, progress,
             initial_added=[first_added] if first_added else [],
+            fetch_token=fetch_token,
         ))
     else:
         progress.print_summary()
@@ -2139,12 +2151,15 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
 
 
 async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_PlaylistFetchProgress",
-                         initial_added=None):
+                         initial_added=None, fetch_token: int = None):
     """ดึงเพลงที่เหลือของ playlist (หลังเพลงแรก) แบบ concurrent (จำกัดจำนวนพร้อมกัน) ในพื้นหลัง
     แล้วเพิ่มเข้าคิวทั้งหมดพร้อมกันด้วย queue_lock ครั้งเดียว (atomic)
     จำกัด concurrency ด้วย Semaphore กัน YouTube rate-limit (429) ตอน playlist ยาวๆ
     progress: ตัวนับความคืบหน้าเดียวกับที่ใช้ใน step1 ของ _add_playlist_to_queue (นับรวมทั้ง playlist)
     """
+    if fetch_token is None:
+        fetch_token = playlist_fetch_generation.get(guild.id, 0)
+
     sem = asyncio.Semaphore(PLAYLIST_FETCH_CONCURRENCY)
 
     async def _fetch_one(track_info):
@@ -2156,8 +2171,8 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
     fetch_results = await asyncio.gather(*(_fetch_one(t) for t in rest_tracks))
     progress.print_summary()
 
-    if guild.id in guild_stopped:
-        print(f"[{guild.name}] 🛑 Playlist bg fetch ยกเลิก — ถูก stop ระหว่าง fetch")
+    if fetch_token != playlist_fetch_generation.get(guild.id, 0):
+        print(f"[{guild.name}] 🛑 Playlist bg fetch ยกเลิก — session เปลี่ยนระหว่าง fetch")
         return
 
     fetched = [(url, title, duration, thumbnail)
