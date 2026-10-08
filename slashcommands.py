@@ -2542,28 +2542,6 @@ class PlayerView(discord.ui.View):
             _queue_pos_str(self.guild.id, get_now_idx(self.guild.id)),
         )
 
-    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=1, custom_id="player_shuffle")
-    async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await _is_current_player(self):
-            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
-        if not await check_in_voice(interaction):
-            return
-        try:
-            await interaction.response.defer()
-        except Exception:
-            pass
-        async with get_queue_lock(self.guild.id):
-            q = get_full_queue(self.guild.id)
-            idx = get_now_idx(self.guild.id)
-            upcoming = q[idx + 1:]
-            if len(upcoming) < 2:
-                return await safe_respond(interaction, embed=discord.Embed(description="❌ ต้องมีเพลงถัดไปอย่างน้อย 2 เพลงจึงจะ Shuffle ได้", color=discord.Color.orange()), ephemeral=True)
-            random.shuffle(upcoming)
-            q[idx + 1:] = upcoming
-            shuffle_enabled.add(self.guild.id)
-        log("🔀 SHUFFLE", interaction, f"upcoming={len(upcoming)}")
-        await asyncio.gather(_refresh_player(self.guild.id), _refresh_queue_msg(self.guild.id))
-
     @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_previous")
     async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
@@ -2734,6 +2712,28 @@ class PlayerView(discord.ui.View):
             queue_view_msgs[key] = (message, view)
         except Exception:
             pass
+
+    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=1, custom_id="player_shuffle")
+    async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _is_current_player(self):
+            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+        if not await check_in_voice(interaction):
+            return
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+        async with get_queue_lock(self.guild.id):
+            q = get_full_queue(self.guild.id)
+            idx = get_now_idx(self.guild.id)
+            upcoming = q[idx + 1:]
+            if len(upcoming) < 2:
+                return await safe_respond(interaction, embed=discord.Embed(description="❌ ต้องมีเพลงถัดไปอย่างน้อย 2 เพลงจึงจะ Shuffle ได้", color=discord.Color.orange()), ephemeral=True)
+            random.shuffle(upcoming)
+            q[idx + 1:] = upcoming
+            shuffle_enabled.add(self.guild.id)
+        log("🔀 SHUFFLE", interaction, f"upcoming={len(upcoming)}")
+        await asyncio.gather(_refresh_player(self.guild.id), _refresh_queue_msg(self.guild.id))
 
 
 #  handle_external_voice_disconnect#  handle_external_voice_disconnect
