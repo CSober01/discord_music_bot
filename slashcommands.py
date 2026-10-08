@@ -2194,43 +2194,77 @@ async def _send_playlist_added_summary(guild_id: int, channel, requester, tracks
 # ─────────────────────────────────────────────
 
 async def _do_play_at_idx(view: "PlayerView", idx: int):
-    """Play a queue item and refresh the existing Player/Queue UI."""
-    set_now_idx(view.guild.id, idx)
-    _trim_queue(view.guild.id)
-    idx = get_now_idx(view.guild.id)
+    """Switch Current to an existing queue item and start playback safely.
 
-    q = get_full_queue(view.guild.id)
-    track = q[idx]
-    url, title, duration, requester, thumbnail, *_rest = track
-    vc = view.guild.voice_client
+    This is the single transition path used by Previous/Next (Skip). The queue
+    index is changed before stopping the old source so a delayed callback from
+    the old source can be identified and ignored by play_next().
+    """
+    guild_id = view.guild.id
 
-    view.current_track = track
-    view.current_idx = idx
-    view.volume_level = get_guild_volume(view.guild.id)
-    active_views[view.guild.id] = view
+    async with get_queue_lock(guild_id):
+        q = get_full_queue(guild_id)
+        if not q or idx < 0 or idx >= len(q):
+            raise IndexError(f"Invalid queue index: {idx}")
 
-    source = discord.PCMVolumeTransformer(
-        discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=view.volume_level)
+        set_now_idx(guild_id, idx)
+        _trim_queue(guild_id)
+        idx = get_now_idx(guild_id)
 
-    # guild_changing กัน play_next callback เก่า (ที่ยิงมาจาก vc.stop())
-    guild_changing.add(view.guild.id)
-    vc.stop()
+        q = get_full_queue(guild_id)
+        if not q or idx < 0 or idx >= len(q):
+            raise IndexError(f"Queue index became invalid after trim: {idx}")
 
-    try:
-        vc.play(source, after=lambda e, _idx=idx, _track=track:
-                asyncio.run_coroutine_threadsafe(
-                    play_next(view.guild, view.channel, view.loop, current_track=_track, current_idx=_idx, error=e), view.loop))
-    except Exception:
-        guild_changing.discard(view.guild.id)
-        raise
+        track = q[idx]
+        url, title, duration, requester, thumbnail, *_rest = track
+        vc = view.guild.voice_client
+        if vc is None:
+            raise RuntimeError("Voice client is not connected")
 
-    add_msg = queue_add_msgs.get(view.guild.id, {}).pop(idx, None)
+        view.current_track = track
+        view.current_idx = idx
+        view.volume_level = get_guild_volume(guild_id)
+        active_views[guild_id] = view
+
+        source = discord.PCMVolumeTransformer(
+            discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS),
+            volume=view.volume_level,
+        )
+
+        # Mark the transition before vc.stop(). The old source callback may run
+        # immediately or slightly later; play_next() validates its track/index.
+        guild_changing.add(guild_id)
+        try:
+            vc.stop()
+            vc.play(
+                source,
+                after=lambda e, _idx=idx, _track=track:
+                    asyncio.run_coroutine_threadsafe(
+                        play_next(
+                            view.guild,
+                            view.channel,
+                            view.loop,
+                            current_track=_track,
+                            current_idx=_idx,
+                            error=e,
+                        ),
+                        view.loop,
+                    ),
+            )
+        except Exception:
+            guild_changing.discard(guild_id)
+            raise
+
+        add_msg = queue_add_msgs.get(guild_id, {}).pop(idx, None)
+
     if add_msg:
-        try: await add_msg.delete()
-        except Exception: pass
+        try:
+            await add_msg.delete()
+        except Exception:
+            pass
 
-    await _refresh_player(view.guild.id)
-    await _refresh_queue_msg(view.guild.id)
+    await _refresh_player(guild_id)
+    await _refresh_queue_msg(guild_id)
 
 
 # ─────────────────────────────────────────────
@@ -2570,6 +2604,18 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
     if guild.id in guild_stopped:
         guild_stopped.discard(guild.id)
         return
+
+    # Ignore delayed callbacks from an older source. This is the important
+    # guard for rapid Previous/Next presses: the callback carries the queue
+    # item that actually finished, so it must match the current queue state.
+    q_current = get_full_queue(guild.id)
+    if current_idx is not None:
+        if current_idx != get_now_idx(guild.id):
+            return
+        if not q_current or current_idx < 0 or current_idx >= len(q_current):
+            return
+        if current_track is not None and q_current[current_idx] is not current_track:
+            return
 
     # เพลงก่อนหน้าเล่นไม่ได้ (error จริง ไม่ใช่เล่นจบปกติ/ถูก stop ตั้งใจ)
     # แจ้งในแชทให้ทุกคนเห็น ก่อนข้ามไปเพลงถัดไป
