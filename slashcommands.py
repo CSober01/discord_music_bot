@@ -2508,7 +2508,7 @@ class PlayerView(discord.ui.View):
             _queue_pos_str(self.guild.id, get_now_idx(self.guild.id)),
         )
 
-    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=0, custom_id="player_shuffle")
+    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=1, custom_id="player_shuffle")
     async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
@@ -2597,7 +2597,7 @@ class PlayerView(discord.ui.View):
             log("⏭ SKIP", interaction, f"idx {idx} → {idx+1}")
             await _do_play_at_idx(self, idx + 1)
 
-    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=1, custom_id="player_loop")
+    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=0, custom_id="player_loop")
     async def loop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
