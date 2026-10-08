@@ -17,6 +17,7 @@ import requests
 import html
 import unicodedata
 import random
+import uuid
 
 
 def _html_unescape(text: str) -> str:
@@ -114,6 +115,19 @@ guild_volumes: dict[int, float] = {}
 # Playback generation per guild. Delayed callbacks from older sources are ignored.
 guild_stopped: set[int] = set()
 playback_generation: dict[int, int] = {}
+
+# Stable ID for the currently active Player session in each guild.
+# Playback callbacks carry this ID so callbacks from an old Player cannot mutate a new Player.
+player_session_ids: dict[int, str] = {}
+
+def _new_player_session(guild_id: int) -> str:
+    session_id = f"{guild_id}:{uuid.uuid4().hex}"
+    player_session_ids[guild_id] = session_id
+    return session_id
+
+def _get_player_session(guild_id: int) -> str | None:
+    return player_session_ids.get(guild_id)
+
 # Serialize user-driven Previous/Next transitions per guild.
 navigation_locks: dict[int, asyncio.Lock] = {}
 
@@ -211,6 +225,8 @@ def add_to_queue(guild_id: int, track) -> int:
     return len(q) - 1
 
 def clear_guild(guild_id: int):
+    # Invalidate callbacks belonging to the old Player session.
+    player_session_ids.pop(guild_id, None)
     for track in full_queues.get(guild_id, []):
         if track:
             queue_display_titles.pop(track[0], None)
@@ -1171,10 +1187,11 @@ class QueueDoneView(discord.ui.View):
                 _delete_queue_view_msg(self.guild.id),
                 _delete_queue_add_msgs(self.guild.id),
             )
-            guild_stopped.add(self.guild.id)
-            clear_guild(self.guild.id)
-            vc.stop()
-            await vc.disconnect()
+            async with get_navigation_lock(self.guild.id):
+                guild_stopped.add(self.guild.id)
+                clear_guild(self.guild.id)
+                vc.stop()
+                await vc.disconnect()
         done_msg = (self.done_msg_ref[0] if self.done_msg_ref else None) \
                    or queue_done_msgs.pop(self.guild.id, None)
         queue_done_msgs.pop(self.guild.id, None)
@@ -2032,11 +2049,30 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
             loop = loop_getter()
             view = PlayerView(guild, channel, loop, current_track=track, current_idx=track_idx, loop_getter=loop_getter)
             active_views[guild.id] = view
+            session_id = _new_player_session(guild.id)
+            view = PlayerView(
+                guild, channel, loop,
+                current_track=track,
+                current_idx=track_idx,
+                loop_getter=loop_getter,
+                player_id=session_id,
+            )
+            active_views[guild.id] = view
             token = _next_playback_generation(guild.id)
-            vc.play(source, after=lambda e, _t=track, _ti=track_idx, _token=token:
+            vc.play(
+                source,
+                after=lambda e, _session_id=session_id, _t=track, _ti=track_idx, _token=token:
                     asyncio.run_coroutine_threadsafe(
-                        play_next(guild, channel, loop, current_track=_t, current_idx=_ti, error=e,
-                                  playback_token=_token), loop))
+                        play_next(
+                            guild, channel, loop,
+                            current_track=_t,
+                            current_idx=_ti,
+                            error=e,
+                            playback_token=_token,
+                            player_session_id=_session_id,
+                        ),
+                        loop,
+                    )
             embed = make_now_playing_embed(title, duration, requester, thumbnail,
                                            _queue_pos_str(guild.id, track_idx))
             msg = await channel.send(embed=embed, view=view)
@@ -2154,14 +2190,33 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
             source = discord.PCMVolumeTransformer(
                 discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
             loop = loop_getter()
-            view = PlayerView(guild, channel, loop, current_track=track, current_idx=track_idx, loop_getter=loop_getter)
+            session_id = _new_player_session(guild.id)
+            view = PlayerView(
+                guild, channel, loop,
+                current_track=track,
+                current_idx=track_idx,
+                loop_getter=loop_getter,
+                player_id=session_id,
+            )
             active_views[guild.id] = view
             _g, _ch, _lp, _t, _ti = guild, channel, loop, track, track_idx
             token = _next_playback_generation(guild.id)
-            vc.play(source, after=lambda e, g=_g, ch=_ch, lp=_lp, t=_t, ti=_ti, _token=token:
+            vc.play(
+                source,
+                after=lambda e, g=_g, ch=_ch, lp=_lp, t=_t, ti=_ti,
+                               _session_id=session_id, _token=token:
                     asyncio.run_coroutine_threadsafe(
-                        play_next(g, ch, lp, current_track=t, current_idx=ti, error=e,
-                                  playback_token=_token), lp))
+                        play_next(
+                            g, ch, lp,
+                            current_track=t,
+                            current_idx=ti,
+                            error=e,
+                            playback_token=_token,
+                            player_session_id=_session_id,
+                        ),
+                        lp,
+                    ),
+            )
             embed = make_now_playing_embed(title, duration, requester, thumbnail,
                                            _queue_pos_str(guild.id, track_idx))
             msg = await channel.send(embed=embed, view=view)
@@ -2213,6 +2268,9 @@ async def _send_playlist_added_summary(guild_id: int, channel, requester, tracks
 async def _do_play_at_idx(view: "PlayerView", idx: int):
     """Switch to an existing queue item and start playback safely."""
     guild_id = view.guild.id
+    session_id = _get_player_session(guild_id)
+    if not session_id or view.player_id != session_id:
+        raise RuntimeError("Player session is no longer active")
 
     async with get_queue_lock(guild_id):
         q = get_full_queue(guild_id)
@@ -2248,7 +2306,7 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
         vc.stop()
         vc.play(
             source,
-            after=lambda e, _token=token, _idx=idx, _track=track:
+            after=lambda e, _session_id=session_id, _token=token, _idx=idx, _track=track:
                 asyncio.run_coroutine_threadsafe(
                     play_next(
                         view.guild, view.channel, view.loop,
@@ -2256,6 +2314,7 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
                         current_idx=_idx,
                         error=e,
                         playback_token=_token,
+                        player_session_id=_session_id,
                     ),
                     view.loop,
                 ),
@@ -2326,12 +2385,14 @@ class QueueView(discord.ui.View):
 # ─────────────────────────────────────────────
 
 class PlayerView(discord.ui.View):
-    def __init__(self, guild, channel, loop, current_track=None, current_idx=None, loop_getter=None):
+    def __init__(self, guild, channel, loop, current_track=None, current_idx=None, loop_getter=None,
+                 player_id=None):
         super().__init__(timeout=None)
         self.guild = guild
         self.channel = channel
         self.loop = loop
         self.loop_getter = loop_getter or (lambda: loop)
+        self.player_id = player_id or _get_player_session(guild.id)
         self.current_track = current_track
         self.current_idx = current_idx if current_idx is not None else get_now_idx(guild.id)
         self.now_playing_msg: discord.Message | None = None
@@ -2510,17 +2571,18 @@ class PlayerView(discord.ui.View):
         log("⏹ STOP", interaction, f"Track: {_trunc(self.current_track[1]) if self.current_track else '?'}")
         try: await interaction.response.defer()
         except Exception: pass
-        await asyncio.gather(
-            _delete_queue_add_msgs(self.guild.id),
-            _delete_search_result_msgs(self.guild.id),
-            _delete_queue_view_msg(self.guild.id),
-        )
-        guild_stopped.add(self.guild.id)
-        now_playing_msg = self.now_playing_msg
-        self.now_playing_msg = None
-        clear_guild(self.guild.id)
-        vc.stop()
-        await vc.disconnect()
+        async with get_navigation_lock(self.guild.id):
+            await asyncio.gather(
+                _delete_queue_add_msgs(self.guild.id),
+                _delete_search_result_msgs(self.guild.id),
+                _delete_queue_view_msg(self.guild.id),
+            )
+            guild_stopped.add(self.guild.id)
+            now_playing_msg = self.now_playing_msg
+            self.now_playing_msg = None
+            clear_guild(self.guild.id)
+            vc.stop()
+            await vc.disconnect()
         old_done = queue_done_msgs.pop(self.guild.id, None)
         if old_done:
             try: await old_done.delete()
@@ -2565,8 +2627,9 @@ async def handle_external_voice_disconnect(guild: discord.Guild):
     if old_view:
         old_view.now_playing_msg = None
 
-    guild_stopped.add(guild.id)
-    clear_guild(guild.id)
+    async with get_navigation_lock(guild.id):
+        guild_stopped.add(guild.id)
+        clear_guild(guild.id)
 
     await asyncio.gather(
         _delete_queue_add_msgs(guild.id),
@@ -2607,7 +2670,11 @@ async def handle_external_voice_disconnect(guild: discord.Guild):
 
 async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                     current_track=None, current_idx: int = None, error=None,
-                    playback_token: int = None):
+                    playback_token: int = None, player_session_id: str = None):
+    # Ignore callbacks from an older Player session before doing any state work.
+    if player_session_id is not None and player_session_id != _get_player_session(guild.id):
+        return
+
     # Ignore callbacks from an older playback generation.
     if playback_token is not None and playback_token != playback_generation.get(guild.id):
         return
@@ -2707,9 +2774,13 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                 view.now_playing_msg = msg
 
             token = _next_playback_generation(guild.id)
+            session_id = _get_player_session(guild.id)
+            if not session_id:
+                return
+
             guild.voice_client.play(
                 source,
-                after=lambda e, _token=token, _idx=next_idx, _track=track:
+                after=lambda e, _session_id=session_id, _token=token, _idx=next_idx, _track=track:
                     asyncio.run_coroutine_threadsafe(
                         play_next(
                             guild, channel, loop,
@@ -2717,6 +2788,7 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                             current_idx=_idx,
                             error=e,
                             playback_token=_token,
+                            player_session_id=_session_id,
                         ),
                         loop,
                     ),
@@ -2754,9 +2826,26 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                 msg = await channel.send(embed=embed, view=view)
                 view.now_playing_msg = msg
 
-            guild.voice_client.play(source, after=lambda e, _idx=next_idx, _track=track:
-                asyncio.run_coroutine_threadsafe(
-                    play_next(guild, channel, loop, current_track=_track, current_idx=_idx, error=e), loop))
+            token = _next_playback_generation(guild.id)
+            session_id = _get_player_session(guild.id)
+            if not session_id:
+                return
+
+            guild.voice_client.play(
+                source,
+                after=lambda e, _session_id=session_id, _token=token, _idx=next_idx, _track=track:
+                    asyncio.run_coroutine_threadsafe(
+                        play_next(
+                            guild, channel, loop,
+                            current_track=_track,
+                            current_idx=_idx,
+                            error=e,
+                            playback_token=_token,
+                            player_session_id=_session_id,
+                        ),
+                        loop,
+                    ),
+            )
 
             # ลบ "เพิ่มใน Queue" ของเพลงนี้
             add_msg = queue_add_msgs.get(guild.id, {}).pop(next_idx, None)
@@ -2877,7 +2966,13 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             return
 
         # รอ 5 นาที แล้วตรวจว่ามีเพลงใหม่เข้ามาหรือยัง
+        session_id_at_queue_end = _get_player_session(guild.id)
         await asyncio.sleep(300)
+
+        # A new Player/Stop may have replaced or invalidated this session
+        # while the 5-minute idle timer was sleeping.
+        if session_id_at_queue_end != _get_player_session(guild.id):
+            return
 
         q_after_wait = get_full_queue(guild.id)
         vc = guild.voice_client
@@ -3146,10 +3241,11 @@ def register(tree: app_commands.CommandTree, loop_getter):
         if old_view:
             old_view.now_playing_msg = None
 
-        guild_stopped.add(interaction.guild.id)
-        clear_guild(interaction.guild.id)
-        vc.stop()
-        await vc.disconnect()
+        async with get_navigation_lock(interaction.guild.id):
+            guild_stopped.add(interaction.guild.id)
+            clear_guild(interaction.guild.id)
+            vc.stop()
+            await vc.disconnect()
 
         old_done = queue_done_msgs.pop(interaction.guild.id, None)
         if old_done:
