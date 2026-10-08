@@ -708,7 +708,7 @@ async def send_search_results(results, guild, channel, loop, loop_getter, reques
 
 
 def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queue_pos=None):
-    """Render the Main Player from the shared queue state."""
+    """Render the modern Main Player from the shared queue state."""
     requester_str = requester.mention if requester else "ไม่ทราบชื่อ"
 
     guild_id = None
@@ -735,35 +735,25 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
     display_title = _clean_player_title(title)
 
     embed = discord.Embed(color=0x5865F2)
-    embed.set_author(name="🎵  NOW PLAYING")
     embed.description = (
-        f"{QUEUE_DIVIDER}\n"
-        f"**{display_title}**\n"
-        f"_{_truncate_display_width(artist, 44)}_ • YouTube\n"
-        f"👤 {requester_str}  •  ⏱ {duration}"
+        f"🎵 **NOW PLAYING**\n"
+        f"{QUEUE_DIVIDER}\n\n"
+        f"🎧 **{display_title}**\n"
+        f"    *{_truncate_display_width(artist, 44)} • YouTube*\n\n"
+        f"    **0:00** ━━━━━━━━━━━━━━━━━━━━━ **{duration}**\n\n"
     )
 
     if guild_id is not None:
-        active_modes = []
-        if guild_id in shuffle_enabled:
-            active_modes.append("🔀")
-        mode = loop_modes.get(guild_id, "off")
-        if mode == "track":
-            active_modes.append("🔂")
-        elif mode == "queue":
-            active_modes.append("🔁")
-
         volume_pct = round(get_guild_volume(guild_id) * 100)
-        mode_prefix = " ".join(active_modes)
-        status_parts = [f"🔊 {volume_pct}%"]
-        if mode_prefix:
-            status_parts.append(mode_prefix)
-        embed.description += "\n" + "  •  ".join(status_parts)
-        embed.description += f"\n{QUEUE_DIVIDER}"
+        embed.description += (
+            f"    👤 {requester_str}          🔊 {volume_pct}%\n"
+            f"    🔀 Shuffle            🔁 Repeat\n\n"
+            f"{QUEUE_DIVIDER}\n"
+        )
 
         queue_lines = []
         if history:
-            queue_lines.append("📚 HISTORY")
+            queue_lines.append("📚 *History*")
             for offset, track in enumerate(history, start=history_start):
                 url, track_title, track_duration, _requester, *_rest = track
                 queue_title = _truncate_display_width(queue_display_titles.get(url, track_title), 31)
@@ -773,7 +763,7 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
 
         if upcoming:
             queue_lines.append("")
-            queue_lines.append("⏭️ NEXT")
+            queue_lines.append("⏭️ *Next*")
             for offset, track in enumerate(upcoming, start=upcoming_start):
                 url, track_title, track_duration, _requester, *_rest = track
                 queue_title = _truncate_display_width(queue_display_titles.get(url, track_title), 31)
@@ -787,13 +777,16 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
             queue_lines.append(f"⏳ กำลังโหลดเพลงเพิ่มเติม • {loading.done} / {loading.total}")
 
         if queue_lines:
-            embed.description += "\n" + "\n".join(queue_lines)
-        embed.description += f"\n{QUEUE_DIVIDER}"
+            embed.description += "\n".join(queue_lines) + "\n"
+        embed.description += f"{QUEUE_DIVIDER}\n"
+        footer_text = queue_pos or (
+            f"กำลังเล่น #{display_no(guild_id, current_idx)} จาก {get_total_added(guild_id)} เพลง"
+            if q else "ไม่มีเพลง"
+        )
+    else:
+        footer_text = queue_pos or "ไม่มีเพลง"
 
-    embed.set_footer(text=queue_pos or (
-        f"กำลังเล่น #{display_no(guild_id, current_idx)} จาก {get_total_added(guild_id)} เพลง"
-        if guild_id is not None and q else "ไม่มีเพลง"
-    ))
+    embed.description += f"{footer_text}"
 
     if thumbnail:
         embed.set_thumbnail(url=thumbnail)
