@@ -1353,7 +1353,7 @@ The count-selection View must follow these rules:
 3. **Playlist / playback flow ที่มีอยู่**
    - เพลงแรกของ Playlist ถูก fetch และเริ่มเล่นก่อน
    - เพลงที่เหลือถูก fetch ต่อใน background
-   - จำกัด background concurrency ที่ `PLAYLIST_FETCH_CONCURRENCY = 4`
+   - จำกัด background concurrency ที่ `PLAYLIST_FETCH_CONCURRENCY = 5`
    - มี generation guard ป้องกันงานเก่าจากการเติมเพลงหลัง Stop/disconnect
 
 4. **เอกสารและ acceptance contract**
@@ -1370,44 +1370,70 @@ The count-selection View must follow these rules:
 
 ## 51. Player / Queue UI Contract — 2026-10-08
 
-### Main Player layout
+### Main Player visual hierarchy
 
-Main Player must use this visual structure:
+Main Player must prioritize the currently playing track and playback progress. History and Next are supporting information and must remain visually compact.
+
+Approved layout:
 
 ```
-🎵 NOW PLAYING
+🎵 **NOW PLAYING**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-เพลงที่กำลังเล่น
-_Artist_ • YouTube
+🎧 **เพลงที่กำลังเล่น**
+    *Artist Name • YouTube*
 
-👤 SEA_Beach  •  ⏱ 3:42
-🔊 10%  •  🔀  •  🔂
+    **1:24** ━━━━━━━━━━━━━━━━━━━━━ **3:42**
+
+    👤 SEA_Beach          🔊 10%
+    🔀 Shuffle            🔁 Repeat
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📚 HISTORY
-01 🎵 เพลงก่อนหน้า 1                 `3:21`
-02 🎵 เพลงก่อนหน้า 2                 `4:05`
-03 🎵 เพลงก่อนหน้า 3                 `2:58`
+📚 *History*
+01 🎵 เพลงก่อนหน้า 1                  `3:21`
+02 🎵 เพลงก่อนหน้า 2                  `4:05`
+03 🎵 เพลงก่อนหน้า 3                  `2:58`
 
-⏭️ NEXT
-05 🎵 เพลงถัดไป 1                    `4:12`
-06 🎵 เพลงถัดไป 2                    `3:36`
-07 🎵 เพลงถัดไป 3                    `5:01`
+⏭️ *Next*
+04 🎵 เพลงถัดไป 1                     `4:12`
+05 🎵 เพลงถัดไป 2                     `3:36`
+06 🎵 เพลงถัดไป 3                     `5:01`
 
 ⏳ กำลังโหลดเพลงเพิ่มเติม • 10 / 20
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-กำลังเล่น #4 จาก 20 เพลง
+กำลังเล่น **#4 จาก 20 เพลง**
 ```
 
 Rules:
-- Use `QUEUE_DIVIDER` as the single standard divider: `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━` (49 characters).
-- Do not render a separate CURRENT list item in Main Player; the current track is already the Now Playing section.
-- History uses `📚 HISTORY`; each history item uses `🎵`.
-- Next uses `⏭️ NEXT`; each upcoming item uses `🎵`.
-- Do not cycle `🎧`, `🎶`, and `🎼` for queue items.
+- `🎵 NOW PLAYING` is the primary heading and should receive the strongest visual emphasis available in Discord Markdown.
+- The current track title is bold: `🎧 **เพลงที่กำลังเล่น**`.
+- Artist/source is secondary and italic: `*Artist Name • YouTube*`.
+- Playback time/progress is visually emphasized: `**elapsed** ━━━━━━━━━━━━━━━━━━━━━ **duration**`.
+- Requester and volume are normal metadata: `👤 SEA_Beach` and `🔊 10%`.
+- Shuffle and Repeat are displayed as status labels: `🔀 Shuffle` and `🔁 Repeat`.
+- `📚 *History*` and `⏭️ *Next*` are intentionally compact and must not visually compete with Now Playing.
+- Do not use large/bold History or Next headings.
 - Main Player shows up to 10 History items and 5 Upcoming items.
-- Thumbnail remains supported through the current track's thumbnail and is shown on the Embed when available.
+- History and Upcoming list rows remain normal-weight text; duration is rendered as inline code.
+- The visual progress bar is a display element for now. Real-time movement/update behavior is a separate implementation concern and is not required by this UI contract yet.
+- The standard divider is exactly `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━` (49 characters).
+- Thumbnail remains supported through the current track's thumbnail and may be shown on the Embed when available.
+- Interactive playback controls are Discord buttons below the Embed, not text inside the Embed.
+
+### Main Player buttons
+
+The actual clickable Discord buttons remain below the Embed in exactly two rows:
+
+```
+[ ⏮ ] [ ⏸ ] [ ⏭ ] [ ⏹ ] [ 🔁 ]
+[ 🔍 ] [ 📋 ] [ 🔊 ] [ 🔀 ]
+```
+
+The button contract remains:
+- Row 0: `⏮ Previous`, `⏸/▶️ Pause/Resume`, `⏭ Next`, `⏹ Stop`, `🔁/🔂 Repeat`.
+- Row 1: `🔍 Search`, `📋 Queue`, `🔊 Volume`, `🔀 Shuffle`.
+- These are real `discord.ui.Button` components and must not be represented as fake text controls in the Embed.
+- Button state must continue to reflect the actual playback/Queue state.
 
 ### Queue page layout
 
@@ -1458,14 +1484,17 @@ This specifically prevents the Next button from remaining disabled after adding 
 
 ### UI icon contract
 
-| Area | Icon |
+| Area | Icon / style |
 |---|---|
-| Main Player header | 🎵 |
-| History header | 📚 |
+| Main Player header | 🎵 + bold |
+| Current track title | 🎧 + bold |
+| Artist / source | italic |
+| Progress time | bold |
+| History header | 📚 + italic |
 | History item | 🎵 |
-| Next header | ⏭️ |
+| Next header | ⏭️ + italic |
 | Next item | 🎵 |
 | Queue current item | ▶️ + bold |
 | Queue other item | 🎵 |
 | Loading | ⏳ |
-
+| Actual controls | Discord buttons below Embed |
