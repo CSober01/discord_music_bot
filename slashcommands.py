@@ -1290,14 +1290,13 @@ class PlaylistCountView(discord.ui.View):
         self._build_buttons()
 
     def _build_buttons(self):
-        count = len(self.playlist_tracks)
-        choices = [n for n in (5, 10, 20, 30, 50) if n <= count]
-        if count < 5:
-            choices = [count]
-        elif count not in choices and count < 50:
-            choices.append(count)
+        count = min(len(self.playlist_tracks), MAX_PLAYLIST_FETCH)
 
-        for index, amount in enumerate(choices):
+        # แสดงเฉพาะจำนวนที่มีเพลงถึงจริง ๆ และให้ Add All เป็นตัวเลือกสุดท้ายเสมอ
+        choices = [n for n in (5, 10, 20, 30) if n <= count]
+        choices.append(count)
+
+        for index, amount in enumerate(choices[:-1]):
             button = discord.ui.Button(
                 label=str(amount),
                 style=discord.ButtonStyle.primary if index == 0 else discord.ButtonStyle.secondary,
@@ -1305,6 +1304,14 @@ class PlaylistCountView(discord.ui.View):
             )
             button.callback = self._make_callback(amount)
             self.add_item(button)
+
+        add_all = discord.ui.Button(
+            label=f"Add All ({count})",
+            style=discord.ButtonStyle.success,
+            custom_id="playlist_count_all",
+        )
+        add_all.callback = self._make_callback(count)
+        self.add_item(add_all)
 
     def _make_callback(self, amount):
         async def callback(interaction: discord.Interaction):
