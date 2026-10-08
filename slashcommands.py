@@ -2597,6 +2597,45 @@ class PlayerView(discord.ui.View):
             log("⏭ SKIP", interaction, f"idx {idx} → {idx+1}")
             await _do_play_at_idx(self, idx + 1)
 
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0, custom_id="player_stop")
+    async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _is_current_player(self):
+            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+        if not await check_in_voice(interaction): return
+        vc = self.guild.voice_client
+        log("⏹ STOP", interaction, f"Track: {_trunc(self.current_track[1]) if self.current_track else '?'}")
+        async with get_navigation_lock(self.guild.id):
+            await asyncio.gather(
+                _delete_queue_add_msgs(self.guild.id),
+                _delete_search_result_msgs(self.guild.id),
+                _delete_queue_view_msg(self.guild.id),
+            )
+            guild_stopped.add(self.guild.id)
+            now_playing_msg = self.now_playing_msg
+            self.now_playing_msg = None
+            clear_guild(self.guild.id)
+            vc.stop()
+            await vc.disconnect()
+        old_done = queue_done_msgs.pop(self.guild.id, None)
+        if old_done:
+            try: await old_done.delete()
+            except Exception: pass
+        done_embed = make_done_embed()
+        if now_playing_msg:
+            try:
+                await now_playing_msg.edit(embed=done_embed, view=None)
+                queue_done_msgs[self.guild.id] = now_playing_msg
+            except Exception:
+                done_msg = await self.channel.send(embed=done_embed)
+                queue_done_msgs[self.guild.id] = done_msg
+        else:
+            done_msg = await self.channel.send(embed=done_embed)
+            queue_done_msgs[self.guild.id] = done_msg
+
     @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=0, custom_id="player_loop")
     async def loop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
@@ -2662,44 +2701,6 @@ class PlayerView(discord.ui.View):
         except Exception:
             pass
 
-    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0, custom_id="player_stop")
-    async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await _is_current_player(self):
-            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
-        try:
-            await interaction.response.defer()
-        except Exception:
-            pass
-        if not await check_in_voice(interaction): return
-        vc = self.guild.voice_client
-        log("⏹ STOP", interaction, f"Track: {_trunc(self.current_track[1]) if self.current_track else '?'}")
-        async with get_navigation_lock(self.guild.id):
-            await asyncio.gather(
-                _delete_queue_add_msgs(self.guild.id),
-                _delete_search_result_msgs(self.guild.id),
-                _delete_queue_view_msg(self.guild.id),
-            )
-            guild_stopped.add(self.guild.id)
-            now_playing_msg = self.now_playing_msg
-            self.now_playing_msg = None
-            clear_guild(self.guild.id)
-            vc.stop()
-            await vc.disconnect()
-        old_done = queue_done_msgs.pop(self.guild.id, None)
-        if old_done:
-            try: await old_done.delete()
-            except Exception: pass
-        done_embed = make_done_embed()
-        if now_playing_msg:
-            try:
-                await now_playing_msg.edit(embed=done_embed, view=None)
-                queue_done_msgs[self.guild.id] = now_playing_msg
-            except Exception:
-                done_msg = await self.channel.send(embed=done_embed)
-                queue_done_msgs[self.guild.id] = done_msg
-        else:
-            done_msg = await self.channel.send(embed=done_embed)
-            queue_done_msgs[self.guild.id] = done_msg
 
 #  handle_external_voice_disconnect#  handle_external_voice_disconnect
 #  เรียกจาก bot.py เมื่อบอทถูก kick/disconnect จาก VC โดยไม่ได้ตั้งใจ
