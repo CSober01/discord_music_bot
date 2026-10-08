@@ -1139,17 +1139,25 @@ A กำลังเล่นอยู่ และอาจมี Playlist back
 
 ### 49.1 Main Player IDs
 
-| UI | custom_id | หน้าที่ |
-|---|---|---|
-| 🔀 Shuffle | player_shuffle | สลับ Upcoming เท่านั้น |
-| ⏮ Previous | player_previous | เล่นเพลงก่อนหน้าใน History |
-| ⏸ / ▶️ Pause/Resume | player_pause_resume | pause/resume Current |
-| ⏭ Next | player_skip | ไปเพลงถัดไป |
-| 🔁 / 🔂 Repeat | player_loop | off → track → queue → off |
-| 🔍 Search | player_search | เปิด Search Modal |
-| 📋 Queue | player_show_queue | เปิด Queue Page |
-| 🔊 Volume | player_volume | เปิด Volume Modal |
-| ⏹ Stop | player_stop | หยุดและ clear session |
+ลำดับปุ่ม Main Player เป็น contract ของ UI และต้องคงลำดับนี้:
+
+**Row 0**
+`[ ⏮ ] [ ⏸ ] [ ⏭ ] [ ⏹ ] [ 🔁 ]`
+
+**Row 1**
+`[ 🔍 ] [ 📋 ] [ 🔊 ] [ 🔀 ]`
+
+| ลำดับ | UI | custom_id | หน้าที่ |
+|---|---|---|---|
+| 1 | ⏮ Previous | player_previous | เล่นเพลงก่อนหน้าใน History |
+| 2 | ⏸ / ▶️ Pause/Resume | player_pause_resume | pause/resume Current |
+| 3 | ⏭ Next | player_skip | ไปเพลงถัดไป |
+| 4 | ⏹ Stop | player_stop | หยุดและ clear session |
+| 5 | 🔁 / 🔂 Repeat | player_loop | off → track → queue → off |
+| 6 | 🔍 Search | player_search | เปิด Search Modal |
+| 7 | 📋 Queue | player_show_queue | เปิด Queue Page |
+| 8 | 🔊 Volume | player_volume | เปิด Volume Modal |
+| 9 | 🔀 Shuffle | player_shuffle | สลับ Upcoming เท่านั้น |
 
 ### 49.2 Other interactive component IDs
 
@@ -1321,3 +1329,40 @@ The count-selection View must follow these rules:
 8. Queue pagination ไม่เปลี่ยน Current
 9. Search/Volume modal เปิดและตอบ interaction ได้
 10. callback เก่าห้ามเขียน state ทับ Current ใหม่
+
+
+## 50. Development Progress Log
+
+### 2026-10-08 — Main Player control order + YouTube resilience
+
+สิ่งที่เพิ่ม/แก้ล่าสุด:
+
+1. **Main Player button order**
+   - Row 0: `[ ⏮ ] [ ⏸ ] [ ⏭ ] [ ⏹ ] [ 🔁 ]`
+   - Row 1: `[ 🔍 ] [ 📋 ] [ 🔊 ] [ 🔀 ]`
+   - แก้ลำดับการประกาศปุ่มใน `PlayerView` ให้ตรงกับ UI contract
+   - `custom_id` ของทุกปุ่มยังคงเดิม เพื่อไม่ให้ handler/state mapping แตก
+
+2. **YouTube anti-bot resilience**
+   - `fetch_track()` เป็นจุดกลางสำหรับการดึงเพลงเดี่ยว
+   - หาก YouTube ตอบ error ประเภท anti-bot จะ retry จำกัด 1 ครั้ง
+   - ใช้ `YoutubeDL` instance ใหม่ต่อ attempt
+   - ไม่เพิ่ม delay ในกรณีที่ fetch สำเร็จตั้งแต่ครั้งแรก
+   - ไม่ใช้ cookies/browser session
+
+3. **Playlist / playback flow ที่มีอยู่**
+   - เพลงแรกของ Playlist ถูก fetch และเริ่มเล่นก่อน
+   - เพลงที่เหลือถูก fetch ต่อใน background
+   - จำกัด background concurrency ที่ `PLAYLIST_FETCH_CONCURRENCY = 4`
+   - มี generation guard ป้องกันงานเก่าจากการเติมเพลงหลัง Stop/disconnect
+
+4. **เอกสารและ acceptance contract**
+   - Main Player มี control order ที่ระบุชัดเจน
+   - ต้องตรวจว่า Player และ Queue ยังคง refresh/sync หลัง state-changing actions
+   - PR ยังอยู่ในขั้นทดสอบ และยังไม่ merge เข้า `main`
+
+### Current implementation checkpoint
+
+- Branch: `fix/clean-player-title`
+- ล่าสุด: Main Player order correction
+- ต้องทดสอบจริงหลัง pull PR ก่อน merge `main`
