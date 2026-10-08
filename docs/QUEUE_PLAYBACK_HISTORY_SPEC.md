@@ -1109,3 +1109,142 @@ Current marker ไม่ผิดตำแหน่ง
 - **Bug/Gap:** จุดที่ code ยังไม่ตรง specification
 
 ห้ามเดา behavior ที่ไม่มีใน specification หรือ source code
+
+## 49. Complete Component ID & Scenario Contract
+
+### 49.1 Main Player IDs
+
+| UI | custom_id | หน้าที่ |
+|---|---|---|
+| 🔀 Shuffle | player_shuffle | สลับ Upcoming เท่านั้น |
+| ⏮ Previous | player_previous | เล่นเพลงก่อนหน้าใน History |
+| ⏸ / ▶️ Pause/Resume | player_pause_resume | pause/resume Current |
+| ⏭ Next | player_skip | ไปเพลงถัดไป |
+| 🔁 / 🔂 Repeat | player_loop | off → track → queue → off |
+| 🔍 Search | player_search | เปิด Search Modal |
+| 📋 Queue | player_show_queue | เปิด Queue Page |
+| 🔊 Volume | player_volume | เปิด Volume Modal |
+| ⏹ Stop | player_stop | หยุดและ clear session |
+
+### 49.2 Other interactive component IDs
+
+| UI | custom_id | หน้าที่ |
+|---|---|---|
+| Queue previous | queue_previous_page | เปลี่ยนหน้า Queue ย้อนกลับ |
+| Queue page indicator | queue_page | แสดงหน้าปัจจุบัน ไม่กดใช้งาน |
+| Queue next | queue_next_page | เปลี่ยนหน้า Queue ไปข้างหน้า |
+| Queue done search | queue_done_search | ค้นหาเพลงหลัง Queue จบ |
+| Queue done stop | queue_done_stop | ปิด/หยุดจากหน้า Queue จบ |
+| Search result select | search_result_select | เลือกผลค้นหา |
+| Search add all | search_result_add_all | เพิ่มผลค้นหาทั้งหมด |
+| Search close | search_result_close | ปิดผลค้นหา |
+| Radio single | youtube_radio_single | เล่นเพลงเดียว |
+| Radio playlist | youtube_radio_playlist | โหลดเพลงจาก Radio |
+| Playlist count | playlist_count_{amount} | เลือกจำนวนเพลงที่จะโหลด |
+| Volume modal | volume_modal | Volume modal |
+| Volume input | volume_modal_input | ช่องกรอก 0-100 |
+| Search modal | search_modal | Search modal |
+| Search input | search_modal_input | ช่องค้นหา |
+
+ID ที่ผูกกับ state/handler ต้องไม่ถูกเปลี่ยนชื่อโดยไม่มีการอัปเดตทุกจุดที่อ้างอิง
+
+### 49.3 Main Player scenarios
+
+**Scenario A — เริ่มเพลง #1**
+- Previous disabled
+- Pause แสดง ⏸️
+- Next enabled ถ้ามีเพลงถัดไป
+- Shuffle disabled ถ้า Upcoming < 2
+- Repeat แสดง 🔁 / off
+- Queue เปิดได้ถ้ามี Queue
+
+**Scenario B — Pause → Resume**
+- กด ⏸ → VoiceClient paused
+- Player เปลี่ยนปุ่มเป็น ▶️
+- กด ▶️ → VoiceClient resumed
+- Player เปลี่ยนกลับเป็น ⏸️
+- Queue state ไม่เปลี่ยน
+
+**Scenario C — Previous → Next**
+- Current #22 → Previous → #21
+- Queue entry #22 ยังอยู่ตำแหน่งเดิม
+- Next → #22
+- ห้าม append/duplicate #22
+- Player และ Queue marker ต้องตรงกัน
+
+**Scenario D — Natural End**
+- #30 จบ → #31
+- History/Upcoming คำนวณใหม่
+- marker ย้าย #30 → #31
+- Player + Queue refresh พร้อมกัน
+
+**Scenario E — Skip ระหว่าง playback**
+- A → กด Skip → B
+- callback ของ A ที่มาช้าต้องไม่เปลี่ยน Current
+- Player/Queue ต้องยังแสดง B
+
+**Scenario F — Shuffle**
+- Current คงเดิม
+- เฉพาะ Upcoming ถูก shuffle
+- History ไม่เปลี่ยน
+- logical queue numbers ไม่เปลี่ยน
+- Player + Queue refresh
+- ถ้ามี Upcoming < 2 เพลง ให้ reject
+
+**Scenario G — Repeat**
+- กดครั้งที่ 1: off → track, emoji 🔂
+- กดครั้งที่ 2: track → queue, emoji 🔁
+- กดครั้งที่ 3: queue → off
+- Track repeat ต้องใช้ Queue entry เดิม ไม่ duplicate
+- Queue repeat เมื่อถึงท้ายให้กลับไปเพลงแรกที่ยังอยู่ใน memory
+
+**Scenario H — Volume**
+- กรอก 0 → source volume 0%
+- กรอก 50 → source volume 50%
+- กรอก 100 → source volume 100%
+- ค่าผิดช่วงต้อง reject
+- Player ต้อง refresh ค่าที่แสดง
+
+**Scenario I — Stop**
+- หยุด playback
+- clear Queue/History/Current/session state
+- ลบ/ปิด Queue views ที่ติดตามอยู่
+- Player ต้องไม่สามารถควบคุม session เก่าได้
+
+**Scenario J — Queue pagination**
+- 100 เพลง → 20 เพลงต่อหน้า
+- Previous/Next เปลี่ยนเฉพาะ page
+- ไม่เปลี่ยน Current
+- page ที่มี Current ต้องแสดง marker ที่ Current
+
+**Scenario K — Search**
+- Player Search → Modal
+- submit → search result UI
+- เลือกผล → เพิ่ม/เริ่มเล่นตาม flow ที่ implementation กำหนด
+- เพิ่มเพลงแล้ว source Queue ต้องเปลี่ยนก่อน refresh UI
+
+**Scenario L — Queue Page**
+- กด 📋 → เปิด Queue Page แยก
+- เปิดที่ page ของ Current เมื่อจำเป็น
+- pagination ไม่เปลี่ยน Current
+- เมื่อเพลงเปลี่ยน Queue Page ที่เปิดอยู่ต้อง refresh marker และเลขคิว
+
+**Scenario M — Queue Done**
+- Queue หมด → แสดง Queue Done controls
+- 🔍 เปิด Search ได้
+- ⏹ หยุด/ออกได้
+- session เก่าต้องไม่ถูกนำกลับมาโดย callback เก่า
+
+### 49.4 Acceptance rule
+
+ก่อน merge PR ต้องตรวจอย่างน้อย:
+1. ทุก custom_id มี handler หรือเป็น indicator ที่ตั้งใจให้กดไม่ได้
+2. Player มี 9 controls ตาม contract
+3. ทุก state-changing button refresh source state และ UI ที่เกี่ยวข้อง
+4. Previous/Next ไม่สร้าง duplicate
+5. Pause/Resume แสดงสถานะจริง
+6. Shuffle/Repeat ไม่หายจาก View
+7. Stop clear session จริง
+8. Queue pagination ไม่เปลี่ยน Current
+9. Search/Volume modal เปิดและตอบ interaction ได้
+10. callback เก่าห้ามเขียน state ทับ Current ใหม่
