@@ -124,6 +124,8 @@ player_session_ids: dict[int, str] = {}
 # Generation ของงานดึง Playlist แต่ละ guild
 # เมื่อ stop/disconnect จะเพิ่ม generation เพื่อ invalidate background fetch เก่า
 playlist_fetch_generation: dict[int, int] = {}
+# Current background playlist loading state shown in the Main Player.
+playlist_loading_status: dict[int, "_PlaylistFetchProgress"] = {}
 
 def _new_player_session(guild_id: int) -> str:
     session_id = f"{guild_id}:{uuid.uuid4().hex}"
@@ -154,7 +156,7 @@ QUEUE_DIVIDER = "━━━━━━━━━━━━━━━━━━━━━
 
 HISTORY_LIMIT = 10  # เก็บเพลงที่เล่นไปแล้วล่าสุดเพื่อ Previous
 MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
-PLAYLIST_FETCH_CONCURRENCY = 4  # จำกัดจำนวน request พร้อมกันไปหา YouTube กันโดน rate-limit (HTTP 429)
+PLAYLIST_FETCH_CONCURRENCY = 5  # จำกัดจำนวน request พร้อมกันไปหา YouTube กันโดน rate-limit (HTTP 429)
 
 
 def get_full_queue(guild_id: int) -> list:
@@ -249,6 +251,7 @@ def clear_guild(guild_id: int):
     # อย่า reset เป็น 0 เพราะ background playlist task เก่าอาจมี token เดิม
     # การเพิ่ม generation ทำให้ task เก่ารู้ว่าถูก invalidate แม้จะมี /play ใหม่ตามมา
     playlist_fetch_generation[guild_id] = playlist_fetch_generation.get(guild_id, 0) + 1
+    playlist_loading_status.pop(guild_id, None)
     for key in [key for key in queue_view_msgs if key[0] == guild_id]:
         queue_view_msgs.pop(key, None)
     search_result_msgs.pop(guild_id, None)
@@ -705,11 +708,7 @@ async def send_search_results(results, guild, channel, loop, loop_getter, reques
 
 
 def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queue_pos=None):
-    """Render Player จาก Queue state เดียวกับ /queue.
-
-    แสดง History 10 เพลงล่าสุด + Current + Upcoming 5 เพลง
-    โดยใช้ logical queue number จาก display_no() ทุกบรรทัด.
-    """
+    """Render the Main Player from the shared queue state."""
     requester_str = requester.mention if requester else "ไม่ทราบชื่อ"
 
     guild_id = None
@@ -738,7 +737,7 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
     embed = discord.Embed(color=0x5865F2)
     embed.set_author(name="🎵  NOW PLAYING")
     embed.description = (
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{QUEUE_DIVIDER}\n"
         f"**{display_title}**\n"
         f"_{_truncate_display_width(artist, 44)}_ • YouTube\n"
         f"👤 {requester_str}  •  ⏱ {duration}"
@@ -759,46 +758,37 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         status_parts = [f"🔊 {volume_pct}%"]
         if mode_prefix:
             status_parts.append(mode_prefix)
-        status_line = "  •  ".join(status_parts)
-        embed.description += f"\n{status_line}"
-        embed.description += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        embed.description += f"\n{"  •  ".join(status_parts)}"
+        embed.description += f"\n{QUEUE_DIVIDER}"
 
-        music_icons = ("🎧", "🎵", "🎶", "🎼")
         queue_lines = []
-
         if history:
-            queue_lines.append("📚 **HISTORY • LAST 10**")
+            queue_lines.append("📚 HISTORY")
             for offset, track in enumerate(history, start=history_start):
                 url, track_title, track_duration, _requester, *_rest = track
                 queue_title = _truncate_display_width(queue_display_titles.get(url, track_title), 31)
                 queue_lines.append(
-                    f"**{display_no(guild_id, offset):02d}** {music_icons[(offset - history_start) % len(music_icons)]} "
-                    f"{_pad_queue_title(queue_title, 31)} `{track_duration}`"
+                    f"{display_no(guild_id, offset):02d} 🎵 {_pad_queue_title(queue_title, 31)} `{track_duration}`"
                 )
-
-        if q and 0 <= current_idx < len(q):
-            url, current_title, current_duration, _requester, *_rest = q[current_idx]
-            current_queue_title = _truncate_display_width(queue_display_titles.get(url, current_title), 31)
-            queue_lines.append("")
-            queue_lines.append("▶️ **CURRENT**")
-            queue_lines.append(
-                f"**{display_no(guild_id, current_idx):02d}** ▶️ "
-                f"{_pad_queue_title(current_queue_title, 31)} `{current_duration}`"
-            )
 
         if upcoming:
             queue_lines.append("")
-            queue_lines.append("⏭️ **NEXT • 5**")
+            queue_lines.append("⏭️ NEXT")
             for offset, track in enumerate(upcoming, start=upcoming_start):
                 url, track_title, track_duration, _requester, *_rest = track
                 queue_title = _truncate_display_width(queue_display_titles.get(url, track_title), 31)
                 queue_lines.append(
-                    f"**{display_no(guild_id, offset):02d}** {music_icons[(offset - upcoming_start) % len(music_icons)]} "
-                    f"{_pad_queue_title(queue_title, 31)} `{track_duration}`"
+                    f"{display_no(guild_id, offset):02d} 🎵 {_pad_queue_title(queue_title, 31)} `{track_duration}`"
                 )
+
+        loading = playlist_loading_status.get(guild_id)
+        if loading and loading.done < loading.total:
+            queue_lines.append("")
+            queue_lines.append(f"⏳ กำลังโหลดเพลงเพิ่มเติม • {loading.done} / {loading.total}")
 
         if queue_lines:
             embed.description += "\n" + "\n".join(queue_lines)
+        embed.description += f"\n{QUEUE_DIVIDER}"
 
     embed.set_footer(text=queue_pos or (
         f"กำลังเล่น #{display_no(guild_id, current_idx)} จาก {get_total_added(guild_id)} เพลง"
@@ -809,6 +799,7 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         embed.set_thumbnail(url=thumbnail)
 
     return embed
+
 def _pad_queue_title(text: str, width: int) -> str:
     """Pad queue text by estimated display width for a stable Discord layout."""
     current_width = sum(_char_display_width(char) for char in text)
@@ -897,7 +888,7 @@ def _truncate_display_width(text: str, max_width: int) -> str:
     return "".join(chars) + "…"
 
 def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
-    """Render Queue ทั้งหมด: History + Current + Upcoming โดยใช้เลข Queue เดียวกับ Player."""
+    """Render the paginated Queue with the current track highlighted."""
     q = get_full_queue(guild_id)
     idx = current_idx if current_idx is not None else get_now_idx(guild_id)
 
@@ -916,7 +907,6 @@ def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
     start = page * QUEUE_PAGE_SIZE
     page_items = q[start:start + QUEUE_PAGE_SIZE]
 
-    music_icons = ("🎧", "🎵", "🎶", "🎼")
     lines = [QUEUE_DIVIDER]
     for actual_idx, track in enumerate(page_items, start=start):
         url, title, duration, requester, *_rest = track
@@ -924,10 +914,10 @@ def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
             queue_display_titles.get(url, title), 31
         )
         line_no = display_no(guild_id, actual_idx)
-        icon = "▶️" if actual_idx == idx else music_icons[(actual_idx - start) % len(music_icons)]
-        lines.append(
-            f"**{line_no:02d}**  {icon} {_pad_queue_title(display_title, 31)}  " + "`" + f"{duration}" + "`"
-        )
+        if actual_idx == idx:
+            lines.append(f"**{line_no:02d} ▶️ {_pad_queue_title(display_title, 31)} `{duration}`**")
+        else:
+            lines.append(f"{line_no:02d} 🎵 {_pad_queue_title(display_title, 31)} `{duration}`")
 
     lines.append(QUEUE_DIVIDER)
     embed = discord.Embed(
@@ -2047,18 +2037,18 @@ class _PlaylistFetchProgress:
         self._last_line_len = len(line)
 
     def record(self, outcome: str):
+        # done = จำนวนรายการที่ประมวลผลเสร็จแล้ว ไม่ใช่เฉพาะรายการที่เล่นได้
+        self.done += 1
         if outcome == "direct":
-            self.done += 1
             self.direct_ok += 1
         elif outcome == "fallback_ok":
-            self.done += 1
             self.fallback_attempts += 1
             self.fallback_ok += 1
         else:  # fallback_fail
             self.fallback_attempts += 1
             self.skipped += 1
 
-        parts = [f"กำลังเพิ่มเพลง {self.done}/{self.total}"]
+        parts = [f"กำลังโหลดเพลง {self.done}/{self.total}"]
         if self.fallback_attempts:
             parts.append(f"ทดแทน {self.fallback_ok}/{self.fallback_attempts}")
         if self.skipped:
@@ -2066,7 +2056,7 @@ class _PlaylistFetchProgress:
         self._p(" · ".join(parts))
 
     def print_summary(self):
-        self._p(f"เพิ่มเพลงครบ {self.done}/{self.total} "
+        self._p(f"โหลดครบ {self.done}/{self.total} "
                 f"(ตรงสำเร็จ {self.direct_ok} · ทดแทน {self.fallback_ok}/{self.fallback_attempts} · ข้ามจริง {self.skipped})")
         print()  # ขึ้นบรรทัดใหม่จริง ปิดท้าย progress bar ก่อน log ถัดไป
 
@@ -2085,6 +2075,7 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
     fetch_token = playlist_fetch_generation.get(guild.id, 0)
 
     progress = _PlaylistFetchProgress(guild.id, guild.name, len(playlist_tracks))
+    playlist_loading_status[guild.id] = progress
 
     # ── step 1: ดึงเพลงแรกก่อน (ทีละเพลง) เพื่อเริ่มเล่นให้เร็วที่สุด ──
     # ถ้าเพลงไหนดึงไม่ได้ (เช่น age-restricted) ข้ามไปลองเพลงถัดไปเป็น "เพลงเริ่ม" แทน
@@ -2158,16 +2149,8 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
             # เพลงแรกของชุดนี้ถูกต่อท้ายคิวอยู่แล้ว ต้องนำไปแสดงใน summary
             # ร่วมกับเพลงที่ background fetch เพิ่มภายหลังด้วย
             first_added = track
+            await _refresh_player(guild.id)
             await _refresh_queue_msg(guild.id)
-            old_view = active_views.get(guild.id)
-            if old_view and old_view.now_playing_msg and old_view.current_track:
-                _u, _ti, _du, _rq, *_th = old_view.current_track
-                _tn = _th[0] if _th else None
-                try:
-                    await old_view.now_playing_msg.edit(embed=make_now_playing_embed(
-                        _ti, _du, _rq, _tn, _queue_pos_str(guild.id, get_now_idx(guild.id))))
-                except Exception:
-                    pass
 
     # ── step 3: ดึงเพลงที่เหลือ (ถ้ามี) แบบ concurrent ใน background — ไม่บล็อกการเล่นเพลงแรก ──
     if remaining_tracks:
@@ -2178,6 +2161,9 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
         ))
     else:
         progress.print_summary()
+        if playlist_loading_status.get(guild.id) is progress:
+            playlist_loading_status.pop(guild.id, None)
+        await _refresh_player(guild.id)
         if first_added:
             await _send_playlist_added_summary(guild.id, channel, requester, [first_added])
 
@@ -2200,6 +2186,8 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
         async with sem:
             result, outcome = await asyncio.to_thread(_fetch_playlist_track_sync, track_info, guild.id, guild.name)
             progress.record(outcome)
+            if progress.done % 5 == 0:
+                await _refresh_player(guild.id)
             return result
 
     fetch_results = await asyncio.gather(*(_fetch_one(t) for t in rest_tracks))
@@ -2207,6 +2195,9 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
 
     if fetch_token != playlist_fetch_generation.get(guild.id, 0):
         print(f"[{guild.name}] 🛑 Playlist bg fetch ยกเลิก — session เปลี่ยนระหว่าง fetch")
+        if playlist_loading_status.get(guild.id) is progress:
+            playlist_loading_status.pop(guild.id, None)
+            await _refresh_player(guild.id)
         return
 
     fetched = [(url, title, duration, thumbnail)
@@ -2215,6 +2206,9 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
 
     added = list(initial_added or [])
     if not fetched:
+        if playlist_loading_status.get(guild.id) is progress:
+            playlist_loading_status.pop(guild.id, None)
+            await _refresh_player(guild.id)
         if added:
             await _send_playlist_added_summary(guild.id, channel, requester, added)
         return
@@ -2224,18 +2218,12 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
             track = (url, title, duration, requester, thumbnail)
             add_to_queue(guild.id, track)
             added.append(track)
+        await _refresh_player(guild.id)
         await _refresh_queue_msg(guild.id)
-        # อัปเดต now playing embed ให้เลข "จาก X เพลง" ตรงกับจำนวนจริงทันที
-        # ไม่งั้นเลขจะค้างที่ตอนเพลงแรกเริ่มเล่น จนกว่าจะ skip/prev หรือเพลงเปลี่ยนเอง
-        old_view = active_views.get(guild.id)
-        if old_view and old_view.now_playing_msg and old_view.current_track:
-            _u, _ti, _du, _rq, *_th = old_view.current_track
-            _tn = _th[0] if _th else None
-            try:
-                await old_view.now_playing_msg.edit(embed=make_now_playing_embed(
-                    _ti, _du, _rq, _tn, _queue_pos_str(guild.id, get_now_idx(guild.id))))
-            except Exception:
-                pass
+
+    if playlist_loading_status.get(guild.id) is progress:
+        playlist_loading_status.pop(guild.id, None)
+    await _refresh_player(guild.id)
 
     await _send_playlist_added_summary(guild.id, channel, requester, added)
 
@@ -2255,15 +2243,8 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
                 description=f"📋 เพิ่มใน Queue **#{pos}**\n🎵 {short_title}  |  ขอโดย: {requester.mention}",
                 color=0x1a1a2e))
             queue_add_msgs.setdefault(guild.id, {})[track_idx] = pub_msg
+            await _refresh_player(guild.id)
             await _refresh_queue_msg(guild.id)
-            old_view = active_views.get(guild.id)
-            if old_view and old_view.now_playing_msg and old_view.current_track:
-                _u, _ti, _du, _rq, *_th = old_view.current_track
-                _tn = _th[0] if _th else None
-                try:
-                    await old_view.now_playing_msg.edit(embed=make_now_playing_embed(
-                        _ti, _du, _rq, _tn, _queue_pos_str(guild.id, get_now_idx(guild.id))))
-                except Exception: pass
         else:
             set_now_idx(guild.id, track_idx)
             _trim_queue(guild.id)
