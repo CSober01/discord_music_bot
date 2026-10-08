@@ -18,6 +18,7 @@ import html
 import unicodedata
 import random
 import uuid
+import time
 
 
 def _html_unescape(text: str) -> str:
@@ -582,7 +583,7 @@ def fetch_playlist_tracks(query: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> l
     
     return tracks
 
-def fetch_track(query: str):
+def _fetch_track_once(query: str):
     """ดึงข้อมูล single track
     รองรับ: YouTube URLs, Spotify Track URLs, Search queries
     """
@@ -1927,6 +1928,39 @@ def get_queue_lock(guild_id: int) -> asyncio.Lock:
 
 
 
+
+
+def _is_youtube_anti_bot_error(error: Exception) -> bool:
+    """ตรวจเฉพาะ error ที่บ่งชี้ว่า YouTube ปฏิเสธคำขอจาก bot."""
+    message = str(error).lower()
+    return (
+        "sign in to confirm you’re not a bot" in message
+        or "sign in to confirm you're not a bot" in message
+        or "confirm you’re not a bot" in message
+        or "confirm you're not a bot" in message
+        or ("not a bot" in message and "sign in" in message)
+    )
+
+
+def fetch_track(query: str, anti_bot_retries: int = 1):
+    """ดึงเพลงเดี่ยว พร้อม retry แบบจำกัดเมื่อ YouTube ตอบ anti-bot.
+
+    ใช้ YoutubeDL instance ใหม่ในแต่ละ attempt และไม่ใช้ cookies/browser session.
+    สำเร็จตั้งแต่ครั้งแรกจะไม่เสียเวลาเพิ่ม; retry จะเกิดเฉพาะกับ anti-bot error เท่านั้น.
+    """
+    attempts = max(1, min(anti_bot_retries + 1, 2))
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            return _fetch_track_once(query)
+        except Exception as error:
+            last_error = error
+            if not _is_youtube_anti_bot_error(error) or attempt + 1 >= attempts:
+                break
+            time.sleep(0.8)
+    if last_error is not None and _is_youtube_anti_bot_error(last_error):
+        raise ValueError("YOUTUBE_ANTI_BOT") from last_error
+    raise last_error
 
 def _fetch_playlist_track_sync(track_info: dict, guild_id: int, guild_name: str):
     """ดึงข้อมูล track เดียวจาก playlist entry (sync, รันใน thread)
