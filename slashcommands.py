@@ -1010,7 +1010,7 @@ async def safe_respond(interaction: discord.Interaction, content=None, embed=Non
         except Exception:
             pass
 
-async async def _refresh_queue_msg(guild_id: int):
+async def _refresh_queue_msg(guild_id: int):
     """Refresh every open ephemeral Queue for this guild and keep each user page."""
     targets = [(key, value) for key, value in queue_view_msgs.items() if key[0] == guild_id]
     if not targets:
@@ -2454,10 +2454,22 @@ class PlayerView(discord.ui.View):
                     else discord.ButtonStyle.secondary
                 )
                 item.emoji = {"off": "🔁", "track": "🔂", "queue": "🔁"}[mode]
+            elif item.custom_id == "player_pause_resume":
+                vc = self.guild.voice_client
+                item.emoji = "▶️" if vc and vc.is_paused() else "⏸️"
+            elif item.custom_id == "player_previous":
+                item.disabled = get_now_idx(self.guild.id) <= 0
+            elif item.custom_id == "player_skip":
+                q = get_full_queue(self.guild.id)
+                idx = get_now_idx(self.guild.id)
+                mode = loop_modes.get(self.guild.id, "off")
+                item.disabled = not q or (idx + 1 >= len(q) and mode != "queue")
             elif item.custom_id == "player_stop":
                 item.style = discord.ButtonStyle.danger
+                item.disabled = False
             elif item.custom_id == "player_show_queue":
                 item.style = discord.ButtonStyle.primary
+                item.disabled = not bool(get_full_queue(self.guild.id))
 
     async def delete_now_playing(self):
         if self.now_playing_msg:
@@ -2473,6 +2485,28 @@ class PlayerView(discord.ui.View):
             title, duration, requester, thumbnail,
             _queue_pos_str(self.guild.id, get_now_idx(self.guild.id)),
         )
+
+    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=0, custom_id="player_shuffle")
+    async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _is_current_player(self):
+            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+        if not await check_in_voice(interaction):
+            return
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+        async with get_queue_lock(self.guild.id):
+            q = get_full_queue(self.guild.id)
+            idx = get_now_idx(self.guild.id)
+            upcoming = q[idx + 1:]
+            if len(upcoming) < 2:
+                return await safe_respond(interaction, embed=discord.Embed(description="❌ ต้องมีเพลงถัดไปอย่างน้อย 2 เพลงจึงจะ Shuffle ได้", color=discord.Color.orange()), ephemeral=True)
+            random.shuffle(upcoming)
+            q[idx + 1:] = upcoming
+            shuffle_enabled.add(self.guild.id)
+        log("🔀 SHUFFLE", interaction, f"upcoming={len(upcoming)}")
+        await asyncio.gather(_refresh_player(self.guild.id), _refresh_queue_msg(self.guild.id))
 
     @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_previous")
     async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2540,6 +2574,24 @@ class PlayerView(discord.ui.View):
                 return
             log("⏭ SKIP", interaction, f"idx {idx} → {idx+1}")
             await _do_play_at_idx(self, idx + 1)
+
+    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=1, custom_id="player_loop")
+    async def loop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _is_current_player(self):
+            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+        if not await check_in_voice(interaction):
+            return
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+        async with get_queue_lock(self.guild.id):
+            current = loop_modes.get(self.guild.id, "off")
+            next_mode = {"off": "track", "track": "queue", "queue": "off"}[current]
+            loop_modes[self.guild.id] = next_mode
+        mode_text = {"off": "ปิด Repeat", "track": "วนเพลงนี้", "queue": "วน Queue"}[next_mode]
+        log("🔁 REPEAT", interaction, mode_text)
+        await asyncio.gather(_refresh_player(self.guild.id), _refresh_queue_msg(self.guild.id))
 
     @discord.ui.button(emoji="🔍", style=discord.ButtonStyle.secondary, row=1, custom_id="player_search")
     async def search(self, interaction: discord.Interaction, button: discord.ui.Button):
