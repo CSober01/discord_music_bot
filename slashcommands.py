@@ -758,7 +758,7 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         status_parts = [f"🔊 {volume_pct}%"]
         if mode_prefix:
             status_parts.append(mode_prefix)
-        embed.description += f"\n{"  •  ".join(status_parts)}"
+        embed.description += "\n" + "  •  ".join(status_parts)
         embed.description += f"\n{QUEUE_DIVIDER}"
 
         queue_lines = []
