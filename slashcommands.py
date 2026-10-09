@@ -2357,8 +2357,6 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
                         lp,
                     ),
             )
-            embed = make_now_playing_embed(title, duration, requester, thumbnail,
-                                           _queue_pos_str(guild.id, track_idx))
             msg = await channel.send(view=view)
             view.now_playing_msg = msg
 
