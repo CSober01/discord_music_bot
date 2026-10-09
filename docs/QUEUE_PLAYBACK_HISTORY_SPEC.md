@@ -1567,7 +1567,7 @@ This specifically prevents the Next button from remaining disabled after adding 
 | Queue current item | ▶️ + bold |
 | Queue other item | 🎵 |
 | Loading | ⏳ |
-| Actual controls | Discord buttons below Embed |
+| Actual controls | Discord buttons inside the Player Components V2 Container |
 
 
 ## 34. Player Components V2
