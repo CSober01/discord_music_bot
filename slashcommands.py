@@ -167,7 +167,17 @@ PLAYER_PROGRESS_BAR = "━━━━━━━━●━━━━━━━━"
 HISTORY_LIMIT = 10  # เก็บเพลงที่เล่นไปแล้วล่าสุดเพื่อ Previous
 MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
 PLAYLIST_FETCH_CONCURRENCY = 1  # ดึงทีละรายการเพื่อลด burst ของคำขอ YouTube
+PLAYLIST_TRACK_FETCH_DELAY_SECONDS = 5.0  # พักระหว่างเพลงใน playlist ตามแนวทาง yt-dlp
 PLAYER_PROGRESS_INTERVAL_SECONDS = 10  # อัปเดตตัวเลข/แถบเวลาบน Player ทุก 10 วินาที
+_youtube_playlist_fetch_semaphore: asyncio.Semaphore | None = None
+
+
+def get_youtube_playlist_fetch_semaphore() -> asyncio.Semaphore:
+    """Share one playlist-fetch semaphore across all guilds to avoid cross-server bursts."""
+    global _youtube_playlist_fetch_semaphore
+    if _youtube_playlist_fetch_semaphore is None:
+        _youtube_playlist_fetch_semaphore = asyncio.Semaphore(PLAYLIST_FETCH_CONCURRENCY)
+    return _youtube_playlist_fetch_semaphore
 
 
 def get_full_queue(guild_id: int) -> list:
@@ -711,8 +721,11 @@ def _fetch_track_once(query: str, player_client: str | None = None):
                         _remember_queue_display_title(info, url)
                         return url, title, f"{minutes}:{seconds:02d}", info.get("thumbnail")
                 except Exception as e:
+                    if _is_youtube_anti_bot_error(e):
+                        # Preserve the challenge so fetch_track can open the shared circuit breaker.
+                        raise
                     logging.getLogger("yt_dlp").warning("YouTube extraction failed: %s", type(e).__name__)
-                    raise ValueError("SPOTIFY_NO_YOUTUBE_MATCH")
+                    raise ValueError("SPOTIFY_NO_YOUTUBE_MATCH") from e
             else:
                 raise ValueError("SPOTIFY_SCRAPE_ERROR")
     
@@ -2392,7 +2405,8 @@ def _fetch_playlist_track_sync(track_info: dict, guild_id: int, guild_name: str)
             glog(guild_id, guild_name,
                  f"🎵 Spotify→YT: {_trunc(track_info['title'], 40)} — {_trunc(track_info['artist'], 30)}",
                  level="info", console=False)
-            return _fetch_spotify_track_from_search(search_query), "direct"
+            # Route Spotify-to-YouTube lookups through the shared cooldown and fallback policy.
+            return fetch_track(search_query), "direct"
 
         return None, "fallback_fail"
     except Exception as e:
@@ -2426,6 +2440,7 @@ class _PlaylistFetchProgress:
         self.fallback_ok = 0
         self.skipped = 0
         self.anti_bot_blocks = 0
+        self.cooldown_skipped = 0
         self._last_line_len = 0
 
     def _p(self, msg: str):
@@ -2448,6 +2463,9 @@ class _PlaylistFetchProgress:
         elif outcome == "anti_bot":
             self.skipped += 1
             self.anti_bot_blocks += 1
+        elif outcome == "cooldown":
+            self.skipped += 1
+            self.cooldown_skipped += 1
         else:  # fallback_fail
             self.fallback_attempts += 1
             self.skipped += 1
@@ -2459,12 +2477,15 @@ class _PlaylistFetchProgress:
             parts.append(f"ข้าม {self.skipped}")
         if self.anti_bot_blocks:
             parts.append(f"YouTube จำกัด {self.anti_bot_blocks}")
+        if self.cooldown_skipped:
+            parts.append(f"พักโหลด {self.cooldown_skipped}")
         self._p(" · ".join(parts))
 
     def print_summary(self):
         self._p(f"โหลดครบ {self.done}/{self.total} "
                 f"(ตรงสำเร็จ {self.direct_ok} · ทดแทน {self.fallback_ok}/{self.fallback_attempts} "
-                f"· ข้าม {self.skipped} · YouTube จำกัด {self.anti_bot_blocks})")
+                f"· ข้าม {self.skipped} · YouTube จำกัด {self.anti_bot_blocks} "
+                f"· พักโหลด {self.cooldown_skipped})")
         print()  # ขึ้นบรรทัดใหม่จริง ปิดท้าย progress bar ก่อน log ถัดไป
 
 
@@ -2490,6 +2511,13 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
     remaining_tracks = list(playlist_tracks)
 
     while remaining_tracks:
+        # Once YouTube blocks this host, stop trying every remaining item; mark them
+        # as skipped due to cooldown without spawning another yt-dlp extraction thread.
+        if _is_youtube_cooldown_active():
+            while remaining_tracks:
+                remaining_tracks.pop(0)
+                progress.record("cooldown")
+            break
         candidate = remaining_tracks.pop(0)
         result, outcome = await asyncio.to_thread(_fetch_playlist_track_sync, candidate, guild.id, guild.name)
 
@@ -2598,19 +2626,29 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
     if fetch_token is None:
         fetch_token = playlist_fetch_generation.get(guild.id, 0)
 
-    sem = asyncio.Semaphore(PLAYLIST_FETCH_CONCURRENCY)
+    sem = get_youtube_playlist_fetch_semaphore()
 
     async def _fetch_one(track_info):
         async with sem:
-            try:
-                result, outcome = await asyncio.to_thread(
-                    _fetch_playlist_track_sync, track_info, guild.id, guild.name
-                )
-            except Exception as exc:
-                glog(guild.id, guild.name,
-                     f"❌ งานดึงเพลงล้มเหลวโดยไม่คาดคิด: {type(exc).__name__}",
-                     level="error", console=False)
-                result, outcome = None, "fallback_fail"
+            if _is_youtube_cooldown_active():
+                result, outcome = None, "cooldown"
+            else:
+                # Slow down playlist entry extraction globally. The first playable track
+                # has already started; this delay applies only to the remaining entries.
+                if progress.done > 0:
+                    await asyncio.sleep(PLAYLIST_TRACK_FETCH_DELAY_SECONDS)
+                if _is_youtube_cooldown_active():
+                    result, outcome = None, "cooldown"
+                else:
+                    try:
+                        result, outcome = await asyncio.to_thread(
+                            _fetch_playlist_track_sync, track_info, guild.id, guild.name
+                        )
+                    except Exception as exc:
+                        glog(guild.id, guild.name,
+                             f"❌ งานดึงเพลงล้มเหลวโดยไม่คาดคิด: {type(exc).__name__}",
+                             level="error", console=False)
+                        result, outcome = None, "fallback_fail"
             progress.record(outcome)
             if progress.done % 5 == 0 or progress.done == progress.total:
                 await _refresh_player(guild.id)
