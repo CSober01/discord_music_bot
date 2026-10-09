@@ -166,8 +166,8 @@ PLAYER_PROGRESS_BAR = "━━━━━━━━●━━━━━━━━"
 
 HISTORY_LIMIT = 10  # เก็บเพลงที่เล่นไปแล้วล่าสุดเพื่อ Previous
 MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
-PLAYLIST_FETCH_CONCURRENCY = 1  # ดึงทีละรายการเพื่อลด burst ของคำขอ YouTube
-PLAYLIST_TRACK_FETCH_DELAY_SECONDS = 5.0  # พักระหว่างเพลงใน playlist ตามแนวทาง yt-dlp
+PLAYLIST_FETCH_CONCURRENCY = 2  # โหลดพร้อมกันได้ 2 รายการ โดยยังจำกัดคำขอ YouTube
+PLAYLIST_TRACK_FETCH_DELAY_SECONDS = 1.0  # ลดเวลารอระหว่างรายการ เพื่อให้ Playlist โหลดเข้าคิวเร็วขึ้น
 PLAYER_PROGRESS_INTERVAL_SECONDS = 10  # อัปเดตตัวเลข/แถบเวลาบน Player ทุก 10 วินาที
 _youtube_playlist_fetch_semaphore: asyncio.Semaphore | None = None
 
