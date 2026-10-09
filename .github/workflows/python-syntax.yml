@@ -27,4 +27,4 @@ jobs:
       - name: Run regression tests
         run: python -m unittest discover -s tests -v
       - name: Compile bot modules
-        run: python -m py_compile bot.py slashcommands.py
+        run: python -m py_compile bot.py register.py slashcommands.py
