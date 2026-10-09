@@ -1465,6 +1465,20 @@ The button contract remains:
 - These are real `discord.ui.Button` components and must not be represented as fake text controls in the Embed.
 - Button state must continue to reflect the actual playback/Queue state.
 
+### Playlist count picker responsiveness
+
+- After the requester chooses a song count, acknowledge the interaction and close the `📋 เลือกจำนวนเพลง` picker before starting YouTube track extraction.
+- Start the selected playlist processing as a background task so the picker does not remain visible while the first playable track is being fetched.
+- The first playable track still starts as soon as its extraction succeeds; remaining tracks continue through the existing background/concurrent fetch path.
+- Report selection-processing errors through an ephemeral follow-up. Do not silently lose exceptions from the background task.
+
+### Queue page navigation reliability
+
+- Queue Previous (`◀`) and Next (`▶`) must update the component message through `interaction.response.edit_message(...)` in the same interaction.
+- Change `view.page`, clamp/synchronize controls with `_sync_buttons()`, and then render the embed for that exact page.
+- Previous is disabled only on page 1; Next is disabled only on the final page. At the final page, Previous must remain usable to return to the preceding page.
+- Queue refreshes caused by playback or queue changes must preserve each user's current page while recalculating the page count and button disabled states.
+
 ### Active-only Shuffle / Repeat status and toggle behavior
 
 - The Main Player status area shows `🔀 Shuffle` only while Shuffle is enabled; show its state as `เปิด`.
