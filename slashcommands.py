@@ -3398,10 +3398,10 @@ class PlayerView(discord.ui.LayoutView):
         )
         specs = [
             (primary, "player_previous", None, discord.ButtonStyle.secondary, self.previous, "⏮️"),
-            (primary, "player_seek_back", "-10", discord.ButtonStyle.secondary, self.seek_back,
+            (primary, "player_seek_back", None, discord.ButtonStyle.secondary, self.seek_back,
              _player_seek_emoji(self.guild, 1455985625097306142, "backward10", "⏪")),
             (primary, "player_pause_resume", None, discord.ButtonStyle.secondary, self.pause_resume, "⏸️"),
-            (primary, "player_seek_forward", "+10", discord.ButtonStyle.secondary, self.seek_forward,
+            (primary, "player_seek_forward", None, discord.ButtonStyle.secondary, self.seek_forward,
              _player_seek_emoji(self.guild, 1455985627714551839, "forward10", "⏩")),
             (primary, "player_skip", None, discord.ButtonStyle.secondary, self.skip, "⏭️"),
             (secondary, "player_shuffle", None, discord.ButtonStyle.secondary, self.shuffle, "🔀"),
@@ -3467,6 +3467,9 @@ class PlayerView(discord.ui.LayoutView):
             ])
         for row, cid, label, style, callback, emoji in specs:
             button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=cid)
+            if cid in {"player_seek_back", "player_seek_forward"}:
+                # Icon-only seek controls use the same compact width as the other player controls.
+                button.width = 1
             if cid == "player_queue_page":
                 button.disabled = True
             if cid in {"playlist_choice_cancel", "playlist_count_cancel", "radio_mix_cancel"}:
