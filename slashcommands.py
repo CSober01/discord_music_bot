@@ -1895,9 +1895,10 @@ class RadioMixModal(discord.ui.Modal, title="📻 YouTube Radio / Mix"):
         min_length=8, max_length=300, custom_id="radio_mix_url",
     )
 
-    def __init__(self, guild, channel, loop, loop_getter):
+    def __init__(self, guild, channel, loop, loop_getter, player_view=None):
         super().__init__(custom_id="radio_mix_modal")
         self.guild, self.channel, self.loop, self.loop_getter = guild, channel, loop, loop_getter
+        self.player_view = player_view
 
     async def on_submit(self, interaction: discord.Interaction):
         query = str(self.radio_url).strip()
@@ -1905,19 +1906,16 @@ class RadioMixModal(discord.ui.Modal, title="📻 YouTube Radio / Mix"):
             return await interaction.response.send_message(
                 "❌ กรุณาวางลิงก์ YouTube Radio / Mix ที่มีรายการเพลง", ephemeral=True
             )
-        view = RadioChoiceView(
-            query, self.guild, self.channel, self.loop_getter,
-            interaction.user, self.loop,
-        )
-        await interaction.response.send_message(
-            embed=discord.Embed(
-                title="📻 YouTube Radio / Mix",
-                description="ต้องการเล่นเพลงปัจจุบันอย่างเดียว หรือโหลดเพลงจาก Mix เข้าคิว?",
-                color=0x1a1a2e,
-            ),
-            view=view, ephemeral=True,
-        )
-        view.message = await interaction.original_response()
+        view = self.player_view or active_views.get(self.guild.id)
+        if not view or not await _is_current_player(view):
+            return await interaction.response.send_message(
+                "❌ ไม่พบเครื่องเล่นเพลงที่ใช้งานอยู่ กรุณากด Radio / Mix จากเครื่องเล่นอีกครั้ง",
+                ephemeral=True,
+            )
+        view.radio_mix_query = query
+        view.radio_mix_requester = interaction.user
+        await interaction.response.defer(ephemeral=True)
+        await _refresh_player(self.guild.id)
 
 
 # ─────────────────────────────────────────────
@@ -2697,6 +2695,9 @@ class PlayerView(discord.ui.LayoutView):
         self.now_playing_msg: discord.Message | None = None
         self.volume_level: float = get_guild_volume(guild.id)
         self._buttons: dict[str, discord.ui.Button] = {}
+        self.radio_mix_query: str | None = None
+        self.radio_mix_requester = None
+        self._radio_mix_busy = False
         self._build_layout()
 
     def _build_layout(self):
@@ -2763,6 +2764,11 @@ class PlayerView(discord.ui.LayoutView):
         if loading and loading.done < loading.total:
             parts.append(discord.ui.TextDisplay(f"⏳ กำลังโหลดเพลงเพิ่มเติม · {loading.done}/{loading.total}"))
 
+        if self.radio_mix_query:
+            parts.append(discord.ui.TextDisplay(
+                "### 📻 YouTube Radio / Mix\nต้องการเล่นแบบไหน?"
+            ))
+
         primary, secondary, tertiary = (
             discord.ui.ActionRow(), discord.ui.ActionRow(), discord.ui.ActionRow()
         )
@@ -2775,12 +2781,21 @@ class PlayerView(discord.ui.LayoutView):
             (secondary, "player_shuffle", "🔀", discord.ButtonStyle.secondary, self.shuffle),
             (secondary, "player_stop", "⏹️", discord.ButtonStyle.danger, self.stop),
             (secondary, "player_loop", "🔁", discord.ButtonStyle.secondary, self.loop_btn),
-            (tertiary, "player_search", "ค้นหา", discord.ButtonStyle.secondary, self.search),
-            (tertiary, "player_playlist_count", "จำนวนเพลง", discord.ButtonStyle.secondary, self.playlist_count_btn),
-            (tertiary, "player_radio_mix", "Radio / Mix", discord.ButtonStyle.secondary, self.radio_mix_btn),
-            (tertiary, "player_show_queue", "QUEUE", discord.ButtonStyle.primary, self.show_queue),
-            (tertiary, "player_volume", "เสียง", discord.ButtonStyle.secondary, self.volume_btn),
         ]
+        if self.radio_mix_query:
+            specs.extend([
+                (tertiary, "radio_mix_single", "เล่นเพลงนี้", discord.ButtonStyle.primary, self.radio_mix_single),
+                (tertiary, "radio_mix_load", "โหลดเพลงจาก Mix", discord.ButtonStyle.secondary, self.radio_mix_load),
+                (tertiary, "radio_mix_cancel", "ยกเลิก", discord.ButtonStyle.danger, self.radio_mix_cancel),
+            ])
+        else:
+            specs.extend([
+                (tertiary, "player_search", "ค้นหา", discord.ButtonStyle.secondary, self.search),
+                (tertiary, "player_playlist_count", "จำนวนเพลง", discord.ButtonStyle.secondary, self.playlist_count_btn),
+                (tertiary, "player_radio_mix", "Radio / Mix", discord.ButtonStyle.secondary, self.radio_mix_btn),
+                (tertiary, "player_show_queue", "QUEUE", discord.ButtonStyle.primary, self.show_queue),
+                (tertiary, "player_volume", "เสียง", discord.ButtonStyle.secondary, self.volume_btn),
+            ])
         for row, cid, display, style, callback in specs:
             if cid in {"player_seek_back", "player_seek_forward"} or row is tertiary:
                 button = discord.ui.Button(label=display, style=style, custom_id=cid)
@@ -3022,8 +3037,96 @@ class PlayerView(discord.ui.LayoutView):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
         await interaction.response.send_modal(RadioMixModal(
-            self.guild, self.channel, self.loop, self.loop_getter
+            self.guild, self.channel, self.loop, self.loop_getter, player_view=self
         ))
+
+    async def radio_mix_single(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _is_current_player(self):
+            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+        if interaction.user.id != getattr(self.radio_mix_requester, "id", None):
+            return await safe_respond(interaction, content="❌ เฉพาะผู้ที่ส่งลิงก์เท่านั้นที่เลือกได้", ephemeral=True)
+        if self._radio_mix_busy:
+            return await interaction.response.defer(ephemeral=True)
+        self._radio_mix_busy = True
+        query = self.radio_mix_query
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            if not query:
+                return
+            vc = self.guild.voice_client
+            if not vc:
+                if not interaction.user.voice:
+                    return await interaction.followup.send("❌ กรุณาเข้า Voice Channel ก่อน", ephemeral=True)
+                vc = await _connect_with_retry(interaction.user.voice.channel)
+            elif interaction.user.voice and interaction.user.voice.channel != vc.channel:
+                await vc.move_to(interaction.user.voice.channel)
+            single_url = _remove_youtube_list_param(query)
+            url, title, duration, thumbnail = await asyncio.to_thread(fetch_track, single_url)
+            track = (url, title, duration, interaction.user, thumbnail)
+            self.radio_mix_query = None
+            self.radio_mix_requester = None
+            await _add_and_play(vc, self.guild, self.channel, self.loop_getter, track)
+            await _refresh_player(self.guild.id)
+        except Exception as e:
+            log("📻 RADIO SINGLE ERROR", interaction, str(e))
+            try:
+                await interaction.followup.send("❌ ไม่สามารถเล่นเพลงนี้ได้", ephemeral=True)
+            except Exception:
+                pass
+        finally:
+            self._radio_mix_busy = False
+
+    async def radio_mix_load(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _is_current_player(self):
+            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+        if interaction.user.id != getattr(self.radio_mix_requester, "id", None):
+            return await safe_respond(interaction, content="❌ เฉพาะผู้ที่ส่งลิงก์เท่านั้นที่เลือกได้", ephemeral=True)
+        if self._radio_mix_busy:
+            return await interaction.response.defer(ephemeral=True)
+        self._radio_mix_busy = True
+        query = self.radio_mix_query
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            if not query:
+                return
+            playlist_tracks = await asyncio.to_thread(fetch_playlist_tracks, query)
+            if not playlist_tracks:
+                return await interaction.followup.send("❌ ไม่พบเพลงจาก Radio/Mix นี้", ephemeral=True)
+            helper = RadioChoiceView(
+                query, self.guild, self.channel, self.loop_getter,
+                interaction.user, self.loop,
+            )
+            count_view = PlaylistCountView(
+                playlist_tracks, self.guild, self.channel, self.loop_getter,
+                interaction.user, None, parent_view=helper, source_label=" Radio/Mix",
+            )
+            prompt = await interaction.followup.send(
+                embed=discord.Embed(
+                    title="📋 เลือกจำนวนเพลง",
+                    description=f"พบ **{len(playlist_tracks)} เพลง**\nต้องการเพิ่มกี่เพลง?",
+                    color=0x1a1a2e,
+                ),
+                view=count_view, ephemeral=True, wait=True,
+            )
+            count_view.message = prompt
+            self.radio_mix_query = None
+            self.radio_mix_requester = None
+            await _refresh_player(self.guild.id)
+        except Exception as e:
+            log("📻 RADIO PLAYLIST ERROR", interaction, str(e))
+            try:
+                await interaction.followup.send("❌ ไม่สามารถโหลดเพลงจาก Radio/Mix นี้ได้", ephemeral=True)
+            except Exception:
+                pass
+        finally:
+            self._radio_mix_busy = False
+
+    async def radio_mix_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != getattr(self.radio_mix_requester, "id", None):
+            return await safe_respond(interaction, content="❌ เฉพาะผู้ที่ส่งลิงก์เท่านั้นที่เลือกได้", ephemeral=True)
+        self.radio_mix_query = None
+        self.radio_mix_requester = None
+        await interaction.response.edit_message(view=self)
 
     async def volume_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
