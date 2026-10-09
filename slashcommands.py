@@ -2787,7 +2787,6 @@ class PlayerView(discord.ui.LayoutView):
         track = self.current_track
         token = _next_playback_generation(self.guild.id)
         vc.stop()
-        _mark_playback_started(guild_id)
         vc.play(
             source,
             after=lambda e, _session_id=session_id, _token=token, _idx=idx, _track=track:
