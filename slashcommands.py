@@ -1628,22 +1628,35 @@ class RadioChoiceView(discord.ui.View):
 
         # ใช้ dynamic buttons เพื่อให้แน่ใจว่า Discord ส่ง components ไปพร้อม View
         single = discord.ui.Button(
-            emoji="▶️",
-            label="เล่นเพลงนี้เท่านั้น",
+            emoji="🎧",
+            label="Radio",
             style=discord.ButtonStyle.secondary,
             custom_id="youtube_radio_single",
+            row=0,
         )
         single.callback = self.single_btn
         self.add_item(single)
 
         playlist = discord.ui.Button(
-            emoji="📋",
-            label="โหลดเพลงจาก Radio",
+            emoji="🔀",
+            label="Mix",
             style=discord.ButtonStyle.secondary,
             custom_id="youtube_radio_playlist",
+            row=0,
         )
         playlist.callback = self.radio_btn
         self.add_item(playlist)
+
+        cancel = discord.ui.Button(
+            emoji="❌",
+            label="ยกเลิก",
+            style=discord.ButtonStyle.danger,
+            custom_id="youtube_radio_cancel",
+            row=1,
+            width=5,
+        )
+        cancel.callback = self.cancel_btn
+        self.add_item(cancel)
 
     async def _check_requester(self, interaction):
         if interaction.user.id != self.requester.id:
@@ -1761,6 +1774,12 @@ class RadioChoiceView(discord.ui.View):
                 pass
         finally:
             self._busy = False
+
+    async def cancel_btn(self, interaction: discord.Interaction):
+        if not await self._check_requester(interaction):
+            return
+        await interaction.response.defer()
+        await self._close()
 
     async def on_timeout(self):
         await self._close()
@@ -3189,16 +3208,19 @@ class PlayerView(discord.ui.LayoutView):
         if loading and loading.done < loading.total:
             parts.append(discord.ui.TextDisplay(f"⏳ กำลังโหลดเพลงเพิ่มเติม · {loading.done}/{loading.total}"))
 
+        # Use the same divider length throughout the player before the controls.
+        parts.append(discord.ui.TextDisplay(QUEUE_DIVIDER))
+
         primary, secondary, tertiary, quaternary = (
             discord.ui.ActionRow(), discord.ui.ActionRow(),
             discord.ui.ActionRow(), discord.ui.ActionRow()
         )
         specs = [
             (primary, "player_previous", None, discord.ButtonStyle.secondary, self.previous, "⏮️"),
-            (primary, "player_seek_back", None, discord.ButtonStyle.secondary, self.seek_back,
+            (primary, "player_seek_back", "-10", discord.ButtonStyle.secondary, self.seek_back,
              _player_seek_emoji(self.guild, 1455985625097306142, "backward10", "⏪")),
             (primary, "player_pause_resume", None, discord.ButtonStyle.secondary, self.pause_resume, "⏸️"),
-            (primary, "player_seek_forward", None, discord.ButtonStyle.secondary, self.seek_forward,
+            (primary, "player_seek_forward", "+10", discord.ButtonStyle.secondary, self.seek_forward,
              _player_seek_emoji(self.guild, 1455985627714551839, "forward10", "⏩")),
             (primary, "player_skip", None, discord.ButtonStyle.secondary, self.skip, "⏭️"),
             (secondary, "player_shuffle", None, discord.ButtonStyle.secondary, self.shuffle, "🔀"),
@@ -3207,9 +3229,9 @@ class PlayerView(discord.ui.LayoutView):
         ]
         if self.player_menu == "radio":
             specs.extend([
-                (tertiary, "radio_mix_single", "เล่นเพลงนี้", discord.ButtonStyle.secondary, self.radio_mix_single, "▶️"),
-                (tertiary, "radio_mix_load", "โหลดเพลงจาก Mix", discord.ButtonStyle.secondary, self.radio_mix_load, "📋"),
-                (quaternary, "radio_mix_cancel", "ยกเลิก", discord.ButtonStyle.danger, self.radio_mix_cancel, "✖️"),
+                (tertiary, "radio_mix_single", "Radio", discord.ButtonStyle.secondary, self.radio_mix_single, "🎧"),
+                (tertiary, "radio_mix_load", "Mix", discord.ButtonStyle.secondary, self.radio_mix_load, "🔀"),
+                (quaternary, "radio_mix_cancel", "ยกเลิก", discord.ButtonStyle.danger, self.radio_mix_cancel, "❌"),
             ])
         elif self.player_menu == "playlist_count":
             count = min(len(self.player_menu_tracks), MAX_PLAYLIST_FETCH)
