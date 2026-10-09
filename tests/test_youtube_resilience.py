@@ -86,5 +86,34 @@ class YouTubeResilienceTests(unittest.TestCase):
         self.assertEqual(sc.MAX_PLAYLIST_FETCH, 50)
 
 
+    def test_playlist_listing_anti_bot_opens_shared_circuit_breaker(self):
+        class BlockedYoutubeDL:
+            def __init__(self, options):
+                self.options = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def extract_info(self, query, download=False):
+                raise RuntimeError("Sign in to confirm you're not a bot")
+
+        with patch.object(sc.yt_dlp, "YoutubeDL", BlockedYoutubeDL):
+            with self.assertRaisesRegex(ValueError, "YOUTUBE_ANTI_BOT"):
+                sc.fetch_playlist_tracks(
+                    "https://www.youtube.com/playlist?list=PL123"
+                )
+
+        self.assertTrue(sc._is_youtube_cooldown_active())
+
+    def test_search_short_circuits_while_circuit_breaker_is_open(self):
+        sc._youtube_anti_bot_until = time.monotonic() + 120
+        with patch.object(sc.yt_dlp, "YoutubeDL") as youtube_dl:
+            self.assertEqual(sc.search_tracks("test search"), [])
+        youtube_dl.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
