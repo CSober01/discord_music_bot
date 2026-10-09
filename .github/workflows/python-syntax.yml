@@ -1,0 +1,25 @@
+name: Python syntax check
+
+on:
+  push:
+    branches:
+      - fix/clean-player-title
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Compile bot modules
+        run: python -m py_compile bot.py slashcommands.py
