@@ -166,8 +166,7 @@ PLAYER_PROGRESS_BAR = "━━━━━━━━●━━━━━━━━"
 
 HISTORY_LIMIT = 10  # เก็บเพลงที่เล่นไปแล้วล่าสุดเพื่อ Previous
 MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
-PLAYLIST_FETCH_CONCURRENCY = 1  # ดึงทีละรายการเพื่อเว้นช่วง request ไปยัง YouTube
-PLAYLIST_TRACK_FETCH_DELAY_SECONDS = 5.0  # เว้นช่วงระหว่างรายการเพื่อลด burst request ไปยัง YouTube
+PLAYLIST_FETCH_CONCURRENCY = 4  # ดึงข้อมูลพร้อมกันครั้งละ 4 เพลง โดยใช้ semaphore ร่วมทุก guild
 PLAYER_PROGRESS_INTERVAL_SECONDS = 10  # อัปเดตตัวเลข/แถบเวลาบน Player ทุก 10 วินาที
 _youtube_playlist_fetch_semaphore: asyncio.Semaphore | None = None
 
@@ -1562,22 +1561,14 @@ class PlaylistChoiceView(discord.ui.LayoutView):
             style=discord.ButtonStyle.primary, custom_id="playlist_choose_more",
         )
         more.callback = self._choose_more
-        cancel = discord.ui.Button(
-            label="ยกเลิก", emoji="❌",
-            style=discord.ButtonStyle.danger, custom_id="playlist_choice_cancel",
-        )
         first_row = discord.ui.ActionRow()
         first_row.add_item(single)
         first_row.add_item(more)
-        cancel_row = discord.ui.ActionRow()
-        cancel_row.add_item(cancel)
-        cancel.callback = self._cancel
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay(
                 f"## 🎵 เลือกเพลงจาก {self.source_label}\nพบรายการเพลงใน {self.source_label} นี้"
             ),
             first_row,
-            cancel_row,
             accent_colour=0x5865F2,
         ))
 
@@ -1666,12 +1657,6 @@ class PlaylistChoiceView(discord.ui.LayoutView):
         prompt = await interaction.followup.send(view=count_view, ephemeral=True, wait=True)
         count_view.message = prompt
 
-    async def _cancel(self, interaction: discord.Interaction):
-        if not await self._check_requester(interaction):
-            return
-        await interaction.response.defer()
-        await self._close()
-
     async def on_timeout(self):
         await self._close()
 
@@ -1725,24 +1710,7 @@ class PlaylistCountView(discord.ui.LayoutView):
         row.add_item(add_all)
         parts.append(row)
 
-        cancel = discord.ui.Button(
-            label="ยกเลิก",
-            emoji="❌",
-            style=discord.ButtonStyle.danger,
-            custom_id="playlist_count_cancel",
-        )
-        cancel_row = discord.ui.ActionRow()
-        cancel_row.add_item(cancel)
-        cancel.callback = self._cancel_selection
-        parts.append(cancel_row)
         self.add_item(discord.ui.Container(*parts, accent_colour=0x5865F2))
-
-    async def _cancel_selection(self, interaction: discord.Interaction):
-        if interaction.user.id != self.requester.id:
-            return await interaction.response.send_message(
-                "❌ เฉพาะผู้ที่ส่งลิงก์เท่านั้นที่ยกเลิกได้", ephemeral=True)
-        await interaction.response.defer()
-        await self._close()
 
     def _make_callback(self, amount):
         async def callback(interaction: discord.Interaction):
@@ -1865,23 +1833,12 @@ class RadioChoiceView(discord.ui.LayoutView):
         )
         playlist.callback = self.radio_btn
 
-        cancel = discord.ui.Button(
-            emoji="❌",
-            label="ยกเลิก",
-            style=discord.ButtonStyle.danger,
-            custom_id="youtube_radio_cancel",
-        )
-        cancel.callback = self.cancel_btn
-
         choice_row = discord.ui.ActionRow()
         choice_row.add_item(single)
         choice_row.add_item(playlist)
-        cancel_row = discord.ui.ActionRow()
-        cancel_row.add_item(cancel)
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("## 📻 YouTube Radio / Mix"),
             choice_row,
-            cancel_row,
             accent_colour=0x5865F2,
         ))
 
@@ -1959,18 +1916,20 @@ class RadioChoiceView(discord.ui.LayoutView):
             return await interaction.response.defer()
 
         self._busy = True
+        loading_message = None
         try:
             await interaction.response.defer()
+            await self._close()
+            loading_message = await interaction.followup.send(
+                "⏳ กำลังอ่านรายการเพลงจาก Radio / Mix...", ephemeral=True, wait=True
+            )
 
-            # ยังไม่เชื่อมต่อ VC ที่ขั้นเลือก "โหลดเพลงจาก Radio"
-            # ต้องรอให้ผู้ใช้เลือกจำนวนเพลงในหน้าถัดไปก่อน
+            # The loading status is visible immediately; fetching does not block navigation.
             playlist_tracks = await asyncio.to_thread(fetch_playlist_tracks, self.query)
             if not playlist_tracks:
-                await interaction.followup.send(
-                    "❌ ไม่พบเพลงจาก Radio/Mix นี้", ephemeral=True)
+                await loading_message.edit(content="❌ ไม่พบเพลงจาก Radio/Mix นี้")
                 return
 
-            await self._close()
             count_view = PlaylistCountView(
                 playlist_tracks,
                 self.guild,
@@ -1987,21 +1946,25 @@ class RadioChoiceView(discord.ui.LayoutView):
                 wait=True,
             )
             count_view.message = prompt
-        except Exception as e:
-            log("📻 RADIO PLAYLIST ERROR", interaction, str(e))
             try:
-                await interaction.followup.send(
-                    _youtube_blocked_user_message(e) or "❌ ไม่สามารถโหลดเพลงจาก Radio/Mix นี้ได้", ephemeral=True)
+                await loading_message.delete()
             except Exception:
                 pass
+        except Exception as e:
+            log("📻 RADIO PLAYLIST ERROR", interaction, str(e))
+            message = _youtube_blocked_user_message(e) or "❌ ไม่สามารถโหลดเพลงจาก Radio/Mix นี้ได้"
+            if loading_message:
+                try:
+                    await loading_message.edit(content=message, view=None)
+                except Exception:
+                    pass
+            else:
+                try:
+                    await interaction.followup.send(message, ephemeral=True)
+                except Exception:
+                    pass
         finally:
             self._busy = False
-
-    async def cancel_btn(self, interaction: discord.Interaction):
-        if not await self._check_requester(interaction):
-            return
-        await interaction.response.defer()
-        await self._close()
 
     async def on_timeout(self):
         await self._close()
@@ -2232,20 +2195,25 @@ class PlaylistImportModal(discord.ui.Modal, title="📋 เพิ่มเพล
         view = self.player_view or active_views.get(self.guild.id)
         if not view or not await _is_current_player(view):
             return await interaction.response.send_message("❌ ไม่พบเครื่องเล่นหลักที่ใช้งานอยู่", ephemeral=True)
+
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             tracks = await asyncio.to_thread(fetch_playlist_tracks, query)
             if not tracks:
                 return await interaction.followup.send("❌ ไม่พบเพลงใน Playlist นี้", ephemeral=True)
-            view.player_menu = "playlist_choice"
-            view.player_menu_tracks = tracks[:MAX_PLAYLIST_FETCH]
-            view.player_menu_query = query
-            view.player_menu_source = "Playlist"
-            view.player_menu_requester = interaction.user
-            view.radio_mix_query = None
-            view.radio_mix_requester = None
-            await _refresh_player(self.guild.id)
-            await interaction.followup.send("เลือกจำนวนเพลงจากปุ่มในเครื่องเล่นหลัก", ephemeral=True)
+
+            choice_view = PlaylistChoiceView(
+                query,
+                tracks,
+                self.guild,
+                self.channel,
+                self.loop_getter,
+                interaction.user,
+                source_label="Playlist",
+                parent_view=view,
+            )
+            prompt = await interaction.followup.send(view=choice_view, ephemeral=True, wait=True)
+            choice_view.message = prompt
         except Exception as exc:
             log("📋 PLAYER PLAYLIST IMPORT ERROR", interaction, str(exc))
             try:
@@ -2254,6 +2222,7 @@ class PlaylistImportModal(discord.ui.Modal, title="📋 เพิ่มเพล
                     ephemeral=True)
             except Exception:
                 pass
+
 
 class RadioMixModal(discord.ui.Modal, title="📻 YouTube Radio / Mix"):
     radio_url = discord.ui.TextInput(
@@ -2279,14 +2248,17 @@ class RadioMixModal(discord.ui.Modal, title="📻 YouTube Radio / Mix"):
                 "❌ ไม่พบเครื่องเล่นเพลงที่ใช้งานอยู่ กรุณากด Radio / Mix จากเครื่องเล่นอีกครั้ง",
                 ephemeral=True,
             )
-        view.radio_mix_query = query
-        view.radio_mix_requester = interaction.user
-        view.player_menu = "radio"
-        view.player_menu_requester = interaction.user
-        await interaction.response.defer(ephemeral=True)
-        await _refresh_player(self.guild.id)
+        radio_view = RadioChoiceView(
+            query,
+            self.guild,
+            self.channel,
+            self.loop_getter,
+            interaction.user,
+            self.loop_getter(),
+        )
+        await interaction.response.send_message(view=radio_view, ephemeral=True)
         try:
-            await interaction.followup.send("ตัวเลือกแสดงอยู่ในเครื่องเล่นหลักแล้ว", ephemeral=True)
+            radio_view.message = await interaction.original_response()
         except Exception:
             pass
 
@@ -2904,29 +2876,21 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
 
 async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_PlaylistFetchProgress",
                          initial_added=None, fetch_token: int = None):
-    """ดึงเพลงที่เหลือของ playlist (หลังเพลงแรก) แบบ concurrent (จำกัดจำนวนพร้อมกัน) ในพื้นหลัง
-    แล้วเพิ่มเข้าคิวทั้งหมดพร้อมกันด้วย queue_lock ครั้งเดียว (atomic)
-    จำกัด concurrency ด้วย Semaphore กัน YouTube rate-limit (429) ตอน playlist ยาวๆ
-    progress: ตัวนับความคืบหน้าเดียวกับที่ใช้ใน step1 ของ _add_playlist_to_queue (นับรวมทั้ง playlist)
-    """
+    """Fetch playlist tracks in batches of four, append each completed batch, and keep UI responsive."""
     if fetch_token is None:
         fetch_token = playlist_fetch_generation.get(guild.id, 0)
 
     sem = get_youtube_playlist_fetch_semaphore()
+    added = list(initial_added or [])
 
     async def _fetch_one(track_info):
         async with sem:
-            # Stop stale workers before they make another network request. This matters
-            # when /stop, disconnect, or a new Player invalidates the active playlist batch.
+            # Stop stale workers before they make another network request.
             if fetch_token != playlist_fetch_generation.get(guild.id, 0):
                 return None
             if _is_youtube_cooldown_active():
                 result, outcome = None, "cooldown"
             else:
-                # Slow down playlist entry extraction globally. The first playable track
-                # has already started; this delay applies only to the remaining entries.
-                if progress.done > 0:
-                    await asyncio.sleep(PLAYLIST_TRACK_FETCH_DELAY_SECONDS)
                 if fetch_token != playlist_fetch_generation.get(guild.id, 0):
                     return None
                 if _is_youtube_cooldown_active():
@@ -2946,56 +2910,62 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
                 await _refresh_player(guild.id)
             return result
 
-    fetch_results = await asyncio.gather(*(_fetch_one(t) for t in rest_tracks))
+    batch_size = max(1, PLAYLIST_FETCH_CONCURRENCY)
+    for offset in range(0, len(rest_tracks), batch_size):
+        batch = rest_tracks[offset:offset + batch_size]
+        batch_results = await asyncio.gather(*(_fetch_one(track) for track in batch))
 
-    if fetch_token != playlist_fetch_generation.get(guild.id, 0):
-        print(f"\n[{guild.name}] 🛑 Playlist bg fetch ยกเลิก — session เปลี่ยนระหว่าง fetch")
-        if playlist_loading_status.get(guild.id) is progress:
-            playlist_loading_status.pop(guild.id, None)
-            await _refresh_player(guild.id)
-        return
-
-    progress.print_summary()
-
-    fetched = [(url, title, duration, thumbnail)
-               for r in fetch_results if r is not None
-               for url, title, duration, thumbnail in [r]]
-
-    added = list(initial_added or [])
-    if not fetched:
-        if playlist_loading_status.get(guild.id) is progress:
-            playlist_loading_status.pop(guild.id, None)
-            await _refresh_player(guild.id)
-        if added:
-            await _send_playlist_added_summary(guild.id, channel, requester, added)
-        return
-
-    async with get_queue_lock(guild.id):
-        # A Stop/disconnect may happen after gather() completes but before this lock
-        # is acquired. Never let a stale background batch repopulate a cleared Queue.
         if fetch_token != playlist_fetch_generation.get(guild.id, 0):
+            print(f"\n[{guild.name}] 🛑 Playlist bg fetch ยกเลิก — session เปลี่ยนระหว่าง fetch")
             if playlist_loading_status.get(guild.id) is progress:
                 playlist_loading_status.pop(guild.id, None)
+                await _refresh_player(guild.id)
             return
 
-        for url, title, duration, thumbnail in fetched:
-            track = (url, title, duration, requester, thumbnail)
-            add_to_queue(guild.id, track)
-            added.append(track)
+        fetched = [
+            (url, title, duration, thumbnail)
+            for result in batch_results if result is not None
+            for url, title, duration, thumbnail in [result]
+        ]
+        if not fetched:
+            continue
 
-    # The first track may have finished before the paced background extraction did.
-    # If the Queue is now idle, restart from the first unplayed entry, not the last
-    # appended entry, so delayed playlist results remain playable and in order.
-    await _start_next_queued_track_if_idle(guild, channel)
-    await _schedule_player_repost(guild.id)
-    await _refresh_queue_msg(guild.id)
+        stale_batch = False
+        async with get_queue_lock(guild.id):
+            # Do not let a stale worker repopulate Queue after Stop/disconnect.
+            if fetch_token != playlist_fetch_generation.get(guild.id, 0):
+                stale_batch = True
+            else:
+                for url, title, duration, thumbnail in fetched:
+                    track = (url, title, duration, requester, thumbnail)
+                    add_to_queue(guild.id, track)
+                    added.append(track)
 
+        if stale_batch:
+            if playlist_loading_status.get(guild.id) is progress:
+                playlist_loading_status.pop(guild.id, None)
+                await _refresh_player(guild.id)
+            return
+
+        # Publish each completed batch immediately instead of waiting for the whole playlist.
+        await _start_next_queued_track_if_idle(guild, channel)
+        await asyncio.gather(
+            _schedule_player_repost(guild.id),
+            _refresh_queue_msg(guild.id),
+            _refresh_player(guild.id),
+        )
+
+    progress.print_summary()
     if playlist_loading_status.get(guild.id) is progress:
         playlist_loading_status.pop(guild.id, None)
-    # The debounced repost renders the final Queue and loading state together.
-    await _schedule_player_repost(guild.id)
 
-    await _send_playlist_added_summary(guild.id, channel, requester, added)
+    await asyncio.gather(
+        _schedule_player_repost(guild.id),
+        _refresh_queue_msg(guild.id),
+        _refresh_player(guild.id),
+    )
+    if added:
+        await _send_playlist_added_summary(guild.id, channel, requester, added)
 
 async def _add_and_play(vc, guild, channel, loop_getter, track):
     """Append to an active Player or start playback if no Player session exists."""
@@ -3496,33 +3466,43 @@ class PlayerView(discord.ui.LayoutView):
         self._build_layout()
 
     def _build_layout(self):
-        """Build one Components V2 container with song lists and controls inside."""
+        """Build the player with two compact control rows and lists below the buttons."""
         self.clear_items()
         self._buttons = {}
         if not self.current_track:
-            self.add_item(discord.ui.Container(discord.ui.TextDisplay("## 🎵 PLAYER\nไม่มีเพลงที่กำลังเล่นอยู่"), accent_colour=0x5865F2))
+            self.add_item(discord.ui.Container(
+                discord.ui.TextDisplay("## 🎵 PLAYER\nไม่มีเพลงที่กำลังเล่นอยู่"),
+                accent_colour=0x5865F2,
+            ))
             return
 
         url, title, duration, requester, thumbnail, *_rest = self.current_track
         gid = self.guild.id
         q = get_full_queue(gid)
-        idx = max(0, min(get_now_idx(gid), len(q)-1)) if q else 0
+        idx = max(0, min(get_now_idx(gid), len(q) - 1)) if q else 0
         display_title = _clean_player_title(title)
         artist = "YouTube"
         if q and 0 <= idx < len(q):
             meta = queue_display_titles.get(q[idx][0])
             if meta and " — " in meta:
                 artist = meta.split(" — ", 1)[0]
-        now = f"## 🎵 NOW PLAYING\n{_player_track_link(url, display_title)}\n*{discord.utils.escape_markdown(_truncate_display_width(artist, 44))} · YouTube*"
+
+        # A Markdown heading makes the clickable YouTube title prominent without
+        # explicitly applying underline styling.
+        now = (
+            f"🎵 **NOW PLAYING**\n"
+            f"## {_player_track_link(url, display_title)}\n"
+            f"*{discord.utils.escape_markdown(_truncate_display_width(artist, 44))} · YouTube*"
+        )
         parts = []
         if thumbnail and str(thumbnail).startswith(("https://", "http://")):
-            parts.append(discord.ui.Section(discord.ui.TextDisplay(now), accessory=discord.ui.Thumbnail(thumbnail, description="ภาพปกเพลง")))
+            parts.append(discord.ui.Section(
+                discord.ui.TextDisplay(now),
+                accessory=discord.ui.Thumbnail(thumbnail, description="ภาพปกเพลง"),
+            ))
         else:
             parts.append(discord.ui.TextDisplay(now))
 
-        filled = max(0, min(10, round(get_guild_volume(gid) * 10)))
-        volume_bar = "▰" * filled + "▱" * (10 - filled)
-        who = requester.mention if requester else "ไม่ทราบชื่อ"
         position = _playback_position(gid)
         duration_seconds = _duration_seconds(duration)
         shown_position = min(position, duration_seconds) if duration_seconds else position
@@ -3531,76 +3511,31 @@ class PlayerView(discord.ui.LayoutView):
         progress_slots = round((shown_position / duration_seconds) * total_bar) if duration_seconds else 0
         progress_slots = max(0, min(total_bar, progress_slots))
         progress_bar = "━" * progress_slots + ("●" if progress_slots < total_bar else "") + "━" * max(0, total_bar - progress_slots - 1)
-        parts.append(discord.ui.TextDisplay(f"**{elapsed_text}** {progress_bar} **{duration}**\n👤 {who}  🔊 {volume_bar}"))
+        parts.append(discord.ui.TextDisplay(f"**{elapsed_text}** {progress_bar} **{duration}**"))
+
         status = []
         if gid in shuffle_enabled:
-            status.append("🔀 Shuffle: เปิด")
+            status.append("🔀 สุ่มเพลงเปิด")
         repeat = loop_modes.get(gid, "off")
-        if repeat == "track": status.append("🔂 วนเพลงนี้")
-        elif repeat == "queue": status.append("🔁 วน Queue")
-        if status: parts.append(discord.ui.TextDisplay(" · ".join(status)))
-        # Display submenu content inside the same Components V2 player container.
-        if self.player_menu == "queue":
-            total_pages = max(1, (len(q) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
-            self.queue_page = max(0, min(self.queue_page, total_pages - 1))
-            start_idx = self.queue_page * QUEUE_PAGE_SIZE
-            page_tracks = q[start_idx:start_idx + QUEUE_PAGE_SIZE]
-            lines = []
-            for pos, track in enumerate(page_tracks, start=start_idx):
-                track_url, track_title, track_duration, *_ = track
-                marker = "▶" if pos == idx else "♫"
-                shown = _truncate_display_width(queue_display_titles.get(track_url, track_title), 76)
-                lines.append(f"{marker} **{display_no(gid, pos):02d}.** {_player_track_link(track_url, shown)} · {track_duration}")
-            parts.append(discord.ui.TextDisplay(
-                f"### 🎶 QUEUE · {self.queue_page + 1}/{total_pages}\n"
-                + ("\n".join(lines) if lines else "_คิวยังว่างอยู่_")
-            ))
-        elif self.player_menu == "radio":
-            parts.append(discord.ui.TextDisplay(
-                "### 📻 YOUTUBE RADIO / MIX\n"
-                "เลือกว่าจะเล่นเพลงเดียวหรือโหลดเพลงจาก Mix"
-            ))
-        elif self.player_menu == "playlist_choice":
-            source_label = self.player_menu_source.strip() or "Playlist"
-            parts.append(discord.ui.TextDisplay(
-                f"### 🎵 เลือกเพลงจาก {source_label}\n"
-                f"พบรายการเพลงใน {source_label} นี้"
-            ))
-        elif self.player_menu == "playlist_count":
-            count = min(len(self.player_menu_tracks), MAX_PLAYLIST_FETCH)
-            parts.append(discord.ui.TextDisplay(
-                f"### 📋 เลือกจำนวนเพลง · {self.player_menu_source}\n"
-                f"พบ **{count} เพลง** — เลือกจำนวนที่ต้องการเพิ่มเข้าคิว"
-            ))
-        else:
-            hist_start = max(0, idx - 3)
-            history_positions = range(idx - 1, hist_start - 1, -1) if q else range(0)
-            hist_lines = []
-            for pos in history_positions:
-                track_url, track_title, track_duration, *_ = q[pos]
-                shown = _truncate_display_width(queue_display_titles.get(track_url, track_title), 70)
-                hist_lines.append(f"{display_no(gid, pos)}. ♫ {_player_track_link(track_url, shown)} · {track_duration}")
-            parts.append(discord.ui.TextDisplay("**HISTORY**\n" + ("\n".join(hist_lines) if hist_lines else "_ยังไม่มีประวัติเพลง_")))
-            next_start = idx + 1
-            upcoming = q[next_start:next_start + 3] if q else []
-            next_lines = []
-            for pos, track in enumerate(upcoming, start=next_start):
-                track_url, track_title, track_duration, *_ = track
-                shown = _truncate_display_width(queue_display_titles.get(track_url, track_title), 70)
-                next_lines.append(f"{display_no(gid, pos)}. ♫ {_player_track_link(track_url, shown)} · {track_duration}")
-            parts.append(discord.ui.TextDisplay("**UP NEXT**\n" + ("\n".join(next_lines) if next_lines else "_ไม่มีเพลงถัดไป_")))
+        if repeat == "track":
+            status.append("🔂 วนเพลงนี้")
+        elif repeat == "queue":
+            status.append("🔁 วนคิว")
+        if status:
+            parts.append(discord.ui.TextDisplay("　".join(status)))
+
+        filled = max(0, min(10, round(get_guild_volume(gid) * 10)))
+        volume_bar = "▰" * filled + "▱" * (10 - filled)
+        who = requester.mention if requester else "ไม่ทราบชื่อ"
+        parts.append(discord.ui.TextDisplay(f"🔊 {volume_bar}"))
+        parts.append(discord.ui.TextDisplay(f"👤 {who}"))
 
         loading = playlist_loading_status.get(gid)
         if loading and loading.done < loading.total:
             parts.append(discord.ui.TextDisplay(f"⏳ กำลังโหลดเพลงเพิ่มเติม · {loading.done}/{loading.total}"))
 
-        # Use the same divider length throughout the player before the controls.
         parts.append(discord.ui.TextDisplay(QUEUE_DIVIDER))
-
-        primary, secondary, tertiary, quaternary = (
-            discord.ui.ActionRow(), discord.ui.ActionRow(),
-            discord.ui.ActionRow(), discord.ui.ActionRow()
-        )
+        primary, secondary = discord.ui.ActionRow(), discord.ui.ActionRow()
         specs = [
             (primary, "player_previous", None, discord.ButtonStyle.secondary, self.previous, "⏮️"),
             (primary, "player_seek_back", None, discord.ButtonStyle.secondary, self.seek_back,
@@ -3609,78 +3544,50 @@ class PlayerView(discord.ui.LayoutView):
             (primary, "player_seek_forward", None, discord.ButtonStyle.secondary, self.seek_forward,
              _player_seek_emoji(self.guild, 1455985627714551839, "forward10", "⏩")),
             (primary, "player_skip", None, discord.ButtonStyle.secondary, self.skip, "⏭️"),
+            (secondary, "player_search", None, discord.ButtonStyle.secondary, self.search, "🔍"),
+            (secondary, "player_show_queue", None, discord.ButtonStyle.secondary, self.show_queue, "📋"),
             (secondary, "player_shuffle", None, discord.ButtonStyle.secondary, self.shuffle, "🔀"),
-            (secondary, "player_stop", None, discord.ButtonStyle.danger, self.stop, "⏹️"),
             (secondary, "player_loop", None, discord.ButtonStyle.secondary, self.loop_btn, "🔁"),
+            (secondary, "player_stop", None, discord.ButtonStyle.danger, self.stop, "⏹️"),
         ]
-        if self.player_menu == "playlist_choice":
-            is_radio_mix = "radio" in self.player_menu_source.lower() or "mix" in self.player_menu_source.lower()
-            single_label = "เล่นเพลงนี้เท่านั้น" if is_radio_mix else "เล่นเพลงนี้เพลงเดียว"
-            more_label = "โหลดเพลงจาก Mix" if is_radio_mix else "เลือกเพลงเพิ่มเติม"
-            specs.extend([
-                (tertiary, "playlist_play_single", single_label,
-                 discord.ButtonStyle.success, self.play_playlist_single, "▶️"),
-                (tertiary, "playlist_choose_more", more_label,
-                 discord.ButtonStyle.primary, self.choose_more_playlist, "📋"),
-                (quaternary, "playlist_choice_cancel", "ยกเลิก",
-                 discord.ButtonStyle.danger, self.cancel_playlist_choice, "❌"),
-            ])
-        elif self.player_menu == "playlist_count":
-            count = min(len(self.player_menu_tracks), MAX_PLAYLIST_FETCH)
-            choices = [n for n in (5, 10, 20, 30) if n <= count]
-            for amount in choices[:4]:
-                specs.append((
-                    tertiary, f"playlist_count_{amount}", f"{amount} เพลง",
-                    discord.ButtonStyle.secondary,
-                    (lambda interaction, button, selected=amount: self.choose_playlist_count(interaction, selected)),
-                    None,
-                ))
-            specs.append((
-                tertiary, "playlist_count_all", f"เพิ่มทั้งหมด ({count})",
-                discord.ButtonStyle.success,
-                (lambda interaction, button, selected=count: self.choose_playlist_count(interaction, selected)),
-                "➕",
-            ))
-            specs.append((
-                quaternary, "playlist_count_cancel", "ยกเลิก",
-                discord.ButtonStyle.danger, self.cancel_playlist_count, "❌",
-            ))
-        elif self.player_menu == "radio":
-            specs.extend([
-                (tertiary, "radio_mix_single", "เล่นเพลงนี้เท่านั้น",
-                 discord.ButtonStyle.secondary, self.radio_mix_single, "🎧"),
-                (tertiary, "radio_mix_load", "โหลดเพลงจาก Mix",
-                 discord.ButtonStyle.primary, self.radio_mix_load, "🔀"),
-                (quaternary, "radio_mix_cancel", "ยกเลิก",
-                 discord.ButtonStyle.danger, self.radio_mix_cancel, "❌"),
-            ])
-        elif self.player_menu == "queue":
-            total_pages = max(1, (len(q) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
-            specs.extend([
-                (tertiary, "player_queue_previous", None, discord.ButtonStyle.secondary, self.queue_previous_page, "◀"),
-                (tertiary, "player_queue_page", f"หน้า {self.queue_page + 1}/{total_pages}", discord.ButtonStyle.secondary, self.menu_back, None),
-                (tertiary, "player_queue_next", None, discord.ButtonStyle.secondary, self.queue_next_page, "▶"),
-            ])
-        else:
-            # Short icon shortcuts open a menu; the menu title and its child buttons render here.
-            specs.extend([
-                (tertiary, "player_search", None, discord.ButtonStyle.secondary, self.search, "🔍"),
-                (tertiary, "player_show_queue", None, discord.ButtonStyle.secondary, self.show_queue, "📋"),
-                (tertiary, "player_volume", None, discord.ButtonStyle.secondary, self.volume_btn, "🔊"),
-            ])
         for row, cid, label, style, callback, emoji in specs:
             button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=cid)
-            if cid == "player_queue_page":
-                button.disabled = True
             async def _run_button(interaction, cb=callback, btn=button, button_id=cid):
                 await _safe_player_button_callback(interaction, cb, btn, button_id)
 
             button.callback = _run_button
             row.add_item(button)
             self._buttons[cid] = button
-        parts.extend((primary, secondary, tertiary))
-        if quaternary.children:
-            parts.append(quaternary)
+
+        parts.extend((primary, secondary))
+        parts.append(discord.ui.TextDisplay(QUEUE_DIVIDER))
+
+        history_start = max(0, idx - 3)
+        history_positions = range(idx - 1, history_start - 1, -1) if q else range(0)
+        history_lines = []
+        for pos in history_positions:
+            track_url, track_title, track_duration, *_ = q[pos]
+            shown = _truncate_display_width(queue_display_titles.get(track_url, track_title), 70)
+            history_lines.append(
+                f"{display_no(gid, pos)}. ♫ {_player_track_link(track_url, shown)} · {track_duration}"
+            )
+        parts.append(discord.ui.TextDisplay(
+            "**HISTORY · ประวัติเพลง**\n"
+            + ("\n".join(history_lines) if history_lines else "_ยังไม่มีประวัติเพลง_")
+        ))
+
+        upcoming = q[idx + 1:idx + 4] if q else []
+        upcoming_lines = []
+        for pos, track in enumerate(upcoming, start=idx + 1):
+            track_url, track_title, track_duration, *_ = track
+            shown = _truncate_display_width(queue_display_titles.get(track_url, track_title), 70)
+            upcoming_lines.append(
+                f"{display_no(gid, pos)}. ♫ {_player_track_link(track_url, shown)} · {track_duration}"
+            )
+        parts.append(discord.ui.TextDisplay(
+            "**UP NEXT · เพลงถัดไป**\n"
+            + ("\n".join(upcoming_lines) if upcoming_lines else "_ไม่มีเพลงถัดไป_")
+        ))
         self.add_item(discord.ui.Container(*parts, accent_colour=0x5865F2))
 
     def refresh_layout(self):
@@ -3845,10 +3752,10 @@ class PlayerView(discord.ui.LayoutView):
     def _sync_state_buttons(self):
         for cid, item in self._buttons.items():
             if cid == "player_shuffle":
-                item.style = discord.ButtonStyle.success if self.guild.id in shuffle_enabled else discord.ButtonStyle.secondary
+                item.style = discord.ButtonStyle.secondary
             elif cid == "player_loop":
                 mode = loop_modes.get(self.guild.id, "off")
-                item.style = discord.ButtonStyle.success if mode != "off" else discord.ButtonStyle.secondary
+                item.style = discord.ButtonStyle.secondary
                 item.emoji = {"off":"🔁","track":"🔂","queue":"🔁"}[mode]
             elif cid == "player_pause_resume":
                 vc = self.guild.voice_client
