@@ -1488,7 +1488,7 @@ class VolumeModal(discord.ui.Modal, title="🔊 ปรับระดับเ�
 #  YouTube Radio / Mix Choice View
 # ─────────────────────────────────────────────
 
-class PlaylistCountView(discord.ui.View):
+class PlaylistCountView(discord.ui.LayoutView):
     """ให้ผู้ใช้เลือกจำนวนเพลงจาก playlist ที่ตรวจพบจริง (สูงสุด MAX_PLAYLIST_FETCH)."""
 
     def __init__(self, playlist_tracks, guild, channel, loop_getter, requester,
@@ -1507,28 +1507,43 @@ class PlaylistCountView(discord.ui.View):
         self._build_buttons()
 
     def _build_buttons(self):
+        self.clear_items()
         count = min(len(self.playlist_tracks), MAX_PLAYLIST_FETCH)
+        parts = [
+            discord.ui.TextDisplay(
+                f"## 📋 เลือกจำนวนเพลง · {self.source_label.strip()}\n"
+                f"พบ **{count} เพลง** — เลือกจำนวนที่ต้องการเพิ่มเข้าคิว"
+            )
+        ]
+        preview = []
+        for pos, track in enumerate(self.playlist_tracks[:5], start=1):
+            _url, title, duration, *_rest = track
+            shown = _truncate_display_width(queue_display_titles.get(_url, title), 72)
+            preview.append(f"{pos}. {discord.utils.escape_markdown(shown)} · {duration}")
+        if preview:
+            parts.append(discord.ui.TextDisplay("\n".join(preview)))
 
-        # แสดงเฉพาะจำนวนที่มีเพลงถึงจริง ๆ และให้ Add All เป็นตัวเลือกสุดท้ายเสมอ
-        choices = [n for n in (5, 10, 20, 30) if n <= count]
-        choices.append(count)
-
-        for index, amount in enumerate(choices[:-1]):
+        # Avoid duplicate buttons when the playlist count is exactly 5/10/20/30.
+        choices = [n for n in (5, 10, 20, 30) if n < count]
+        row = discord.ui.ActionRow()
+        for amount in choices:
             button = discord.ui.Button(
-                label=str(amount),
+                label=f"{amount} เพลง",
                 style=discord.ButtonStyle.secondary,
                 custom_id=f"playlist_count_{amount}",
             )
             button.callback = self._make_callback(amount)
-            self.add_item(button)
+            row.add_item(button)
 
         add_all = discord.ui.Button(
-            label=f"Add All ({count})",
+            label=f"เพิ่มทั้งหมด ({count})",
             style=discord.ButtonStyle.success,
             custom_id="playlist_count_all",
         )
         add_all.callback = self._make_callback(count)
-        self.add_item(add_all)
+        row.add_item(add_all)
+        parts.append(row)
+        self.add_item(discord.ui.Container(*parts, accent_colour=0x5865F2))
 
     def _make_callback(self, amount):
         async def callback(interaction: discord.Interaction):
@@ -1612,7 +1627,7 @@ class PlaylistCountView(discord.ui.View):
         await self._close()
 
 
-class RadioChoiceView(discord.ui.View):
+class RadioChoiceView(discord.ui.LayoutView):
     """ตัวเลือกแรกของ YouTube Radio/Mix — แสดงทันทีโดยยังไม่เชื่อมต่อ VC/โหลด playlist."""
 
     def __init__(self, query, guild, channel, loop_getter, requester, loop):
@@ -1626,40 +1641,41 @@ class RadioChoiceView(discord.ui.View):
         self.message = None
         self._busy = False
 
-        # ใช้ dynamic buttons เพื่อให้แน่ใจว่า Discord ส่ง components ไปพร้อม View
+        # Radio and Mix share the first row; cancel occupies the second row.
         single = discord.ui.Button(
             emoji="🎧",
             label="Radio",
             style=discord.ButtonStyle.secondary,
             custom_id="youtube_radio_single",
-            row=0,
         )
         single.callback = self.single_btn
-        self.add_item(single)
 
         playlist = discord.ui.Button(
             emoji="🔀",
             label="Mix",
             style=discord.ButtonStyle.secondary,
             custom_id="youtube_radio_playlist",
-            row=0,
         )
         playlist.callback = self.radio_btn
-        self.add_item(playlist)
 
         cancel = discord.ui.Button(
             emoji="❌",
             label="ยกเลิก",
             style=discord.ButtonStyle.danger,
             custom_id="youtube_radio_cancel",
-            row=1,
         )
         try:
             cancel.width = 5
         except Exception:
             pass
         cancel.callback = self.cancel_btn
-        self.add_item(cancel)
+
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("## 📻 YouTube Radio / Mix"),
+            discord.ui.ActionRow(single, playlist),
+            discord.ui.ActionRow(cancel),
+            accent_colour=0x5865F2,
+        ))
 
     async def _check_requester(self, interaction):
         if interaction.user.id != self.requester.id:
@@ -1758,11 +1774,6 @@ class RadioChoiceView(discord.ui.View):
                 source_label=" Radio/Mix",
             )
             prompt = await interaction.followup.send(
-                embed=discord.Embed(
-                    title="📋 เลือกจำนวนเพลง",
-                    description=f"พบ **{len(playlist_tracks)} เพลง**\nต้องการเพิ่มกี่เพลง?",
-                    color=0x1a1a2e,
-                ),
                 view=count_view,
                 ephemeral=True,
                 wait=True,
@@ -1861,11 +1872,6 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                     interaction.user, self.loop,
                 )
                 prompt = await interaction.followup.send(
-                    embed=discord.Embed(
-                        title="📻 YouTube Radio / Mix",
-                        description="ต้องการเล่นแบบไหน?",
-                        color=0x1a1a2e,
-                    ),
                     view=view,
                     ephemeral=True,
                     wait=True,
