@@ -11,7 +11,7 @@ This document describes the expected behavior and operational safeguards in `sla
   - Back 10 seconds: `1455985625097306142`
 - The player uses the custom emoji when it is available in the server or the bot has permission to use external emoji. Otherwise it falls back to Unicode controls so the buttons remain usable.
 - The divider before the controls uses the shared `QUEUE_DIVIDER` constant so its length remains consistent.
-- Radio/Mix choices display `Radio` and `Mix` side by side, with `ยกเลิก` alone on the second row. Playlist count selection shows the number found, a short track preview, count choices and an Add All action in a Components V2 container.
+- There is no separate YouTube Radio/Mix choice menu. YouTube playlist and Mix/Radio URLs go directly to track-count selection: show the number found, a short preview, available count choices (5/10/20/30) and an Add All action. When a player is active, choices appear in the player; otherwise a standalone picker is shown.
 - A seek replaces the FFmpeg audio source and increments the playback generation. The completion callback from the replaced source must not advance the queue.
 
 ## Queue and playlist behavior
