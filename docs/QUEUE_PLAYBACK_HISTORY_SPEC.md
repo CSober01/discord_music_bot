@@ -15,7 +15,7 @@ Queue ต้องเป็น rolling playback history:
 - เมื่อเพลงที่เล่นไปแล้วเกิน 10 เพลง ให้ลบเฉพาะเพลงเก่าที่เกิน History 10 ออกจาก memory
 - Previous ย้อนกลับได้เฉพาะเพลงที่ยังอยู่ใน History
 - /queue และ Player ต้องใช้เลขคิวเดียวกัน
-- Player แสดง History 10 + Current 1 + Upcoming 5
+- Player แสดง History 3 + Current 1 + Upcoming 3; ประวัติจริงสำหรับ Previous ยังคงเก็บสูงสุด 10 เพลง
 - ต้องมี marker ระบุเพลงปัจจุบัน
 - ทุก state change ต้อง refresh UI ที่เกี่ยวข้อง
 
@@ -324,8 +324,8 @@ Player ต้องอ่าน Queue state เดียวกับ /queue
   Current: #30
   Upcoming: #31-#35
 
-สูงสุด 16 เพลง:
-  10 History + 1 Current + 5 Upcoming
+สูงสุด 7 เพลง:
+  3 History + 1 Current + 3 Upcoming
 
 ถ้ามีไม่ถึงจำนวนดังกล่าวให้แสดงเท่าที่มี
 
@@ -1567,3 +1567,33 @@ This specifically prevents the Next button from remaining disabled after adding 
 | Queue other item | 🎵 |
 | Loading | ⏳ |
 | Actual controls | Discord buttons below Embed |
+
+
+## 34. Player Components V2
+
+Player หลักใช้ `discord.ui.LayoutView` และ `discord.ui.Container` จาก discord.py 2.6 ขึ้นไป
+แทน Embed + View แบบเดิม เพื่อให้รายการเพลงและปุ่มอยู่ในกรอบ Component เดียวกัน
+
+ลำดับภายใน Container:
+1. Now Playing: ชื่อเพลง, ศิลปิน/แหล่งที่มา, ผู้ขอเพลง, ภาพปกเมื่อมี
+2. แถบเวลาที่แสดงใน Player
+3. แถบ Volume 10 ช่อง โดยไม่แสดงตัวเลขเปอร์เซ็นต์
+4. History 3 เพลงล่าสุด (แต่ระบบ Previous ยังเก็บย้อนหลังสูงสุด 10 เพลง)
+5. Up Next 3 เพลงถัดไป (ไม่จำกัดจำนวนเพลงจริงใน Queue)
+6. ปุ่มควบคุมใน Container: Previous, Pause/Resume, Next, Stop, Repeat, Shuffle, Search, Queue, Volume
+
+### Link behavior
+
+- ชื่อเพลงปัจจุบัน, History และ Up Next เป็น Markdown link เมื่อมี URL หน้าเพลงจริงจาก yt-dlp metadata.
+- ห้ามใช้ stream URL ของ FFmpeg เป็นลิงก์ที่ผู้ใช้กด เพราะอาจเป็น URL ชั่วคราว ไม่ใช่หน้าเพลง.
+- หากไม่พบ URL หน้าเพลงจริง ให้แสดงชื่อเพลงเป็นข้อความธรรมดา.
+- ไม่เพิ่มไอคอนลิงก์ภายนอกต่อท้ายชื่อเพลง.
+- Discord client อาจควบคุมสี/เส้นใต้ของ hyperlink เอง จึงห้ามรับประกันหน้าตาเหมือน mockup ทุกแพลตฟอร์ม.
+
+### Compatibility and message lifecycle
+
+- `requirements.txt` ต้องกำหนด `discord.py>=2.6.0,<3.0`.
+- Components V2 message ห้ามส่ง `embed=` หรือ `content=` ควบคู่กับ `LayoutView`; เนื้อหาต้องอยู่ใน TextDisplay/Container.
+- เมื่อ Stop หรือ external disconnect ให้ลบ Player V2 message แล้วส่งข้อความสรุปแบบ legacy แยกต่างหาก เพราะ V2 message ไม่สามารถเปลี่ยนกลับไปใช้ Embed เดิมในข้อความเดียวกันได้.
+- ต้องทดสอบ callback ของทุกปุ่ม, Previous/Next, queue refresh, repost debounce, natural end, stop และ external disconnect บน Discord จริงก่อน merge.
+- แถบเวลาใน Player เป็นตัวแสดงสถานะตาม implementation ปัจจุบัน; การแสดง elapsed time แบบเคลื่อนไหวต้องมีระบบติดตามเวลาเล่นและ refresh เพิ่มเติม.
