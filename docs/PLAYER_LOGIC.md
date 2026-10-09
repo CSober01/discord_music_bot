@@ -17,7 +17,7 @@ This document describes the expected behavior and operational safeguards in `sla
 - A playlist import is capped at `MAX_PLAYLIST_FETCH = 50` entries.
 - The first playable entry is resolved first so playback can begin before the entire playlist has been processed.
 - Remaining entries share one process-wide semaphore and a five-second delay to reduce request bursts.
-- Playlist progress is an in-place console line. A completed batch prints a summary; a batch invalidated by stop/disconnect must not print a false completion summary.
+- Playlist progress is an in-place console line. yt-dlp's raw stderr is suppressed so a fatal `ERROR: [youtube]...` line cannot overwrite the progress display; exceptions still propagate and are recorded in the guild log. A completed batch prints a summary; a batch invalidated by stop/disconnect must not print a false completion summary.
 - The player queue page contains 10 tracks. Previous/next controls are disabled at the page boundaries.
 - Previously played entries are retained in the queue up to `HISTORY_LIMIT = 10`; the player displays the latest three previous entries and up to three upcoming entries.
 
