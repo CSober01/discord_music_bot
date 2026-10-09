@@ -1359,8 +1359,18 @@ class PlaylistCountView(discord.ui.View):
 
     async def _process_selection(self, selected, amount, user, interaction):
         try:
+            vc = self.vc
+            # Radio/Mix playlist flow deliberately waits until a count is selected
+            # before joining/moving the bot into a voice channel.
+            if vc is None:
+                if self.parent_view is None:
+                    raise RuntimeError("Missing Radio/Mix parent view for deferred voice connection")
+                vc = await self.parent_view._connect_voice(interaction)
+                if not vc:
+                    return
+
             await _add_playlist_to_queue(
-                self.vc,
+                vc,
                 self.guild,
                 self.channel,
                 self.loop_getter,
@@ -1501,12 +1511,8 @@ class RadioChoiceView(discord.ui.View):
         try:
             await interaction.response.defer()
 
-            # เชื่อมต่อ VC หลังผู้ใช้เลือก "โหลด Radio" เท่านั้น
-            vc = await self._connect_voice(interaction)
-            if not vc:
-                return
-
-            # ดึง metadata แบบ flat เพื่อสร้างตัวเลือกจำนวนเพลง
+            # ยังไม่เชื่อมต่อ VC ที่ขั้นเลือก "โหลดเพลงจาก Radio"
+            # ต้องรอให้ผู้ใช้เลือกจำนวนเพลงในหน้าถัดไปก่อน
             playlist_tracks = await asyncio.to_thread(fetch_playlist_tracks, self.query)
             if not playlist_tracks:
                 await interaction.followup.send(
@@ -1520,7 +1526,8 @@ class RadioChoiceView(discord.ui.View):
                 self.channel,
                 self.loop_getter,
                 interaction.user,
-                vc,
+                None,
+                parent_view=self,
                 source_label=" Radio/Mix",
             )
             prompt = await interaction.followup.send(
