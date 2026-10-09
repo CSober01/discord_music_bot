@@ -1662,7 +1662,9 @@ class RadioChoiceView(discord.ui.View):
         except Exception as e:
             log("📻 RADIO SINGLE ERROR", interaction, str(e))
             try:
-                await interaction.followup.send("❌ ไม่สามารถเล่นเพลงนี้ได้", ephemeral=True)
+                await interaction.followup.send(
+                    _youtube_blocked_user_message(e) or "❌ ไม่สามารถเล่นเพลงนี้ได้",
+                    ephemeral=True)
             except Exception:
                 pass
         finally:
@@ -1712,7 +1714,7 @@ class RadioChoiceView(discord.ui.View):
             log("📻 RADIO PLAYLIST ERROR", interaction, str(e))
             try:
                 await interaction.followup.send(
-                    "❌ ไม่สามารถโหลดเพลงจาก Radio/Mix นี้ได้", ephemeral=True)
+                    _youtube_blocked_user_message(e) or "❌ ไม่สามารถโหลดเพลงจาก Radio/Mix นี้ได้", ephemeral=True)
             except Exception:
                 pass
         finally:
@@ -1883,8 +1885,10 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                 except ValueError as e:
                     error_msg = str(e)
                     await _ack_done()
-                    
-                    if error_msg == "SPOTIFY_DRM_ERROR":
+
+                    if _youtube_blocked_user_message(e):
+                        await _send_error(_youtube_blocked_user_message(e))
+                    elif error_msg == "SPOTIFY_DRM_ERROR":
                         await _send_error("❌ Spotify ไม่สามารถเล่นได้ (DRM)\n💡 ค้นหาด้วยชื่อเพลงแทน")
                     elif error_msg == "SPOTIFY_SCRAPE_ERROR":
                         await _send_error("❌ ไม่สามารถดึงข้อมูลจาก Spotify ได้\n💡 ลองอีกครั้ง หรือค้นหาด้วยชื่อเพลงแทน")
@@ -1899,8 +1903,10 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                 except ValueError as e:
                     error_msg = str(e)
                     await _ack_done()
-                    
-                    if error_msg == "PLAYLIST_DETECTED":
+
+                    if _youtube_blocked_user_message(e):
+                        await _send_error(_youtube_blocked_user_message(e))
+                    elif error_msg == "PLAYLIST_DETECTED":
                         await _send_error("❌ นี่คือเพลย์ลิสต์ ใช้เพื่อเพิ่มเพลงทั้งหมด")
                     elif error_msg == "SPOTIFY_SCRAPE_ERROR":
                         await _send_error("❌ ไม่สามารถดึงข้อมูลจาก Spotify ได้\n💡 ลองอีกครั้ง หรือค้นหาด้วยชื่อเพลงแทน")
@@ -1935,7 +1941,9 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
         except Exception as e:
             log("🔍 SEARCH SUBMIT ERROR", interaction, str(e))
             await _ack_done()
-            await _send_error("❌ เกิดข้อผิดพลาด กรุณาลองใหม่")
+            await _send_error(
+                _youtube_blocked_user_message(e) or "❌ เกิดข้อผิดพลาด กรุณาลองใหม่"
+            )
 
 
 class PlaylistImportModal(discord.ui.Modal, title="📋 เพิ่มเพลงจาก Playlist"):
@@ -1975,7 +1983,9 @@ class PlaylistImportModal(discord.ui.Modal, title="📋 เพิ่มเพล
         except Exception as exc:
             log("📋 PLAYER PLAYLIST IMPORT ERROR", interaction, str(exc))
             try:
-                await interaction.followup.send("❌ ไม่สามารถโหลด Playlist นี้ได้", ephemeral=True)
+                await interaction.followup.send(
+                    _youtube_blocked_user_message(exc) or "❌ ไม่สามารถโหลด Playlist นี้ได้",
+                    ephemeral=True)
             except Exception:
                 pass
 
@@ -3538,7 +3548,9 @@ class PlayerView(discord.ui.LayoutView):
         except Exception as e:
             log("📻 RADIO PLAYLIST ERROR", interaction, str(e))
             try:
-                await interaction.followup.send("❌ ไม่สามารถโหลดเพลงจาก Radio/Mix นี้ได้", ephemeral=True)
+                await interaction.followup.send(
+                    _youtube_blocked_user_message(e) or "❌ ไม่สามารถโหลดเพลงจาก Radio/Mix นี้ได้",
+                    ephemeral=True)
             except Exception:
                 pass
         finally:
