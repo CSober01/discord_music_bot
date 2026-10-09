@@ -2439,63 +2439,69 @@ class QueueView(discord.ui.View):
         super().__init__(timeout=180)
         self.guild = guild
         self.page = page
-        self._sync_buttons()
+        self._build_buttons()
 
     def _page_count(self):
         q = get_full_queue(self.guild.id)
         return max(1, (len(q) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
-    def _sync_buttons(self):
+
+    def _build_buttons(self):
+        # A one-page queue has no navigation controls at all.
+        self.clear_items()
         total_pages = self._page_count()
         self.page = max(0, min(self.page, total_pages - 1))
-        for item in self.children:
-            if item.custom_id == "queue_previous_page":
-                item.disabled = self.page <= 0
-            elif item.custom_id == "queue_page":
-                item.label = f"{self.page + 1} / {total_pages}"
-                item.disabled = True
-            elif item.custom_id == "queue_next_page":
-                item.disabled = self.page >= total_pages - 1
+        if total_pages <= 1:
+            return
+
+        previous = discord.ui.Button(
+            label="◀",
+            style=discord.ButtonStyle.secondary,
+            custom_id="queue_previous_page",
+            row=0,
+            disabled=self.page <= 0,
+        )
+        previous.callback = self.previous_page
+        self.add_item(previous)
+
+        indicator = discord.ui.Button(
+            label=f"{self.page + 1} / {total_pages}",
+            style=discord.ButtonStyle.secondary,
+            custom_id="queue_page",
+            row=0,
+            disabled=True,
+        )
+        self.add_item(indicator)
+
+        next_button = discord.ui.Button(
+            label="▶",
+            style=discord.ButtonStyle.secondary,
+            custom_id="queue_next_page",
+            row=0,
+            disabled=self.page >= total_pages - 1,
+        )
+        next_button.callback = self.next_page
+        self.add_item(next_button)
 
     async def _update(self, interaction: discord.Interaction):
-        self._sync_buttons()
-        embed = make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=self.page)
+        # Recalculate page count, clamp the current page, and rebuild button states
+        # before editing the message through this component interaction.
+        self._build_buttons()
+        embed = make_queue_embed(
+            self.guild.id,
+            current_idx=get_now_idx(self.guild.id),
+            page=self.page,
+        )
         await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="queue_previous_page", row=0)
-    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Edit the component message in the same interaction; avoid defer + edit_original_response
-        # which can leave stale page controls on ephemeral Queue messages.
-        if self.page <= 0:
-            self._sync_buttons()
-            return await interaction.response.edit_message(
-                embed=make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=self.page),
-                view=self,
-            )
-        self.page -= 1
-        self._sync_buttons()
-        await interaction.response.edit_message(
-            embed=make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=self.page),
-            view=self,
-        )
+    async def previous_page(self, interaction: discord.Interaction):
+        if self.page > 0:
+            self.page -= 1
+        await self._update(interaction)
 
-    @discord.ui.button(label="1 / 1", style=discord.ButtonStyle.secondary, disabled=True, custom_id="queue_page", row=0)
-    async def page_indicator(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="queue_next_page", row=0)
-    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.page >= self._page_count() - 1:
-            self._sync_buttons()
-            return await interaction.response.edit_message(
-                embed=make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=self.page),
-                view=self,
-            )
-        self.page += 1
-        self._sync_buttons()
-        await interaction.response.edit_message(
-            embed=make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=self.page),
-            view=self,
-        )
+    async def next_page(self, interaction: discord.Interaction):
+        if self.page < self._page_count() - 1:
+            self.page += 1
+        await self._update(interaction)
 
 #  Player View
 # ─────────────────────────────────────────────
