@@ -1488,6 +1488,144 @@ class VolumeModal(discord.ui.Modal, title="🔊 ปรับระดับเ�
 #  YouTube Radio / Mix Choice View
 # ─────────────────────────────────────────────
 
+class PlaylistChoiceView(discord.ui.LayoutView):
+    """First step for a playlist URL when no active main player can host the controls."""
+
+    def __init__(self, query, playlist_tracks, guild, channel, loop_getter, requester,
+                 source_label="Playlist", parent_view=None):
+        super().__init__(timeout=30)
+        self.query = query
+        self.playlist_tracks = playlist_tracks[:MAX_PLAYLIST_FETCH]
+        self.guild = guild
+        self.channel = channel
+        self.loop_getter = loop_getter
+        self.requester = requester
+        self.source_label = source_label
+        self.parent_view = parent_view
+        self.message = None
+        self._busy = False
+
+        single = discord.ui.Button(
+            label="เล่นเพลงนี้เพลงเดียว", emoji="▶️",
+            style=discord.ButtonStyle.success, custom_id="playlist_play_single",
+        )
+        single.callback = self._play_single
+        more = discord.ui.Button(
+            label="เลือกเพลงเพิ่มเติม", emoji="📋",
+            style=discord.ButtonStyle.primary, custom_id="playlist_choose_more",
+        )
+        more.callback = self._choose_more
+        cancel = discord.ui.Button(
+            label="ยกเลิก", emoji="❌",
+            style=discord.ButtonStyle.danger, custom_id="playlist_choice_cancel",
+        )
+        first_row = discord.ui.ActionRow()
+        first_row.add_item(single)
+        first_row.add_item(more)
+        cancel_row = discord.ui.ActionRow()
+        cancel_row.add_item(cancel)
+        cancel.callback = self._cancel
+        self.add_item(discord.ui.Container(
+            discord.ui.TextDisplay("## 🎵 เลือกเพลงจาก Playlist\nพบรายการเพลงใน Playlist นี้"),
+            first_row,
+            cancel_row,
+            accent_colour=0x5865F2,
+        ))
+
+    async def _check_requester(self, interaction):
+        if interaction.user.id != self.requester.id:
+            await interaction.response.send_message(
+                "❌ เฉพาะผู้ที่ส่งลิงก์เท่านั้นที่เลือกได้", ephemeral=True)
+            return False
+        return True
+
+    async def _connect_voice(self, interaction):
+        vc = self.guild.voice_client
+        if not vc:
+            if not interaction.user.voice:
+                await interaction.followup.send("❌ กรุณาเข้า Voice Channel ก่อน", ephemeral=True)
+                return None
+            vc = await _connect_with_retry(interaction.user.voice.channel)
+        elif interaction.user.voice and interaction.user.voice.channel != vc.channel:
+            await vc.move_to(interaction.user.voice.channel)
+        return vc
+
+    async def _close(self):
+        self.stop()
+        if self.message:
+            try:
+                await self.message.delete()
+            except Exception:
+                try:
+                    await self.message.edit(view=None)
+                except Exception:
+                    pass
+            self.message = None
+
+    async def _play_single(self, interaction: discord.Interaction):
+        if not await self._check_requester(interaction):
+            return
+        if self._busy:
+            return await interaction.response.defer()
+        self._busy = True
+        try:
+            await interaction.response.defer()
+            video_match = (
+                re.search(r"[?&]v=[A-Za-z0-9_-]{6,}", self.query, re.IGNORECASE)
+                or re.search(r"youtu\.be/[A-Za-z0-9_-]{6,}", self.query, re.IGNORECASE)
+                or re.search(r"youtube\.com/(?:shorts|live)/[A-Za-z0-9_-]{6,}", self.query, re.IGNORECASE)
+            )
+            if video_match:
+                url, title, duration, thumbnail = await asyncio.to_thread(
+                    fetch_track, _remove_youtube_list_param(self.query))
+                track = (url, title, duration, self.requester, thumbnail)
+            elif self.playlist_tracks:
+                url, title, duration, thumbnail, *_rest = self.playlist_tracks[0]
+                track = (url, title, duration, self.requester, thumbnail)
+            else:
+                await interaction.followup.send("❌ ไม่พบเพลงที่จะเล่น", ephemeral=True)
+                return
+
+            vc = await self._connect_voice(interaction)
+            if not vc:
+                return
+            await _add_and_play(vc, self.guild, self.channel, self.loop_getter, track)
+            await self._close()
+        except Exception as exc:
+            log("📋 PLAYLIST SINGLE ERROR", interaction, str(exc))
+            try:
+                await interaction.followup.send(
+                    _youtube_blocked_user_message(exc) or "❌ ไม่สามารถเล่นเพลงนี้ได้",
+                    ephemeral=True)
+            except Exception:
+                pass
+        finally:
+            self._busy = False
+
+    async def _choose_more(self, interaction: discord.Interaction):
+        if not await self._check_requester(interaction):
+            return
+        if self._busy:
+            return await interaction.response.defer()
+        await interaction.response.defer()
+        await self._close()
+        count_view = PlaylistCountView(
+            self.playlist_tracks, self.guild, self.channel, self.loop_getter,
+            self.requester, None, parent_view=self, source_label=self.source_label,
+        )
+        prompt = await interaction.followup.send(view=count_view, ephemeral=True, wait=True)
+        count_view.message = prompt
+
+    async def _cancel(self, interaction: discord.Interaction):
+        if not await self._check_requester(interaction):
+            return
+        await interaction.response.defer()
+        await self._close()
+
+    async def on_timeout(self):
+        await self._close()
+
+
 class PlaylistCountView(discord.ui.LayoutView):
     """ให้ผู้ใช้เลือกจำนวนเพลงจาก playlist ที่ตรวจพบจริง (สูงสุด MAX_PLAYLIST_FETCH)."""
 
@@ -1515,16 +1653,10 @@ class PlaylistCountView(discord.ui.LayoutView):
                 f"พบ **{count} เพลง** — เลือกจำนวนที่ต้องการเพิ่มเข้าคิว"
             )
         ]
-        preview = []
-        for pos, track in enumerate(self.playlist_tracks[:5], start=1):
-            _url, title, duration, *_rest = track
-            shown = _truncate_display_width(queue_display_titles.get(_url, title), 72)
-            preview.append(f"{pos}. {discord.utils.escape_markdown(shown)} · {duration}")
-        if preview:
-            parts.append(discord.ui.TextDisplay("\n".join(preview)))
-
-        # Avoid duplicate buttons when the playlist count is exactly 5/10/20/30.
+        # Show fixed choices and the exact count when it is a small non-standard total.
         choices = [n for n in (5, 10, 20, 30) if n < count]
+        if count and count <= 30 and count not in (5, 10, 20, 30):
+            choices.append(count)
         row = discord.ui.ActionRow()
         for amount in choices:
             button = discord.ui.Button(
@@ -1899,18 +2031,18 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                     return
                 source_label = "YouTube Mix" if is_youtube_radio_url(query_str) else "Playlist"
                 if player and player.current_track and await _is_current_player(player):
-                    player.player_menu = "playlist_count"
+                    player.player_menu = "playlist_choice"
                     player.player_menu_tracks = tracks[:MAX_PLAYLIST_FETCH]
+                    player.player_menu_query = query_str
                     player.player_menu_source = source_label
                     player.player_menu_requester = interaction.user
                     player.radio_mix_query = None
                     player.radio_mix_requester = None
                     await _refresh_player(self.guild.id)
                     return
-                count_view = PlaylistCountView(
-                    tracks[:MAX_PLAYLIST_FETCH], self.guild, self.channel,
-                    self.loop_getter, interaction.user, None,
-                    parent_view=None, source_label=source_label,
+                count_view = PlaylistChoiceView(
+                    query_str, tracks[:MAX_PLAYLIST_FETCH], self.guild, self.channel,
+                    self.loop_getter, interaction.user, source_label=source_label,
                 )
                 prompt = await interaction.followup.send(view=count_view, ephemeral=True, wait=True)
                 count_view.message = prompt
@@ -2060,8 +2192,9 @@ class PlaylistImportModal(discord.ui.Modal, title="📋 เพิ่มเพล
             tracks = await asyncio.to_thread(fetch_playlist_tracks, query)
             if not tracks:
                 return await interaction.followup.send("❌ ไม่พบเพลงใน Playlist นี้", ephemeral=True)
-            view.player_menu = "playlist_count"
+            view.player_menu = "playlist_choice"
             view.player_menu_tracks = tracks[:MAX_PLAYLIST_FETCH]
+            view.player_menu_query = query
             view.player_menu_source = "Playlist"
             view.player_menu_requester = interaction.user
             view.radio_mix_query = None
@@ -3132,6 +3265,7 @@ class PlayerView(discord.ui.LayoutView):
         self._radio_mix_busy = False
         self.player_menu: str | None = None
         self.player_menu_tracks: list = []
+        self.player_menu_query: str | None = None
         self.player_menu_source = "Playlist"
         self.player_menu_requester = None
         self.player_menu_busy = False
@@ -3198,19 +3332,17 @@ class PlayerView(discord.ui.LayoutView):
                 f"### 🎶 QUEUE · {self.queue_page + 1}/{total_pages}\n"
                 + ("\n".join(lines) if lines else "_คิวยังว่างอยู่_")
             ))
+        elif self.player_menu == "playlist_choice":
+            parts.append(discord.ui.TextDisplay(
+                "### 🎵 เลือกเพลงจาก Playlist\n"
+                "พบรายการเพลงใน Playlist นี้"
+            ))
         elif self.player_menu == "playlist_count":
             count = min(len(self.player_menu_tracks), MAX_PLAYLIST_FETCH)
             parts.append(discord.ui.TextDisplay(
                 f"### 📋 เลือกจำนวนเพลง · {self.player_menu_source}\n"
                 f"พบ **{count} เพลง** — เลือกจำนวนที่ต้องการเพิ่มเข้าคิว"
             ))
-            preview = []
-            for pos, track in enumerate(self.player_menu_tracks[:5], start=1):
-                track_url, track_title, track_duration, *_ = track
-                shown = _truncate_display_width(queue_display_titles.get(track_url, track_title), 76)
-                preview.append(f"{pos}. {discord.utils.escape_markdown(shown)} · {track_duration}")
-            if preview:
-                parts.append(discord.ui.TextDisplay("\n".join(preview)))
         else:
             hist_start = max(0, idx - 3)
             history_positions = range(idx - 1, hist_start - 1, -1) if q else range(0)
@@ -3252,11 +3384,21 @@ class PlayerView(discord.ui.LayoutView):
             (secondary, "player_stop", None, discord.ButtonStyle.danger, self.stop, "⏹️"),
             (secondary, "player_loop", None, discord.ButtonStyle.secondary, self.loop_btn, "🔁"),
         ]
-        if self.player_menu == "playlist_count":
+        if self.player_menu == "playlist_choice":
+            specs.extend([
+                (tertiary, "playlist_play_single", "เล่นเพลงนี้เพลงเดียว",
+                 discord.ButtonStyle.success, self.play_playlist_single, "▶️"),
+                (tertiary, "playlist_choose_more", "เลือกเพลงเพิ่มเติม",
+                 discord.ButtonStyle.primary, self.choose_more_playlist, "📋"),
+                (quaternary, "playlist_choice_cancel", "ยกเลิก",
+                 discord.ButtonStyle.danger, self.cancel_playlist_choice, "❌"),
+            ])
+        elif self.player_menu == "playlist_count":
             count = min(len(self.player_menu_tracks), MAX_PLAYLIST_FETCH)
-            # Add All already represents the exact count, so avoid duplicate count buttons.
-            fixed_counts = [n for n in (5, 10, 20, 30) if n < count]
-            for index, amount in enumerate(fixed_counts[:4]):
+            choices = [n for n in (5, 10, 20, 30) if n < count]
+            if count and count <= 30 and count not in (5, 10, 20, 30):
+                choices.append(count)
+            for amount in choices[:4]:
                 specs.append((
                     tertiary, f"playlist_count_{amount}", f"{amount} เพลง",
                     discord.ButtonStyle.secondary,
@@ -3311,6 +3453,7 @@ class PlayerView(discord.ui.LayoutView):
     def _clear_menu(self):
         self.player_menu = None
         self.player_menu_tracks = []
+        self.player_menu_query = None
         self.player_menu_source = "Playlist"
         self.player_menu_requester = None
         self.radio_mix_query = None
@@ -3338,6 +3481,81 @@ class PlayerView(discord.ui.LayoutView):
         self.queue_page = min(pages - 1, self.queue_page + 1)
         await interaction.response.defer()
         await _refresh_player(self.guild.id)
+
+    async def cancel_playlist_choice(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _is_current_player(self):
+            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+        requester = self.player_menu_requester
+        if requester and interaction.user.id != requester.id:
+            return await safe_respond(interaction, content="❌ เฉพาะผู้ที่ส่งลิงก์เท่านั้นที่ยกเลิกได้", ephemeral=True)
+        self._clear_menu()
+        await interaction.response.defer()
+        await _refresh_player(self.guild.id)
+
+    async def choose_more_playlist(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _is_current_player(self):
+            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+        requester = self.player_menu_requester
+        if requester and interaction.user.id != requester.id:
+            return await safe_respond(interaction, content="❌ เฉพาะผู้ที่ส่งลิงก์เท่านั้นที่เลือกได้", ephemeral=True)
+        self.player_menu = "playlist_count"
+        await interaction.response.defer()
+        await _refresh_player(self.guild.id)
+
+    async def play_playlist_single(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _is_current_player(self):
+            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+        requester = self.player_menu_requester or interaction.user
+        if interaction.user.id != requester.id:
+            return await safe_respond(interaction, content="❌ เฉพาะผู้ที่ส่งลิงก์เท่านั้นที่เลือกได้", ephemeral=True)
+        if self.player_menu_busy:
+            return await interaction.response.defer()
+        self.player_menu_busy = True
+        try:
+            await interaction.response.defer()
+            query = self.player_menu_query or ""
+            video_match = (
+                re.search(r"[?&]v=[A-Za-z0-9_-]{6,}", query, re.IGNORECASE)
+                or re.search(r"youtu\.be/[A-Za-z0-9_-]{6,}", query, re.IGNORECASE)
+                or re.search(r"youtube\.com/(?:shorts|live)/[A-Za-z0-9_-]{6,}", query, re.IGNORECASE)
+            )
+            if video_match:
+                url, title, duration, thumbnail = await asyncio.to_thread(
+                    fetch_track, _remove_youtube_list_param(query))
+                track = (url, title, duration, requester, thumbnail)
+            elif self.player_menu_tracks:
+                url, title, duration, thumbnail, *_rest = self.player_menu_tracks[0]
+                track = (url, title, duration, requester, thumbnail)
+            else:
+                self._clear_menu()
+                await _refresh_player(self.guild.id)
+                return await interaction.followup.send("❌ ไม่พบเพลงที่จะเล่น", ephemeral=True)
+
+            vc = self.guild.voice_client
+            if not vc:
+                if not requester.voice:
+                    self._clear_menu()
+                    await _refresh_player(self.guild.id)
+                    return await interaction.followup.send("❌ กรุณาเข้า Voice Channel ก่อน", ephemeral=True)
+                vc = await _connect_with_retry(requester.voice.channel)
+            elif requester.voice and requester.voice.channel != vc.channel:
+                await vc.move_to(requester.voice.channel)
+
+            self._clear_menu()
+            await _add_and_play(vc, self.guild, self.channel, self.loop_getter, track)
+            await _refresh_player(self.guild.id)
+            log("📋 PLAYER PLAYLIST SINGLE", interaction, f"title={_trunc(track[1])}")
+        except Exception as exc:
+            log("📋 PLAYER PLAYLIST SINGLE ERROR", interaction, str(exc))
+            try:
+                await interaction.followup.send(
+                    _youtube_blocked_user_message(exc) or "❌ ไม่สามารถเล่นเพลงนี้ได้",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+        finally:
+            self.player_menu_busy = False
 
     async def cancel_playlist_count(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
@@ -3672,8 +3890,9 @@ class PlayerView(discord.ui.LayoutView):
             playlist_tracks = await asyncio.to_thread(fetch_playlist_tracks, query)
             if not playlist_tracks:
                 return await interaction.followup.send("❌ ไม่พบเพลงจาก Radio/Mix นี้", ephemeral=True)
-            self.player_menu = "playlist_count"
+            self.player_menu = "playlist_choice"
             self.player_menu_tracks = playlist_tracks[:MAX_PLAYLIST_FETCH]
+            self.player_menu_query = query
             self.player_menu_source = "Radio/Mix"
             self.player_menu_requester = interaction.user
             self.radio_mix_query = None
@@ -4200,18 +4419,18 @@ def register(tree: app_commands.CommandTree, loop_getter):
                 source_label = "YouTube Mix" if is_youtube_radio_url(query) else "Playlist"
                 player = active_views.get(interaction.guild.id)
                 if player and player.current_track and await _is_current_player(player):
-                    player.player_menu = "playlist_count"
+                    player.player_menu = "playlist_choice"
                     player.player_menu_tracks = playlist_tracks[:MAX_PLAYLIST_FETCH]
+                    player.player_menu_query = query
                     player.player_menu_source = source_label
                     player.player_menu_requester = interaction.user
                     player.radio_mix_query = None
                     player.radio_mix_requester = None
                     await _refresh_player(interaction.guild.id)
                     return
-                count_view = PlaylistCountView(
-                    playlist_tracks[:MAX_PLAYLIST_FETCH], interaction.guild,
-                    interaction.channel, loop_getter, interaction.user, None,
-                    parent_view=None, source_label=source_label,
+                count_view = PlaylistChoiceView(
+                    query, playlist_tracks[:MAX_PLAYLIST_FETCH], interaction.guild,
+                    interaction.channel, loop_getter, interaction.user, source_label=source_label,
                 )
                 prompt = await interaction.followup.send(view=count_view, ephemeral=True, wait=True)
                 count_view.message = prompt
