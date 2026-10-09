@@ -1484,7 +1484,7 @@ The button contract remains:
 
 - Queue Previous (`◀`) and Next (`▶`) must update the component message through `interaction.response.edit_message(...)` in the same interaction; do not defer and then call `edit_original_response(...)`.
 - Recalculate the page count and clamp the current page, then rebuild/synchronize the controls before rendering the embed for that exact page.
-- If the queue has only one page, show no navigation controls at all, including no page indicator.
+- If the queue has only one page, show no navigation controls at all, including no page indicator, and omit `Page 1 / 1` from the embed footer too.
 - If the queue has multiple pages, show `◀`, a disabled page indicator, and `▶`. On the first page, disable only `◀`; on middle pages, keep both arrows enabled; on the final page, disable only `▶`.
 - Queue refreshes caused by playback or queue changes must preserve each user's current page while recalculating the page count and button disabled states.
 
