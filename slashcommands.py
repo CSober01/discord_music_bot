@@ -929,7 +929,9 @@ def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
         else:
             lines.append(f"{line_no:02d} 🎵 {_pad_queue_title(display_title, 31)} `{duration}`")
 
-    lines.append(QUEUE_DIVIDER)
+    # Keep the closing divider only when there is more than one track.
+    if len(q) > 1:
+        lines.append(QUEUE_DIVIDER)
     embed = discord.Embed(
         title="📋  QUEUE",
         description="\n".join(lines),
