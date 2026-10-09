@@ -935,9 +935,14 @@ def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
         description="\n".join(lines),
         color=0x5865F2,
     )
-    embed.set_footer(
-        text=f"Page {page + 1} / {total_pages}  •  {get_total_added(guild_id)} songs  •  กำลังเล่น #{display_no(guild_id, idx)}"
-    )
+    footer_parts = []
+    if total_pages > 1:
+        footer_parts.append(f"Page {page + 1} / {total_pages}")
+    footer_parts.extend([
+        f"{get_total_added(guild_id)} songs",
+        f"กำลังเล่น #{display_no(guild_id, idx)}",
+    ])
+    embed.set_footer(text="  •  ".join(footer_parts))
     return embed
 MAX_TITLE_LOG = 40
 
