@@ -3484,8 +3484,6 @@ class PlayerView(discord.ui.LayoutView):
             button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=cid)
             if cid == "player_queue_page":
                 button.disabled = True
-            if cid in {"playlist_choice_cancel", "playlist_count_cancel", "radio_mix_cancel"}:
-                # Keep Cancel alone on its own row; discord.py buttons have fixed width.
             button.callback = lambda interaction, cb=callback, btn=button: cb(interaction, btn)
             row.add_item(button)
             self._buttons[cid] = button
