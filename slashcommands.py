@@ -1653,8 +1653,11 @@ class RadioChoiceView(discord.ui.View):
             style=discord.ButtonStyle.danger,
             custom_id="youtube_radio_cancel",
             row=1,
-            width=5,
         )
+        try:
+            cancel.width = 5
+        except Exception:
+            pass
         cancel.callback = self.cancel_btn
         self.add_item(cancel)
 
