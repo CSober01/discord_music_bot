@@ -1816,7 +1816,7 @@ class RadioChoiceView(discord.ui.LayoutView):
         self.message = None
         self._busy = False
 
-        # Radio and Mix share the first row; cancel occupies the second row.
+        # Keep Radio and Mix choices together; this view has no cancel button.
         single = discord.ui.Button(
             emoji="🎧",
             label="Radio",
@@ -2026,34 +2026,32 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
             # ตรวจ URL ก่อนเชื่อมต่อ VC เพื่อให้ Radio/Mix แสดงตัวเลือกทันที
             is_url = query_str.startswith("http://") or query_str.startswith("https://")
 
-            # YouTube Mix/Radio links are handled by the playlist-count selector below.
-
-            # Treat playlist and YouTube Mix/Radio URLs alike: select how many tracks to add.
-            if is_url and (is_playlist_url(query_str) or is_youtube_radio_url(query_str)):
-                player = self.player_view or active_views.get(self.guild.id)
+            # Playlist and Radio/Mix menus live in separate ephemeral pages, never inside the player.
+            if is_url and is_youtube_radio_url(query_str):
                 await _ack_done()
                 await self._delete_done_msg()
+                radio_view = RadioChoiceView(
+                    query_str, self.guild, self.channel, self.loop_getter,
+                    interaction.user, self.loop_getter(),
+                )
+                prompt = await interaction.followup.send(view=radio_view, ephemeral=True, wait=True)
+                radio_view.message = prompt
+                return
+
+            if is_url and is_playlist_url(query_str):
+                player = self.player_view or active_views.get(self.guild.id)
+                await self._delete_done_msg()
                 tracks = await asyncio.to_thread(fetch_playlist_tracks, query_str)
+                await _ack_done()
                 if not tracks:
                     await _send_error("❌ ไม่พบเพลงใน Playlist นี้")
                     return
-                source_label = "YouTube Mix" if is_youtube_radio_url(query_str) else "Playlist"
-                if player and player.current_track and await _is_current_player(player):
-                    player.player_menu = "playlist_choice"
-                    player.player_menu_tracks = tracks[:MAX_PLAYLIST_FETCH]
-                    player.player_menu_query = query_str
-                    player.player_menu_source = source_label
-                    player.player_menu_requester = interaction.user
-                    player.radio_mix_query = None
-                    player.radio_mix_requester = None
-                    await _refresh_player(self.guild.id)
-                    return
-                count_view = PlaylistChoiceView(
+                choice_view = PlaylistChoiceView(
                     query_str, tracks[:MAX_PLAYLIST_FETCH], self.guild, self.channel,
-                    self.loop_getter, interaction.user, source_label=source_label,
+                    self.loop_getter, interaction.user, source_label="Playlist", parent_view=player,
                 )
-                prompt = await interaction.followup.send(view=count_view, ephemeral=True, wait=True)
-                count_view.message = prompt
+                prompt = await interaction.followup.send(view=choice_view, ephemeral=True, wait=True)
+                choice_view.message = prompt
                 return
 
             vc = self.guild.voice_client
@@ -2195,6 +2193,18 @@ class PlaylistImportModal(discord.ui.Modal, title="📋 เพิ่มเพล
         view = self.player_view or active_views.get(self.guild.id)
         if not view or not await _is_current_player(view):
             return await interaction.response.send_message("❌ ไม่พบเครื่องเล่นหลักที่ใช้งานอยู่", ephemeral=True)
+
+        if is_youtube_radio_url(query):
+            radio_view = RadioChoiceView(
+                query, self.guild, self.channel, self.loop_getter,
+                interaction.user, self.loop_getter(),
+            )
+            await interaction.response.send_message(view=radio_view, ephemeral=True)
+            try:
+                radio_view.message = await interaction.original_response()
+            except Exception:
+                pass
+            return
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
@@ -2950,7 +2960,6 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
         # Publish each completed batch immediately instead of waiting for the whole playlist.
         await _start_next_queued_track_if_idle(guild, channel)
         await asyncio.gather(
-            _schedule_player_repost(guild.id),
             _refresh_queue_msg(guild.id),
             _refresh_player(guild.id),
         )
@@ -2960,7 +2969,6 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
         playlist_loading_status.pop(guild.id, None)
 
     await asyncio.gather(
-        _schedule_player_repost(guild.id),
         _refresh_queue_msg(guild.id),
         _refresh_player(guild.id),
     )
@@ -4633,35 +4641,32 @@ def register(tree: app_commands.CommandTree, loop_getter):
         try:
             is_url = query.strip().startswith("http://") or query.strip().startswith("https://")
 
-            # YouTube Mix/Radio URLs now use the same playlist-count menu.
-
-            # Treat playlist and YouTube Mix/Radio URLs alike: select how many tracks to add.
-            if is_url and (is_playlist_url(query) or is_youtube_radio_url(query)):
+            # Keep Radio/Mix and Playlist selection in separate pages.
+            if is_url and is_youtube_radio_url(query):
                 await _del_search()
+                radio_view = RadioChoiceView(
+                    query, interaction.guild, interaction.channel,
+                    loop_getter, interaction.user, loop_getter(),
+                )
+                prompt = await interaction.followup.send(view=radio_view, ephemeral=True, wait=True)
+                radio_view.message = prompt
+                return
+
+            if is_url and is_playlist_url(query):
                 playlist_tracks = await asyncio.to_thread(fetch_playlist_tracks, query)
+                await _del_search()
                 if not playlist_tracks:
                     return await interaction.followup.send(
                         embed=discord.Embed(description="❌ ไม่พบเพลงในเพลย์ลิสต์", color=discord.Color.red()),
                         ephemeral=True,
                     )
-                source_label = "YouTube Mix" if is_youtube_radio_url(query) else "Playlist"
-                player = active_views.get(interaction.guild.id)
-                if player and player.current_track and await _is_current_player(player):
-                    player.player_menu = "playlist_choice"
-                    player.player_menu_tracks = playlist_tracks[:MAX_PLAYLIST_FETCH]
-                    player.player_menu_query = query
-                    player.player_menu_source = source_label
-                    player.player_menu_requester = interaction.user
-                    player.radio_mix_query = None
-                    player.radio_mix_requester = None
-                    await _refresh_player(interaction.guild.id)
-                    return
-                count_view = PlaylistChoiceView(
+                choice_view = PlaylistChoiceView(
                     query, playlist_tracks[:MAX_PLAYLIST_FETCH], interaction.guild,
-                    interaction.channel, loop_getter, interaction.user, source_label=source_label,
+                    interaction.channel, loop_getter, interaction.user, source_label="Playlist",
+                    parent_view=active_views.get(interaction.guild.id),
                 )
-                prompt = await interaction.followup.send(view=count_view, ephemeral=True, wait=True)
-                count_view.message = prompt
+                prompt = await interaction.followup.send(view=choice_view, ephemeral=True, wait=True)
+                choice_view.message = prompt
                 return
 
             # OLAK / playlist processing continues with the existing voice connection flow.
