@@ -2,9 +2,10 @@
 
 import asyncio
 import io
+import sys
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import AsyncMock, patch
 
 import slashcommands as sc
@@ -83,6 +84,26 @@ class YouTubeResilienceTests(unittest.TestCase):
             self.assertEqual(sc.get_ydl_options()["sleep_interval_requests"], 2.5)
         with patch.dict("os.environ", {"YTDLP_SLEEP_REQUESTS": "invalid"}):
             self.assertEqual(sc.get_ydl_options()["sleep_interval_requests"], 1.0)
+
+    def test_quiet_ytdlp_suppresses_raw_stderr_but_preserves_exceptions(self):
+        class FakeYoutubeDL:
+            def __init__(self, options):
+                self.options = options
+
+            def to_stderr(self, message):
+                print(message, file=sys.stderr)
+
+            def extract_info(self, query, download=False):
+                raise RuntimeError("Sign in to confirm you're not a bot")
+
+        with patch.object(sc.yt_dlp, "YoutubeDL", FakeYoutubeDL):
+            ydl = sc._quiet_ytdlp({})
+            output = io.StringIO()
+            with redirect_stderr(output):
+                ydl.to_stderr("ERROR: [youtube] noisy message")
+            self.assertEqual(output.getvalue(), "")
+            with self.assertRaisesRegex(RuntimeError, "Sign in to confirm"):
+                ydl.extract_info("https://youtu.be/blocked")
 
     def test_cookie_options_support_browser_and_prefer_explicit_file(self):
         with patch.dict("os.environ", {"YTDLP_COOKIES_FROM_BROWSER": "edge"}, clear=True):
