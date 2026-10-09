@@ -1355,7 +1355,7 @@ The count-selection View must follow these rules:
 3. **Playlist / playback flow ที่มีอยู่**
    - เพลงแรกของ Playlist ถูก fetch และเริ่มเล่นก่อน
    - เพลงที่เหลือถูก fetch ต่อใน background
-   - จำกัด background concurrency ที่ `PLAYLIST_FETCH_CONCURRENCY = 5`
+   - จำกัด background fetch ด้วย `PLAYLIST_FETCH_CONCURRENCY = 4`; ดึง/เพิ่มที่เหลือเป็นชุดละไม่เกิน 4 เพลง พร้อม generation guard ป้องกันงานเก่าเติมคิวหลัง Stop/disconnect
    - มี generation guard ป้องกันงานเก่าจากการเติมเพลงหลัง Stop/disconnect
 
 4. **เอกสารและ acceptance contract**
@@ -1532,7 +1532,7 @@ Page 1 / 1  •  5 songs  •  กำลังเล่น #3
 
 Background playlist fetch must not block playback of the first playable track.
 
-- `PLAYLIST_FETCH_CONCURRENCY = 1` (process-wide); remaining entries wait 5 seconds before each extraction.
+- `PLAYLIST_FETCH_CONCURRENCY = 4` (process-wide across guilds); remaining tracks fetch in batches of up to four and each completed batch is appended to Queue immediately, without an extra five-second inter-track delay.
 - Main Player shows loading status while additional playlist tracks are being fetched:
   `⏳ กำลังโหลดเพลงเพิ่มเติม • X / N`
 - `X` means the number of playlist entries whose fetch attempt has completed, including skipped/failed entries.
@@ -1557,7 +1557,7 @@ This specifically prevents the Next button from remaining disabled after adding 
 | Area | Icon / style |
 |---|---|
 | Main Player header | 🎵 + bold |
-| Current track title | 🎧 + bold |
+| Current track title | Prominent blue Markdown link to the safe YouTube source-page URL; no explicit underline markup |
 | Artist / source | italic |
 | Progress time | bold |
 | History header | 📚 + italic |
@@ -1576,12 +1576,13 @@ Player หลักใช้ `discord.ui.LayoutView` และ `discord.ui.Conta
 แทน Embed + View แบบเดิม เพื่อให้รายการเพลงและปุ่มอยู่ในกรอบ Component เดียวกัน
 
 ลำดับภายใน Container:
-1. Now Playing: ชื่อเพลง, ศิลปิน/แหล่งที่มา, ผู้ขอเพลง, ภาพปกเมื่อมี
-2. แถบเวลาที่แสดงใน Player
-3. แถบ Volume 10 ช่อง โดยไม่แสดงตัวเลขเปอร์เซ็นต์
-4. History 3 เพลงล่าสุด (แต่ระบบ Previous ยังเก็บย้อนหลังสูงสุด 10 เพลง)
-5. Up Next 3 เพลงถัดไป (ไม่จำกัดจำนวนเพลงจริงใน Queue)
-6. ปุ่มควบคุมใน Container: Previous, Pause/Resume, Next, Stop, Repeat, Shuffle, Search, Queue, Volume
+1. Now Playing: ข้อความ NOW PLAYING, ชื่อเพลงเป็น Markdown heading ที่กดเปิดหน้า YouTube ได้เมื่อมี safe source URL, และศิลปิน/แหล่งที่มา
+2. แถบเวลาปัจจุบันและแถบ progress
+3. สถานะ Shuffle/Repeat เมื่อเปิดใช้งานเท่านั้น
+4. Volume meter 10 ช่อง และผู้ขอเพลงคนละบรรทัด
+5. แถวปุ่มที่ 1: Previous, seek back 10 seconds, Pause/Resume, seek forward 10 seconds, Next
+6. แถวปุ่มที่ 2: Search, Queue, Shuffle, Repeat, Stop
+7. History 3 เพลงล่าสุด และ Up Next 3 เพลงถัดไป อยู่ใต้ปุ่มทั้งสองแถว
 
 ### Link behavior
 
@@ -1600,7 +1601,7 @@ Player หลักใช้ `discord.ui.LayoutView` และ `discord.ui.Conta
 - Player คำนวณ elapsed time จาก playback clock และ refresh หน้าจอทุก 10 วินาทีขณะเล่น รวมถึง refresh ทันทีหลังเปลี่ยนเพลง/seek/pause/resume.
 
 
-### Current implementation update — 2026-10-09
+### Current implementation update — 2026-10-10
 
 This section supersedes older UI notes above where they conflict with the implemented interaction.
 
@@ -1609,9 +1610,10 @@ This section supersedes older UI notes above where they conflict with the implem
 - Row 1: Previous, seek back 10 seconds, Pause/Resume, seek forward 10 seconds, Next.
 - The seek buttons use the requested custom emoji IDs: 1455985625097306142 for back 10 seconds and 1455985627714551839 for forward 10 seconds. There is no additional −10s / +10s label.
 - When an emoji is not available to the bot in the current server and external emoji usage is not permitted, the button falls back to a Unicode seek symbol rather than risking the entire Player message failing to send.
-- Row 2: Shuffle, Stop, Repeat. Ordinary controls use Secondary styling; Stop remains Danger styling.
-- Normal shortcut row contains Search, Queue and Volume. Playlist-count and Radio/Mix are opened by their existing commands/flows, not extra Player shortcuts.
-- The History section shows the latest three previous tracks in newest-first order. Previous-track navigation still uses the up-to-10 History entries in Queue state.
+- Row 2: Search, Queue, Shuffle, Repeat, Stop, in that order; exactly two ActionRows with five controls each.
+- Ordinary player controls use Secondary styling rather than blue Primary styling. Stop remains red/Danger. Shuffle and Repeat stay neutral whether on or off; active modes are shown in the status text.
+- The current title is a prominent Markdown heading link when a safe YouTube source URL exists, with no explicit underline markup. Artist/source appears below it, the active playback status appears only when enabled, and the volume meter and requester are separate lines.
+- History (latest three previous tracks, newest first) and Up Next (up to three upcoming tracks) render below both control rows. Previous-track navigation still uses up to 10 retained history entries in Queue state.
 
 #### Queue page
 
@@ -1626,7 +1628,7 @@ This section supersedes older UI notes above where they conflict with the implem
 
 - Playlist choices are 5, 10, 20 and 30 whenever the found count is greater than or equal to that choice. Add All always uses the actual available count capped at 50. The cap applies to selected tracks, not just the button label.
 - The playlist-count submenu has no “กลับเครื่องเล่น” button.
-- Radio/Mix presents ▶️ เล่นเพลงนี้ and 📋 โหลดเพลงจาก Mix side-by-side, then ✖️ ยกเลิก on the second row. Cancel does not add tracks.
+- Radio/Mix presents Radio and Mix choices side-by-side on a separate ephemeral page. Playlist choice and count selection also use separate ephemeral views, not inline player submenus. No Cancel buttons are displayed; unused selection pages close automatically on timeout.
 - The Queue submenu has no Back button; its pager uses arrow-only controls.
 
 #### Playback clock and button-state synchronization
@@ -1645,9 +1647,9 @@ The error “Sign in to confirm you're not a bot” is a YouTube access restrict
 
    On Windows, install Deno in PowerShell using `winget install DenoLand.Deno`, then close/reopen the terminal and verify with `deno --version`. After updating the project dependencies, restart the bot process so the Python process picks up the installed runtime. Official instructions: https://docs.deno.com/runtime/getting_started/installation/
 2. Do not rotate to an alternative YouTube player client after a detected challenge. Stop the blocked request immediately, open the shared cooldown, and avoid additional requests that could worsen rate limiting.
-3. Use yt-dlp's sleep_interval_requests pacing (default 1.0 second between internal extraction requests, configurable with YTDLP_SLEEP_REQUESTS from 0 to 10 seconds). Keep retry counts low, cap simultaneous playlist fetches at four globally across guilds, and apply a 5-second delay before fetching each remaining entry. The first playable track is still started immediately.
+3. Use yt-dlp's sleep_interval_requests pacing (default 1.0 second between internal extraction requests, configurable with YTDLP_SLEEP_REQUESTS from 0 to 10 seconds). Keep retry counts low and fetch remaining playlist entries in batches of up to four globally across guilds, appending each completed batch immediately without an extra five-second gap. The first playable track is still started immediately.
 4. If a challenge or a recognized rate-limit response such as HTTP 429 hits a YouTube search, playlist listing or track fetch, open a shared 600-second (10-minute) circuit breaker. During that window, new YouTube requests fail fast; do not rotate alternate player clients, retry the blocked request, or search replacement titles for a blocked playlist entry.
-5. Playlist entries are fetched sequentially through a semaphore shared by all guilds, with a 5-second pause between entries. If the circuit breaker opens, remaining items are counted as cooldown skips without launching more yt-dlp workers. Worker exceptions are caught and counted so cleanup can finish.
+5. Playlist entries are fetched in batches of up to four through a semaphore shared by all guilds. Each completed batch is appended to Queue and refreshed. If the circuit breaker opens, remaining items are counted as cooldown skips without launching more yt-dlp workers. Worker exceptions are caught and counted so cleanup can finish.
 6. Raw yt-dlp logger output is suppressed so terminal errors cannot append to the carriage-return progress line. The worker still records a short cause in the guild log.
 7. Optional YTDLP_COOKIES_FILE can point to a Netscape/Mozilla-format cookies file on the host. Mount/configure this file outside the repository. Never commit it, print its contents, or paste it into logs. Cookies are sensitive login credentials and can expire. Reference: https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp
 
@@ -1659,7 +1661,7 @@ The error “Sign in to confirm you're not a bot” is a YouTube access restrict
 - [ ] Verify both custom seek emoji render in the target Discord server and seek exactly 10 seconds. If the server cannot use the emojis, verify Unicode fallback.
 - [ ] Verify elapsed time increments every 10 seconds, pauses, resumes, seeks and resets on Next/Previous.
 - [ ] Simulate anti-bot and HTTP 429 errors in track fetch, playlist listing and search; verify the 600-second circuit breaker, no retry/client rotation after a block, and no title-search fallback during a block.
-- [ ] Verify `YTDLP_SLEEP_REQUESTS` is safely parsed and remaining playlist entries are fetched one at a time with a 5-second gap through the process-wide semaphore.
+- [ ] Verify `YTDLP_SLEEP_REQUESTS` is safely parsed and remaining playlist entries are fetched in batches of up to four through the process-wide semaphore, with each completed batch appended and displayed in Queue/Player.
 - [ ] Trigger an anti-bot challenge midway through a playlist and verify remaining entries are marked as cooldown skips, without more extraction attempts or misleading per-track block counts.
 - [ ] Force one background fetch worker to raise unexpectedly and verify the loading status is cleared at completion.
 - [ ] Test all button callbacks in Discord, including Radio/Mix, playlist count, Queue pagination, Stop, and external voice disconnect.
@@ -1683,7 +1685,7 @@ The following scenarios are the acceptance matrix for the playback-race fixes. T
 | F10 — Queue-End then new song | Let Queue finish and issue `/play` before the 5-minute idle timeout | New Player session stays connected and the previous Queue-End task exits without deleting the new Player. |
 | F11 — Shuffle message mapping | Add several tracks, enable Shuffle, and let the shuffled tracks play | Shuffle touches Upcoming only; Queue-add messages remain mapped to their original track and no unrelated message is deleted. |
 | F12 — playlist count choices | Try discovered counts 3, 8, 17, 35, and 120 | Choices follow 3: Add All (3); 8: 5 + Add All (8); 17: 5/10 + Add All (17); 35: 5/10/20/30 + Add All (35); 120 is capped to 50. |
-| F13 — playlist pacing | Load a long playlist | First playable track starts promptly; remaining extraction uses one process-wide worker with a five-second gap; anti-bot cooldown stops further extraction attempts. |
+| F13 — playlist batch pacing | Load a long playlist | First playable track starts promptly; up to four remaining tracks are fetched concurrently per batch and each completed batch is appended to Queue; no added five-second gap; anti-bot cooldown stops further extraction attempts. |
 | F14 — interaction error | Trigger a stale Player or a handler exception | User receives an expired-player/error response where possible; the error is logged and is not silently mistaken for a successful transition. |
 | F15 — Queue pager | Open Queue, page forward/back, then advance playback while the view remains open | Page boundaries stay valid; paging does not change Current; refreshed page reflects the current marker and logical queue number. |
 
