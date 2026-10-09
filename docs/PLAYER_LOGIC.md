@@ -49,13 +49,22 @@ YTDLP_COOKIES_FROM_BROWSER=edge
 
 Supported examples include `edge`, `chrome`, `firefox`, `brave`, and `chromium`. The browser must be installed on the same machine that runs the bot. Depending on browser/OS locking and cookie encryption, extraction may fail; if so, close the browser and retry, or use Option B.
 
-### Option B — exported cookies file
+### Option B — exported cookies file (use if browser access fails)
 
 Set a full path to a Netscape-format YouTube cookies file:
 
 ```dotenv
 YTDLP_COOKIES_FILE=C:/discord-music-bot/cookies.txt
 ```
+
+If the same bot-check keeps happening, refresh the export carefully:
+
+1. Open a **private/incognito** browser window and sign in to YouTube.
+2. In that private session, open YouTube and export only the required YouTube cookies using a reputable Netscape-format cookie exporter.
+3. Close the private window immediately after exporting; do not reopen that session in the browser.
+4. Save the file at the path configured in `YTDLP_COOKIES_FILE`, then restart the bot.
+
+YouTube can rotate account cookies while sessions are active, so an exported file may stop working. Keep the bot and browser on the same network/IP where possible. If the error continues with a fresh cookie file, wait for the cooldown and inspect yt-dlp's verbose diagnostics; cookies cannot guarantee that a blocked IP/session will be accepted. See the [official yt-dlp cookie FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp) and [YouTube cookie export notes](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
 
 When both variables are set, `YTDLP_COOKIES_FILE` takes precedence. If the file is configured but missing or unreadable, yt-dlp will report a file error rather than silently falling back to anonymous access.
 
