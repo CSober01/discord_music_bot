@@ -1448,6 +1448,8 @@ The rules are:
 General rule:
 - An absent section is removed as a complete section; do not leave an empty heading, placeholder, or artificial blank block.
 - When multiple sections are present, preserve the exact ordering and spacing from the approved layout: History → Next → Loading.
+- If History, Next, and Loading are all absent, do not append a second closing divider; the divider immediately below the Main Player is the only divider shown at the bottom.
+- If Loading is rendered, preserve the closing divider after the loading line.
 - The 49-character divider remains unchanged.
 
 ### Main Player buttons
