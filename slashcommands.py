@@ -2824,6 +2824,9 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
     url, title, duration, thumbnail = first_result
     first_added = None
     async with get_queue_lock(guild.id):
+        if fetch_token != playlist_fetch_generation.get(guild.id, 0):
+            return []
+
         track = (url, title, duration, requester, thumbnail)
         track_idx = add_to_queue(guild.id, track)
         current_view = active_views.get(guild.id)
@@ -2968,11 +2971,22 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
         return
 
     async with get_queue_lock(guild.id):
+        # A Stop/disconnect may happen after gather() completes but before this lock
+        # is acquired. Never let a stale background batch repopulate a cleared Queue.
+        if fetch_token != playlist_fetch_generation.get(guild.id, 0):
+            if playlist_loading_status.get(guild.id) is progress:
+                playlist_loading_status.pop(guild.id, None)
+            return
+
         for url, title, duration, thumbnail in fetched:
             track = (url, title, duration, requester, thumbnail)
             add_to_queue(guild.id, track)
             added.append(track)
 
+    # The first track may have finished before the paced background extraction did.
+    # If the Queue is now idle, restart from the first unplayed entry, not the last
+    # appended entry, so delayed playlist results remain playable and in order.
+    await _start_next_queued_track_if_idle(guild, channel)
     await _schedule_player_repost(guild.id)
     await _refresh_queue_msg(guild.id)
 
@@ -3067,6 +3081,86 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
             await _refresh_queue_msg(guild.id)
 
     return track_idx, title
+
+
+async def _start_next_queued_track_if_idle(guild, channel):
+    """Resume at the next unplayed Queue item if a paced Playlist fetch outlives playback."""
+    guild_id = guild.id
+    vc = guild.voice_client
+    if not vc or not vc.is_connected():
+        return False
+
+    old_done = None
+    add_msg = None
+    started = False
+    async with get_queue_lock(guild_id):
+        current_view = active_views.get(guild_id)
+        session_is_active = bool(
+            current_view
+            and current_view.current_track
+            and current_view.player_id == _get_player_session(guild_id)
+        )
+        if session_is_active or vc.is_playing() or vc.is_paused():
+            return False
+
+        q = get_full_queue(guild_id)
+        if not q:
+            return False
+        next_idx = get_now_idx(guild_id) + 1
+        if next_idx >= len(q):
+            return False
+
+        set_now_idx(guild_id, next_idx)
+        _trim_queue(guild_id)
+        next_idx = get_now_idx(guild_id)
+        q = get_full_queue(guild_id)
+        track = q[next_idx]
+        url, _title, _duration, _requester, _thumbnail, *_rest = track
+
+        loop = asyncio.get_running_loop()
+        session_id = _new_player_session(guild_id)
+        view = PlayerView(
+            guild, channel, loop,
+            current_track=track,
+            current_idx=next_idx,
+            loop_getter=lambda: loop,
+            player_id=session_id,
+        )
+        active_views[guild_id] = view
+        source = discord.PCMVolumeTransformer(
+            discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS),
+            volume=get_guild_volume(guild_id),
+        )
+        token = _next_playback_generation(guild_id)
+        _mark_playback_started(guild_id)
+        vc.play(
+            source,
+            after=lambda e, _session_id=session_id, _token=token, _idx=next_idx, _track=track:
+                asyncio.run_coroutine_threadsafe(
+                    play_next(
+                        guild, channel, loop,
+                        current_track=_track,
+                        current_idx=_idx,
+                        error=e,
+                        playback_token=_token,
+                        player_session_id=_session_id,
+                    ),
+                    loop,
+                ),
+        )
+        add_msg = queue_add_msgs.get(guild_id, {}).pop(next_idx, None)
+        old_done = queue_done_msgs.pop(guild_id, None)
+        view.now_playing_msg = await channel.send(view=view)
+        started = True
+
+    if add_msg:
+        asyncio.create_task(_delete_message_quietly(add_msg))
+    if old_done:
+        asyncio.create_task(_delete_message_quietly(old_done))
+    if started:
+        asyncio.create_task(_refresh_player(guild_id))
+        asyncio.create_task(_refresh_queue_msg(guild_id))
+    return started
 
 
 async def _send_playlist_added_summary(guild_id: int, channel, requester, tracks: list):
