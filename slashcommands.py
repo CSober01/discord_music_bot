@@ -1543,7 +1543,25 @@ class PlaylistCountView(discord.ui.LayoutView):
         add_all.callback = self._make_callback(count)
         row.add_item(add_all)
         parts.append(row)
+
+        cancel = discord.ui.Button(
+            label="ยกเลิก",
+            emoji="❌",
+            style=discord.ButtonStyle.danger,
+            custom_id="playlist_count_cancel",
+        )
+        cancel_row = discord.ui.ActionRow()
+        cancel_row.add_item(cancel)
+        cancel.callback = self._cancel_selection
+        parts.append(cancel_row)
         self.add_item(discord.ui.Container(*parts, accent_colour=0x5865F2))
+
+    async def _cancel_selection(self, interaction: discord.Interaction):
+        if interaction.user.id != self.requester.id:
+            return await interaction.response.send_message(
+                "❌ เฉพาะผู้ที่ส่งลิงก์เท่านั้นที่ยกเลิกได้", ephemeral=True)
+        await interaction.response.defer()
+        await self._close()
 
     def _make_callback(self, amount):
         async def callback(interaction: discord.Interaction):
@@ -3251,6 +3269,10 @@ class PlayerView(discord.ui.LayoutView):
                 (lambda interaction, button, selected=count: self.choose_playlist_count(interaction, selected)),
                 "✅",
             ))
+            specs.append((
+                quaternary, "playlist_count_cancel", "ยกเลิก",
+                discord.ButtonStyle.danger, self.cancel_playlist_count, "❌",
+            ))
         elif self.player_menu == "queue":
             total_pages = max(1, (len(q) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
             specs.extend([
@@ -3314,6 +3336,16 @@ class PlayerView(discord.ui.LayoutView):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
         pages = max(1, (len(get_full_queue(self.guild.id)) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
         self.queue_page = min(pages - 1, self.queue_page + 1)
+        await interaction.response.defer()
+        await _refresh_player(self.guild.id)
+
+    async def cancel_playlist_count(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _is_current_player(self):
+            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+        requester = self.player_menu_requester
+        if requester and interaction.user.id != requester.id:
+            return await safe_respond(interaction, content="❌ เฉพาะผู้ที่ส่งลิงก์เท่านั้นที่ยกเลิกได้", ephemeral=True)
+        self._clear_menu()
         await interaction.response.defer()
         await _refresh_player(self.guild.id)
 
