@@ -2773,11 +2773,11 @@ class PlayerView(discord.ui.LayoutView):
             (secondary, "player_shuffle", "🔀", discord.ButtonStyle.secondary, self.shuffle),
             (secondary, "player_stop", "⏹️", discord.ButtonStyle.danger, self.stop),
             (secondary, "player_loop", "🔁", discord.ButtonStyle.secondary, self.loop_btn),
-            (tertiary, "player_search", "🔍 ค้นหา", discord.ButtonStyle.secondary, self.search),
-            (tertiary, "player_playlist_count", "📋 เลือกจำนวนเพลง", discord.ButtonStyle.secondary, self.playlist_count_btn),
-            (tertiary, "player_radio_mix", "📻 Radio / Mix", discord.ButtonStyle.secondary, self.radio_mix_btn),
+            (tertiary, "player_search", "ค้นหา", discord.ButtonStyle.secondary, self.search),
+            (tertiary, "player_playlist_count", "จำนวนเพลง", discord.ButtonStyle.secondary, self.playlist_count_btn),
+            (tertiary, "player_radio_mix", "Radio / Mix", discord.ButtonStyle.secondary, self.radio_mix_btn),
             (tertiary, "player_show_queue", "QUEUE", discord.ButtonStyle.primary, self.show_queue),
-            (tertiary, "player_volume", "🔊 เสียง", discord.ButtonStyle.secondary, self.volume_btn),
+            (tertiary, "player_volume", "เสียง", discord.ButtonStyle.secondary, self.volume_btn),
         ]
         for row, cid, display, style, callback in specs:
             if cid in {"player_seek_back", "player_seek_forward"} or row is tertiary:
