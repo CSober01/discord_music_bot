@@ -6,10 +6,12 @@ This document describes the expected behavior and operational safeguards in `sla
 
 - The elapsed-time display and progress bar refresh every **10 seconds** while Discord reports that audio is playing.
 - Pausing freezes the playback clock; pause/resume refreshes the player immediately.
-- Seek-back and seek-forward buttons move the source position by 10 seconds. The requested custom emoji IDs are:
+- Seek-back and seek-forward buttons move the source position by 10 seconds and display the labels `-10` and `+10` alongside their icons. The requested custom emoji IDs are:
   - Forward 10 seconds: `1455985627714551839`
   - Back 10 seconds: `1455985625097306142`
 - The player uses the custom emoji when it is available in the server or the bot has permission to use external emoji. Otherwise it falls back to Unicode controls so the buttons remain usable.
+- The divider before the controls uses the shared `QUEUE_DIVIDER` constant so its length remains consistent.
+- Radio/Mix choices display `Radio` and `Mix` side by side, with `ยกเลิก` alone on the second row. Playlist count selection shows the number found, a short track preview, count choices and an Add All action in a Components V2 container.
 - A seek replaces the FFmpeg audio source and increments the playback generation. The completion callback from the replaced source must not advance the queue.
 
 ## Queue and playlist behavior
