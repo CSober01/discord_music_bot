@@ -2186,37 +2186,58 @@ def get_queue_lock(guild_id: int) -> asyncio.Lock:
 
 
 
+# YouTube can temporarily block an IP/session with a login or anti-bot challenge.
+# A short circuit breaker prevents every playlist entry from causing another search request.
+_YOUTUBE_ANTI_BOT_COOLDOWN_SECONDS = 180
+_youtube_anti_bot_until = 0.0
+_youtube_anti_bot_lock = threading.Lock()
+
+
 def _is_youtube_anti_bot_error(error: Exception) -> bool:
-    """ตรวจเฉพาะ error ที่บ่งชี้ว่า YouTube ปฏิเสธคำขอจาก bot."""
-    message = str(error).lower()
+    """Detect YouTube login/anti-bot challenges and normalized cooldown errors."""
+    message = str(error).lower().replace("’", "'")
     return (
-        "sign in to confirm you’re not a bot" in message
+        "youtube_anti_bot" in message
         or "sign in to confirm you're not a bot" in message
-        or "confirm you’re not a bot" in message
         or "confirm you're not a bot" in message
         or ("not a bot" in message and "sign in" in message)
+        or "login_required" in message
     )
 
 
-def fetch_track(query: str, anti_bot_retries: int = 1):
-    """ดึงเพลงเดี่ยว พร้อม retry แบบจำกัดเมื่อ YouTube ตอบ anti-bot.
+def fetch_track(query: str, anti_bot_retries: int = 2):
+    """Fetch a track with conservative anti-bot-only client fallback.
 
-    ใช้ YoutubeDL instance ใหม่ในแต่ละ attempt และไม่ใช้ cookies/browser session.
-    สำเร็จตั้งแต่ครั้งแรกจะไม่เสียเวลาเพิ่ม; retry จะเกิดเฉพาะกับ anti-bot error เท่านั้น.
+    The default yt-dlp client is tried first. Only after an anti-bot challenge,
+    use a small alternative-client set. If all attempts fail, pause new extraction
+    requests for 3 minutes instead of flooding YouTube with title-search fallbacks.
     """
-    attempts = max(1, min(anti_bot_retries + 1, 2))
+    global _youtube_anti_bot_until
+    with _youtube_anti_bot_lock:
+        if time.monotonic() < _youtube_anti_bot_until:
+            raise ValueError("YOUTUBE_ANTI_BOT_COOLDOWN")
+
+    clients = [None, "tv", "web_safari"][:max(1, min(anti_bot_retries + 1, 3))]
     last_error = None
-    for attempt in range(attempts):
+    for attempt, client in enumerate(clients):
+        with _youtube_anti_bot_lock:
+            if time.monotonic() < _youtube_anti_bot_until:
+                raise ValueError("YOUTUBE_ANTI_BOT_COOLDOWN")
         try:
-            return _fetch_track_once(query)
+            return _fetch_track_once(query, player_client=client)
         except Exception as error:
             last_error = error
-            if not _is_youtube_anti_bot_error(error) or attempt + 1 >= attempts:
-                break
-            time.sleep(0.8)
+            if not _is_youtube_anti_bot_error(error):
+                raise
+            if attempt + 1 < len(clients):
+                time.sleep(1.0 + attempt)
+
     if last_error is not None and _is_youtube_anti_bot_error(last_error):
+        with _youtube_anti_bot_lock:
+            _youtube_anti_bot_until = time.monotonic() + _YOUTUBE_ANTI_BOT_COOLDOWN_SECONDS
         raise ValueError("YOUTUBE_ANTI_BOT") from last_error
     raise last_error
+
 
 def _fetch_playlist_track_sync(track_info: dict, guild_id: int, guild_name: str):
     """ดึงข้อมูล track เดียวจาก playlist entry (sync, รันใน thread)
@@ -2242,6 +2263,11 @@ def _fetch_playlist_track_sync(track_info: dict, guild_id: int, guild_name: str)
             try:
                 return fetch_track(yt_url), "direct"
             except Exception as e:
+                if _is_youtube_anti_bot_error(e):
+                    glog(guild_id, guild_name,
+                         f"⏸ YouTube ปฏิเสธคำขอ/อยู่ในช่วงพัก ไม่ลองค้นชื่อซ้ำ: {_trunc(orig_title, 40)}",
+                         level="warning", console=False)
+                    return None, "anti_bot"
                 glog(guild_id, guild_name,
                      f"⚠ ดึงตรงไม่ได้ [{_reason(e)}] — ลองหาแทน: {_trunc(orig_title, 40)}",
                      level="warning", console=False)
@@ -2267,6 +2293,11 @@ def _fetch_playlist_track_sync(track_info: dict, guild_id: int, guild_name: str)
 
         return None, "fallback_fail"
     except Exception as e:
+        if _is_youtube_anti_bot_error(e):
+            glog(guild_id, guild_name,
+                 f"⏸ ข้ามรายการชั่วคราวเพราะ YouTube จำกัดคำขอ: {_trunc(orig_title, 40)}",
+                 level="warning", console=False)
+            return None, "anti_bot"
         glog(guild_id, guild_name,
              f"❌ ข้ามเพลง [{_reason(e)}]: {_trunc(orig_title, 40)}",
              level="error", console=False)
@@ -2291,6 +2322,7 @@ class _PlaylistFetchProgress:
         self.fallback_attempts = 0
         self.fallback_ok = 0
         self.skipped = 0
+        self.anti_bot_blocks = 0
         self._last_line_len = 0
 
     def _p(self, msg: str):
@@ -2310,6 +2342,9 @@ class _PlaylistFetchProgress:
         elif outcome == "fallback_ok":
             self.fallback_attempts += 1
             self.fallback_ok += 1
+        elif outcome == "anti_bot":
+            self.skipped += 1
+            self.anti_bot_blocks += 1
         else:  # fallback_fail
             self.fallback_attempts += 1
             self.skipped += 1
@@ -2319,11 +2354,14 @@ class _PlaylistFetchProgress:
             parts.append(f"ทดแทน {self.fallback_ok}/{self.fallback_attempts}")
         if self.skipped:
             parts.append(f"ข้าม {self.skipped}")
+        if self.anti_bot_blocks:
+            parts.append(f"YouTube จำกัด {self.anti_bot_blocks}")
         self._p(" · ".join(parts))
 
     def print_summary(self):
         self._p(f"โหลดครบ {self.done}/{self.total} "
-                f"(ตรงสำเร็จ {self.direct_ok} · ทดแทน {self.fallback_ok}/{self.fallback_attempts} · ข้ามจริง {self.skipped})")
+                f"(ตรงสำเร็จ {self.direct_ok} · ทดแทน {self.fallback_ok}/{self.fallback_attempts} "
+                f"· ข้าม {self.skipped} · YouTube จำกัด {self.anti_bot_blocks})")
         print()  # ขึ้นบรรทัดใหม่จริง ปิดท้าย progress bar ก่อน log ถัดไป
 
 
@@ -2365,7 +2403,18 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
 
     if not first_result:
         progress.print_summary()
-        return []  # ดึงไม่สำเร็จสักเพลงเลยในทั้งเพลย์ลิสต์
+        if playlist_loading_status.get(guild.id) is progress:
+            playlist_loading_status.pop(guild.id, None)
+        await _refresh_player(guild.id)
+        if progress.anti_bot_blocks:
+            message = "❌ YouTube จำกัดคำขอชั่วคราว จึงยังโหลดเพลงจากรายการนี้ไม่ได้ ลองใหม่หลังจาก 3 นาที หรือกำหนด YTDLP_COOKIES_FILE ในเครื่องที่รันบอท"
+        else:
+            message = "❌ ไม่พบเพลงที่เล่นได้จากรายการนี้"
+        try:
+            await channel.send(message)
+        except Exception:
+            pass
+        return []
 
     # ── step 2: เพิ่มเพลงแรกเข้าคิว + เล่นทันที ──
     url, title, duration, thumbnail = first_result
@@ -2449,9 +2498,17 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
 
     async def _fetch_one(track_info):
         async with sem:
-            result, outcome = await asyncio.to_thread(_fetch_playlist_track_sync, track_info, guild.id, guild.name)
+            try:
+                result, outcome = await asyncio.to_thread(
+                    _fetch_playlist_track_sync, track_info, guild.id, guild.name
+                )
+            except Exception as exc:
+                glog(guild.id, guild.name,
+                     f"❌ งานดึงเพลงล้มเหลวโดยไม่คาดคิด: {type(exc).__name__}",
+                     level="error", console=False)
+                result, outcome = None, "fallback_fail"
             progress.record(outcome)
-            if progress.done % 5 == 0:
+            if progress.done % 5 == 0 or progress.done == progress.total:
                 await _refresh_player(guild.id)
             return result
 
