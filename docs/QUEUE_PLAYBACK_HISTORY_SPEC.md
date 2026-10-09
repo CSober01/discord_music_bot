@@ -842,7 +842,8 @@ State change
 → render Main Player
 → render Queue Page ที่เปิดอยู่
 → sync button state
-→ edit Discord messages
+→ edit existing messages for ordinary state changes
+→ for Queue additions, debounce rapid updates then delete and repost the Main Player once
 
 ห้าม:
 - update UI ก่อน source state เสร็จ
