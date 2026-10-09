@@ -102,6 +102,7 @@ queue_done_msgs: dict[int, object] = {}
 queue_add_msgs: dict[int, dict[int, object]] = {}
 queue_view_msgs: dict[tuple[int, int], tuple[object, "QueueView"]] = {}
 search_result_msgs: dict[int, list] = {}
+player_repost_tasks: dict[int, asyncio.Task] = {}
 
 # เก็บชื่อแบบสั้นสำหรับแสดงใน Queue โดยผูกกับ stream URL
 # ไม่แก้ title ต้นฉบับ เพื่อให้หน้าผลการค้นหายังแสดงชื่อวิดีโอเต็มเหมือนเดิม
@@ -153,6 +154,7 @@ loop_modes: dict[int, str] = {}
 shuffle_enabled: set[int] = set()
 QUEUE_PAGE_SIZE = 20
 QUEUE_DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+PLAYER_PROGRESS_BAR = "━━━━━━━━●━━━━━━━━"
 
 HISTORY_LIMIT = 10  # เก็บเพลงที่เล่นไปแล้วล่าสุดเพื่อ Previous
 MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
@@ -740,12 +742,14 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         f"{QUEUE_DIVIDER}\n\n"
         f"🎧 **{display_title}**\n"
         f"    *{_truncate_display_width(artist, 44)} • YouTube*\n\n"
-        f"    **0:00** ━━━━━━━━━━━━━━━━━━━━━ **{duration}**\n\n"
+        f"    **0:00** {PLAYER_PROGRESS_BAR} **{duration}**\n\n"
     )
 
     if guild_id is not None:
         volume_pct = round(get_guild_volume(guild_id) * 100)
-        embed.description += f"    👤 {requester_str}          🔊 {volume_pct}%\n"
+        volume_filled = max(0, min(10, round(volume_pct / 10)))
+        volume_bar = "▰" * volume_filled + "▱" * (10 - volume_filled)
+        embed.description += f"    👤 {requester_str}          🔊 {volume_pct}%  {volume_bar}\n"
 
         status_lines = []
         if guild_id in shuffle_enabled:
@@ -773,7 +777,7 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
                 url, track_title, track_duration, _requester, *_rest = track
                 queue_title = _truncate_display_width(queue_display_titles.get(url, track_title), 31)
                 queue_lines.append(
-                    f"{display_no(guild_id, offset):02d} 🎵 {_pad_queue_title(queue_title, 31)} `{track_duration}`"
+                    f"{display_no(guild_id, offset):02d} ♫ {_pad_queue_title(queue_title, 31)} `{track_duration}`"
                 )
 
         if upcoming:
@@ -784,7 +788,7 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
                 url, track_title, track_duration, _requester, *_rest = track
                 queue_title = _truncate_display_width(queue_display_titles.get(url, track_title), 31)
                 queue_lines.append(
-                    f"{display_no(guild_id, offset):02d} 🎵 {_pad_queue_title(queue_title, 31)} `{track_duration}`"
+                    f"{display_no(guild_id, offset):02d} ♫ {_pad_queue_title(queue_title, 31)} `{track_duration}`"
                 )
 
         loading = playlist_loading_status.get(guild_id)
@@ -1057,8 +1061,8 @@ async def _is_current_player(view: "PlayerView") -> bool:
         and active_views.get(view.guild.id) is view
     )
 
-async def _refresh_player(guild_id: int):
-    """Refresh the existing Player message with the latest guild state."""
+async def _refresh_player(guild_id: int, repost: bool = False):
+    """Refresh the Player; repost=True deletes the old message before sending the new one."""
     view = active_views.get(guild_id)
     if not view or not view.current_track:
         return False
@@ -1082,6 +1086,14 @@ async def _refresh_player(guild_id: int):
             _queue_pos_str(guild_id, get_now_idx(guild_id)),
         )
 
+        if repost and view.now_playing_msg:
+            old_message = view.now_playing_msg
+            view.now_playing_msg = None
+            try:
+                await old_message.delete()
+            except Exception:
+                pass
+
         if view.now_playing_msg:
             try:
                 await view.now_playing_msg.edit(embed=embed, view=view)
@@ -1093,6 +1105,25 @@ async def _refresh_player(guild_id: int):
         return True
     except Exception:
         return False
+async def _schedule_player_repost(guild_id: int, delay: float = 0.8):
+    """Coalesce rapid Queue additions into one Player repost, avoiding message spam."""
+    previous_task = player_repost_tasks.get(guild_id)
+    if previous_task and not previous_task.done():
+        previous_task.cancel()
+
+    async def _run():
+        try:
+            await asyncio.sleep(delay)
+            await _refresh_player(guild_id, repost=True)
+        except asyncio.CancelledError:
+            return
+        finally:
+            if player_repost_tasks.get(guild_id) is asyncio.current_task():
+                player_repost_tasks.pop(guild_id, None)
+
+    player_repost_tasks[guild_id] = asyncio.create_task(_run())
+
+
 async def _delete_search_result_msgs(guild_id: int):
     msgs = search_result_msgs.pop(guild_id, [])
     if not msgs:
@@ -2194,7 +2225,7 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
             # เพลงแรกของชุดนี้ถูกต่อท้ายคิวอยู่แล้ว ต้องนำไปแสดงใน summary
             # ร่วมกับเพลงที่ background fetch เพิ่มภายหลังด้วย
             first_added = track
-            await _refresh_player(guild.id)
+            await _schedule_player_repost(guild.id)
             await _refresh_queue_msg(guild.id)
 
     # ── step 3: ดึงเพลงที่เหลือ (ถ้ามี) แบบ concurrent ใน background — ไม่บล็อกการเล่นเพลงแรก ──
@@ -2263,7 +2294,7 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
             track = (url, title, duration, requester, thumbnail)
             add_to_queue(guild.id, track)
             added.append(track)
-        await _refresh_player(guild.id)
+        await _schedule_player_repost(guild.id)
         await _refresh_queue_msg(guild.id)
 
     if playlist_loading_status.get(guild.id) is progress:
@@ -2288,7 +2319,7 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
                 description=f"📋 เพิ่มใน Queue **#{pos}**\n🎵 {short_title}  |  ขอโดย: {requester.mention}",
                 color=0x1a1a2e))
             queue_add_msgs.setdefault(guild.id, {})[track_idx] = pub_msg
-            await _refresh_player(guild.id)
+            await _schedule_player_repost(guild.id)
             await _refresh_queue_msg(guild.id)
         else:
             set_now_idx(guild.id, track_idx)
