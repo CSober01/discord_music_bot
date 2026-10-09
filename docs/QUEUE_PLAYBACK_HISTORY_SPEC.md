@@ -1650,7 +1650,7 @@ The error “Sign in to confirm you're not a bot” is a YouTube access restrict
 
 #### Regression checklist before merge
 
-- [ ] Run python -m py_compile slashcommands.py bot.py.
+- [ ] Run python -m unittest discover -s tests -v, then run python -m py_compile slashcommands.py bot.py.
 - [ ] With 0, 1, 10, 11, 20 and 21 tracks, check Queue pager states and page content.
 - [ ] With 4, 5, 11, 25, 48 and 80 found tracks, check count buttons and the 50-track cap.
 - [ ] Verify both custom seek emoji render in the target Discord server and seek exactly 10 seconds. If the server cannot use the emojis, verify Unicode fallback.
