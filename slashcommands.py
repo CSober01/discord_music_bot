@@ -334,8 +334,8 @@ def _bounded_float_env(name: str, default: float, minimum: float, maximum: float
     return max(minimum, min(value, maximum))
 
 
-def get_ydl_options(include_playlist: bool = False, player_client: str | None = None) -> dict:
-    """Build shared yt-dlp options with optional secret cookies and per-attempt client fallback."""
+def get_ydl_options(include_playlist: bool = False) -> dict:
+    """Build shared yt-dlp options with optional cookies and conservative request pacing."""
     opts = {
         "format": "bestaudio/best",
         "quiet": True,
@@ -363,8 +363,6 @@ def get_ydl_options(include_playlist: bool = False, player_client: str | None = 
         opts["cookiefile"] = cookies_file
     elif cookies_browser in {"brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale"}:
         opts["cookiesfrombrowser"] = (cookies_browser, None, None, None)
-    if player_client:
-        opts.setdefault("extractor_args", {}).setdefault("youtube", {})["player_client"] = [player_client]
     opts["noplaylist"] = not include_playlist
     return opts
 
@@ -695,7 +693,7 @@ def fetch_playlist_tracks(query: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> l
 
     return tracks
 
-def _fetch_track_once(query: str, player_client: str | None = None):
+def _fetch_track_once(query: str):
     """ดึงข้อมูล single track
     รองรับ: YouTube URLs, Spotify Track URLs, Search queries
     """
@@ -709,7 +707,7 @@ def _fetch_track_once(query: str, player_client: str | None = None):
                 search_query = f"{track_info['title']} {track_info['artist']}"
                 print(f"  {'🎵 Spotify→YT':<13}: {track_info['title']} — {track_info['artist']}")
                 
-                opts = get_ydl_options(include_playlist=False, player_client=player_client)
+                opts = get_ydl_options(include_playlist=False)
                 opts["socket_timeout"] = 30
                 opts["retries"] = 2
                 opts["fragment_retries"] = 2
@@ -745,7 +743,7 @@ def _fetch_track_once(query: str, player_client: str | None = None):
     if "spotify.com" in query.lower():
         raise ValueError("SPOTIFY_UNSUPPORTED_LINK")
     
-    opts = get_ydl_options(include_playlist=False, player_client=player_client)
+    opts = get_ydl_options(include_playlist=False)
     opts["socket_timeout"] = 30
     opts["retries"] = 2
     opts["fragment_retries"] = 2
