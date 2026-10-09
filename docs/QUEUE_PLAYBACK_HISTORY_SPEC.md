@@ -1653,13 +1653,38 @@ The error “Sign in to confirm you're not a bot” is a YouTube access restrict
 
 #### Regression checklist before merge
 
-- [ ] Run python -m unittest discover -s tests -v, then run python -m py_compile slashcommands.py bot.py.
+- [ ] This branch intentionally has no automated tests/workflow. Run `python -m py_compile slashcommands.py bot.py`, then execute the manual regression scenarios in Section 51 before merging.
 - [ ] With 0, 1, 10, 11, 20 and 21 tracks, check Queue pager states and page content.
 - [ ] With 4, 5, 11, 25, 48 and 80 found tracks, check count buttons and the 50-track cap.
 - [ ] Verify both custom seek emoji render in the target Discord server and seek exactly 10 seconds. If the server cannot use the emojis, verify Unicode fallback.
 - [ ] Verify elapsed time increments every 10 seconds, pauses, resumes, seeks and resets on Next/Previous.
 - [ ] Simulate anti-bot and HTTP 429 errors in track fetch, playlist listing and search; verify the 600-second circuit breaker, no retry/client rotation after a block, and no title-search fallback during a block.
-- [ ] Verify sleep_interval_requests defaults to 1.0 second, YTDLP_SLEEP_REQUESTS is safely parsed, and a 5-second delay before each remaining entry and a shared four-slot semaphore limit concurrent fetches across guilds.
+- [ ] Verify `YTDLP_SLEEP_REQUESTS` is safely parsed and remaining playlist entries are fetched one at a time with a 5-second gap through the process-wide semaphore.
 - [ ] Trigger an anti-bot challenge midway through a playlist and verify remaining entries are marked as cooldown skips, without more extraction attempts or misleading per-track block counts.
 - [ ] Force one background fetch worker to raise unexpectedly and verify the loading status is cleared at completion.
 - [ ] Test all button callbacks in Discord, including Radio/Mix, playlist count, Queue pagination, Stop, and external voice disconnect.
+
+
+## 51. Playback-flow regression scenarios (manual Discord verification)
+
+The following scenarios are the acceptance matrix for the playback-race fixes. They are documented for manual verification; the repository's automated `tests/` directory and GitHub Actions workflow were intentionally removed, so these cases must not be described as automated or live-tested.
+
+| Scenario | Action | Expected result |
+|---|---|---|
+| F1 — initial playback | `/play` one track, then add two more | First track starts; two tracks append to Upcoming; no track is skipped if VoiceClient briefly reports idle during its completion callback. |
+| F2 — Previous then Next | With at least three tracks, move from B to A, then Next | Current returns to B; no duplicate queue item is appended and logical numbers do not change. |
+| F3 — previous at oldest retained history | Advance beyond 11 played tracks, then repeatedly Previous | Last 10 prior tracks are retained; earlier trimmed tracks are absent from both player History and queue state; an extra Previous is rejected. |
+| F4 — completion callback races Previous | At song end, click Previous while the completion callback is pending | A callback with an old generation/session/index is ignored after it obtains the Queue lock; it cannot advance over the selected track. |
+| F5 — rapid navigation | Quickly alternate Previous, Skip, and seek while audio is transitioning | Relative navigation is resolved from the current index under lock; stale callbacks cannot change Current after a newer source starts. |
+| F6 — seek boundary | Seek backward near 0, forward near the end, and seek as a track ends | Position clamps to valid bounds; seek does not append a track or allow its replaced source callback to advance Queue. |
+| F7 — Repeat Track | Enable Repeat Track and allow a song to finish | The same Queue entry plays again; Queue length and logical numbers remain unchanged. |
+| F8 — Repeat Queue | Enable Repeat Queue and finish the last retained/upcoming entry | Playback returns to the first entry still present in Queue; trimmed history is not resurrected. |
+| F9 — stop / disconnect race | Stop or disconnect as a callback is pending, then start a new `/play` | Old session callbacks are ignored; the old 5-minute Queue-End timer cannot disconnect the new playback. |
+| F10 — Queue-End then new song | Let Queue finish and issue `/play` before the 5-minute idle timeout | New Player session stays connected and the previous Queue-End task exits without deleting the new Player. |
+| F11 — Shuffle message mapping | Add several tracks, enable Shuffle, and let the shuffled tracks play | Shuffle touches Upcoming only; Queue-add messages remain mapped to their original track and no unrelated message is deleted. |
+| F12 — playlist count choices | Try discovered counts 3, 8, 17, 35, and 120 | Choices follow 3: Add All (3); 8: 5 + Add All (8); 17: 5/10 + Add All (17); 35: 5/10/20/30 + Add All (35); 120 is capped to 50. |
+| F13 — playlist pacing | Load a long playlist | First playable track starts promptly; remaining extraction uses one process-wide worker with a five-second gap; anti-bot cooldown stops further extraction attempts. |
+| F14 — interaction error | Trigger a stale Player or a handler exception | User receives an expired-player/error response where possible; the error is logged and is not silently mistaken for a successful transition. |
+| F15 — Queue pager | Open Queue, page forward/back, then advance playback while the view remains open | Page boundaries stay valid; paging does not change Current; refreshed page reflects the current marker and logical queue number. |
+
+**Manual verification status:** pending a live run in the target Discord server. Static source review and the code-level race guards alone do not prove Discord/VoiceClient runtime behavior.
