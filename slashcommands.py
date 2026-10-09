@@ -3157,15 +3157,12 @@ class QueueView(discord.ui.View):
 # ─────────────────────────────────────────────
 
 def _player_seek_emoji(guild: discord.Guild, emoji_id: int, name: str, fallback: str):
-    """Use requested server emoji when accessible; otherwise retain functional Unicode controls."""
+    """Use the existing image-based custom emoji for seek controls."""
     found = guild.get_emoji(emoji_id)
     if found is not None:
         return found
-    bot_member = getattr(guild, "me", None)
-    permissions = getattr(bot_member, "guild_permissions", None)
-    if permissions and getattr(permissions, "use_external_emojis", False):
-        return discord.PartialEmoji(name=name, id=emoji_id)
-    return fallback
+    # Keep the existing custom-emoji image instead of falling back to Unicode.
+    return discord.PartialEmoji(name=name, id=emoji_id)
 
 
 class PlayerQueueView(discord.ui.LayoutView):
