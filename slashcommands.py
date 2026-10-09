@@ -3249,7 +3249,8 @@ class PlayerView(discord.ui.LayoutView):
             ])
         elif self.player_menu == "playlist_count":
             count = min(len(self.player_menu_tracks), MAX_PLAYLIST_FETCH)
-            fixed_counts = [n for n in (5, 10, 20, 30) if n <= count]
+            # Add All already represents the exact count, so avoid duplicate count buttons.
+            fixed_counts = [n for n in (5, 10, 20, 30) if n < count]
             for index, amount in enumerate(fixed_counts[:4]):
                 specs.append((
                     tertiary, f"playlist_count_{amount}", f"{amount} เพลง",
