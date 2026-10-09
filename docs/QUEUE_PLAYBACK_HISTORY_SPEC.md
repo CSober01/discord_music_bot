@@ -1604,9 +1604,11 @@ Player หลักใช้ `discord.ui.LayoutView` และ `discord.ui.Conta
 - The live Player message uses Discord Components V2; it is not a preview-only mockup.
 - Control row 1: Previous, seek −10 seconds, Pause/Resume, seek +10 seconds, Next.
 - Control row 2: Shuffle, Stop, Repeat.
-- Control row 3: Search, Playlist count, YouTube Radio/Mix, QUEUE, Volume.
-- The Playlist count action accepts a YouTube playlist URL, fetches available tracks, then shows count choices based on tracks actually found.
-- The Radio/Mix action accepts a YouTube Radio/Mix URL and opens the existing single-track or load-from-Mix choices.
-- QUEUE opens the current queue view. Volume opens the volume control modal.
+- The normal third row uses compact icon-only shortcuts for Search, Playlist, Radio/Mix, Queue and Volume. Do not turn menu headings into text buttons.
+- After a Playlist URL is provided, show the found-track count, preview and quantity-choice buttons inside the same Player container.
+- After a Radio/Mix URL is provided, show the “play this track” and “load tracks from Mix” choices inside the same Player container. Loading a Mix changes that in-player panel to the quantity selector.
+- The Queue shortcut changes the content area of the same Player to a paginated queue list; Previous/Next page and Back controls stay in that container.
+- Keep the two primary playback-control rows visible while an in-player submenu is open.
+- Volume opens the volume control modal.
 - Show current playback time and a proportional progress bar, refreshed while audio is playing.
 - Avoid decorative separator lines inside the player container; keep song titles clickable only when a safe YouTube page URL is available.
