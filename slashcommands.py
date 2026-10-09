@@ -1117,10 +1117,12 @@ async def _player_progress_loop(guild_id: int):
                 break
             if vc and vc.is_playing():
                 await _refresh_player(guild_id, _from_progress=True)
+            elif not vc or not vc.is_paused():
+                break
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        log("🎵 PLAYER PROGRESS ERROR", None, str(exc))
+        print(f"[PLAYER PROGRESS ERROR] guild={guild_id}: {exc}")
     finally:
         task = asyncio.current_task()
         if _player_progress_tasks.get(guild_id) is task:
