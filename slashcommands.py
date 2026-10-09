@@ -114,6 +114,11 @@ queue_watch_urls: dict[str, str] = {}
 # จะถูกล้างกลับเป็นค่า default ทุกครั้งที่บอท disconnect ออกจาก VC (ดู clear_guild)
 guild_volumes: dict[int, float] = {}
 
+# Playback clock for the seek controls. Offset is the source position in seconds;
+# started_at is None while paused.
+playback_seek_offsets: dict[int, float] = {}
+playback_started_at: dict[int, float | None] = {}
+
 # guild_stopped  = หยุดจงใจ (⏹ stop / /stop) → play_next ต้องหยุด
 # Playback generation per guild. Delayed callbacks from older sources are ignored.
 guild_stopped: set[int] = set()
@@ -175,6 +180,25 @@ def set_now_idx(guild_id: int, idx: int):
 
 def get_guild_volume(guild_id: int) -> float:
     return guild_volumes.get(guild_id, DEFAULT_VOLUME)
+
+def _mark_playback_started(guild_id: int, offset: float = 0.0):
+    playback_seek_offsets[guild_id] = max(0.0, offset)
+    playback_started_at[guild_id] = time.monotonic()
+
+def _playback_position(guild_id: int) -> float:
+    offset = playback_seek_offsets.get(guild_id, 0.0)
+    started_at = playback_started_at.get(guild_id)
+    return offset + max(0.0, time.monotonic() - started_at) if started_at is not None else offset
+
+def _duration_seconds(value) -> float:
+    try:
+        parts = [int(part) for part in str(value).split(":")]
+        total = 0
+        for part in parts:
+            total = total * 60 + part
+        return float(max(0, total))
+    except (TypeError, ValueError):
+        return 0.0
 
 def set_guild_volume(guild_id: int, vol: float):
     guild_volumes[guild_id] = vol
@@ -247,6 +271,8 @@ def clear_guild(guild_id: int):
     queue_seq_offset[guild_id] = 0
     guild_total_added[guild_id] = 0
     guild_volumes.pop(guild_id, None)
+    playback_seek_offsets.pop(guild_id, None)
+    playback_started_at.pop(guild_id, None)
     loop_modes.pop(guild_id, None)
     shuffle_enabled.discard(guild_id)
     guild_stopped.discard(guild_id)
@@ -2205,6 +2231,7 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
             )
             active_views[guild.id] = view
             token = _next_playback_generation(guild.id)
+            _mark_playback_started(guild.id)
             vc.play(
                 source,
                 after=lambda e, _session_id=session_id, _t=track, _ti=track_idx, _token=token:
@@ -2341,6 +2368,7 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
             active_views[guild.id] = view
             _g, _ch, _lp, _t, _ti = guild, channel, loop, track, track_idx
             token = _next_playback_generation(guild.id)
+            _mark_playback_started(guild.id)
             vc.play(
                 source,
                 after=lambda e, g=_g, ch=_ch, lp=_lp, t=_t, ti=_ti,
@@ -2442,6 +2470,7 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
         # Generate a unique token before stopping the old source.
         token = _next_playback_generation(guild_id)
         vc.stop()
+        _mark_playback_started(guild_id)
         vc.play(
             source,
             after=lambda e, _session_id=session_id, _token=token, _idx=idx, _track=track:
@@ -2598,8 +2627,6 @@ class PlayerView(discord.ui.LayoutView):
         if repeat == "track": status.append("🔂 วนเพลงนี้")
         elif repeat == "queue": status.append("🔁 วน Queue")
         if status: parts.append(discord.ui.TextDisplay(" · ".join(status)))
-        parts.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small))
-
         hist_start = max(0, idx - 3)
         history = q[hist_start:idx] if q else []
         hist_lines = []
@@ -2608,8 +2635,6 @@ class PlayerView(discord.ui.LayoutView):
             shown = _truncate_display_width(queue_display_titles.get(track_url, track_title), 70)
             hist_lines.append(f"{display_no(gid, pos):02d} ♫ {_player_track_link(track_url, shown)} · `{track_duration}`")
         parts.append(discord.ui.TextDisplay("**HISTORY**\n" + ("\n".join(hist_lines) if hist_lines else "_ยังไม่มีประวัติเพลง_")))
-        parts.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small))
-
         next_start = idx + 1
         upcoming = q[next_start:next_start + 3] if q else []
         next_lines = []
@@ -2622,24 +2647,30 @@ class PlayerView(discord.ui.LayoutView):
         if loading and loading.done < loading.total:
             parts.append(discord.ui.TextDisplay(f"⏳ กำลังโหลดเพลงเพิ่มเติม · {loading.done}/{loading.total}"))
 
-        primary, secondary = discord.ui.ActionRow(), discord.ui.ActionRow()
+        primary, secondary, tertiary = (
+            discord.ui.ActionRow(), discord.ui.ActionRow(), discord.ui.ActionRow()
+        )
         specs = [
-            (primary,"player_previous","⏮️",discord.ButtonStyle.secondary,self.previous),
-            (primary,"player_pause_resume","⏸️",discord.ButtonStyle.secondary,self.pause_resume),
-            (primary,"player_skip","⏭️",discord.ButtonStyle.secondary,self.skip),
-            (primary,"player_stop","⏹️",discord.ButtonStyle.danger,self.stop),
-            (primary,"player_loop","🔁",discord.ButtonStyle.secondary,self.loop_btn),
-            (secondary,"player_shuffle","🔀",discord.ButtonStyle.secondary,self.shuffle),
-            (secondary,"player_search","🔍",discord.ButtonStyle.secondary,self.search),
-            (secondary,"player_show_queue","📋",discord.ButtonStyle.primary,self.show_queue),
-            (secondary,"player_volume","🔊",discord.ButtonStyle.secondary,self.volume_btn),
+            (primary, "player_previous", "⏮️", discord.ButtonStyle.secondary, self.previous),
+            (primary, "player_seek_back", "−10s", discord.ButtonStyle.secondary, self.seek_back),
+            (primary, "player_pause_resume", "⏸️", discord.ButtonStyle.secondary, self.pause_resume),
+            (primary, "player_seek_forward", "+10s", discord.ButtonStyle.secondary, self.seek_forward),
+            (primary, "player_skip", "⏭️", discord.ButtonStyle.secondary, self.skip),
+            (secondary, "player_shuffle", "🔀", discord.ButtonStyle.secondary, self.shuffle),
+            (secondary, "player_stop", "⏹️", discord.ButtonStyle.danger, self.stop),
+            (secondary, "player_loop", "🔁", discord.ButtonStyle.secondary, self.loop_btn),
+            (tertiary, "player_search", "🔍", discord.ButtonStyle.secondary, self.search),
+            (tertiary, "player_show_queue", "📋", discord.ButtonStyle.primary, self.show_queue),
+            (tertiary, "player_volume", "🔊", discord.ButtonStyle.secondary, self.volume_btn),
         ]
         for row, cid, emoji, style, callback in specs:
-            button = discord.ui.Button(emoji=emoji, style=style, custom_id=cid)
+            label = emoji if cid in {"player_seek_back", "player_seek_forward"} else None
+            button = discord.ui.Button(emoji=None if label else emoji, label=label,
+                                       style=style, custom_id=cid)
             button.callback = lambda interaction, cb=callback, btn=button: cb(interaction, btn)
             row.add_item(button)
             self._buttons[cid] = button
-        parts.extend((discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),primary,secondary))
+        parts.extend((primary, secondary, tertiary))
         self.add_item(discord.ui.Container(*parts, accent_colour=0x5865F2))
         self._sync_state_buttons()
 
@@ -2702,9 +2733,12 @@ class PlayerView(discord.ui.LayoutView):
         vc = self.guild.voice_client
         title = _trunc(self.current_track[1]) if self.current_track else "?"
         if vc.is_playing():
+            playback_seek_offsets[self.guild.id] = _playback_position(self.guild.id)
+            playback_started_at[self.guild.id] = None
             vc.pause()
             log("⏸ PAUSE", interaction, f"Track: {title}")
         elif vc.is_paused():
+            playback_started_at[self.guild.id] = time.monotonic()
             vc.resume()
             log("▶️ RESUME", interaction, f"Track: {title}")
         else:
@@ -2714,6 +2748,67 @@ class PlayerView(discord.ui.LayoutView):
             _refresh_player(self.guild.id),
             _refresh_queue_msg(self.guild.id),
         )
+
+    async def seek_back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._seek_by(interaction, -10)
+
+    async def seek_forward(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._seek_by(interaction, 10)
+
+    async def _seek_by(self, interaction: discord.Interaction, delta: float):
+        if not await _is_current_player(self):
+            return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+        if not await check_in_voice(interaction):
+            return
+        try:
+            await interaction.response.defer()
+        except Exception:
+            pass
+
+        vc = self.guild.voice_client
+        if not vc or not self.current_track or not (vc.is_playing() or vc.is_paused()):
+            return await safe_respond(interaction, content="❌ ไม่มีเพลงที่กำลังเล่นอยู่", ephemeral=True)
+
+        url, title, duration, *_ = self.current_track
+        current_position = _playback_position(self.guild.id)
+        max_position = max(0.0, _duration_seconds(duration) - 1.0)
+        target = max(0.0, min(max_position, current_position + delta))
+        was_paused = vc.is_paused()
+        source = discord.PCMVolumeTransformer(
+            discord.FFmpegPCMAudio(
+                url,
+                before_options=f"-ss {target:.2f} {FFMPEG_OPTIONS['before_options']}",
+                options=FFMPEG_OPTIONS["options"],
+            ),
+            volume=get_guild_volume(self.guild.id),
+        )
+        session_id = _get_player_session(self.guild.id)
+        idx = get_now_idx(self.guild.id)
+        track = self.current_track
+        token = _next_playback_generation(self.guild.id)
+        vc.stop()
+        _mark_playback_started(guild_id)
+        vc.play(
+            source,
+            after=lambda e, _session_id=session_id, _token=token, _idx=idx, _track=track:
+                asyncio.run_coroutine_threadsafe(
+                    play_next(
+                        self.guild, self.channel, self.loop,
+                        current_track=_track,
+                        current_idx=_idx,
+                        error=e,
+                        playback_token=_token,
+                        player_session_id=_session_id,
+                    ),
+                    self.loop,
+                ),
+        )
+        playback_seek_offsets[self.guild.id] = target
+        playback_started_at[self.guild.id] = None if was_paused else time.monotonic()
+        if was_paused:
+            vc.pause()
+        log("⏩ SEEK", interaction, f"Track: {_trunc(title, 60)}, position={target:.1f}s")
+        await _refresh_player(self.guild.id)
 
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
@@ -3025,6 +3120,7 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             if not session_id:
                 return
 
+            _mark_playback_started(guild.id)
             guild.voice_client.play(
                 source,
                 after=lambda e, _session_id=session_id, _token=token, _idx=next_idx, _track=track:
@@ -3068,6 +3164,7 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             if not session_id:
                 return
 
+            _mark_playback_started(guild.id)
             guild.voice_client.play(
                 source,
                 after=lambda e, _session_id=session_id, _token=token, _idx=next_idx, _track=track:
