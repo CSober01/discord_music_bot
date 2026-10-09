@@ -4159,15 +4159,24 @@ def register(tree: app_commands.CommandTree, loop_getter):
                         return await interaction.followup.send(embed=discord.Embed(
                             description="❌ ไม่สามารถดึงข้อมูลจาก Spotify ได้\n\n💡 ลองอีกครั้ง หรือค้นหาเพลงด้วยชื่อแทน",
                             color=discord.Color.red()), ephemeral=True)
+                    elif _youtube_blocked_user_message(e):
+                        return await interaction.followup.send(embed=discord.Embed(
+                            description=_youtube_blocked_user_message(e), color=discord.Color.orange()),
+                            ephemeral=True)
                     else:
                         return await interaction.followup.send(embed=discord.Embed(
                             description="❌ ไม่สามารถโหลดเพลย์ลิสต์", color=discord.Color.red()), ephemeral=True)
                     
                 except Exception as e:
-                    print(f"Playlist error: {str(e)}")
+                    print(
+                        "Playlist extraction failed "
+                        f"({'anti-bot' if _is_youtube_anti_bot_error(e) else type(e).__name__})"
+                    )
                     await _del_search()
                     return await interaction.followup.send(embed=discord.Embed(
-                        description="❌ ไม่สามารถโหลดเพลย์ลิสต์", color=discord.Color.red()), ephemeral=True)
+                        description=_youtube_blocked_user_message(e) or "❌ ไม่สามารถโหลดเพลย์ลิสต์",
+                        color=discord.Color.orange() if _youtube_blocked_user_message(e) else discord.Color.red()
+                    ), ephemeral=True)
 
             # Handle Single Track URL or Spotify Track
             if is_url:
@@ -4214,13 +4223,13 @@ def register(tree: app_commands.CommandTree, loop_getter):
         except Exception as e:
             err = str(e)
             ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            if "Sign in" in err or "cookies" in err.lower():
+            if _youtube_blocked_user_message(e) or "Sign in" in err or "cookies" in err.lower():
                 print(
                     f"[{ts}] ⚠ /play — YouTube bot detection (ต้องการ cookies)\n"
                     f"  {'Query':<9}: {_trunc(query, 60)}\n"
                     f"  {'Hint':<9}: ใช้ --cookies-from-browser หรือ export cookies ให้ yt-dlp"
                 )
-                msg_text = "❌ YouTube บล็อกการเข้าถึง กรุณาลองใหม่อีกครั้ง"
+                msg_text = _youtube_blocked_user_message(e) or "❌ YouTube บล็อกการเข้าถึง กรุณาลองใหม่อีกครั้ง"
             else:
                 print(
                     f"[{ts}] ✗ /play\n"
