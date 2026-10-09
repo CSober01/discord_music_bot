@@ -1645,9 +1645,9 @@ The error “Sign in to confirm you're not a bot” is a YouTube access restrict
 
    On Windows, install Deno in PowerShell using `winget install DenoLand.Deno`, then close/reopen the terminal and verify with `deno --version`. After updating the project dependencies, restart the bot process so the Python process picks up the installed runtime. Official instructions: https://docs.deno.com/runtime/getting_started/installation/
 2. Keep yt-dlp's default YouTube client as the first attempt. Only after a detected challenge, allow at most one alternative-client attempt (tv). Do not cycle through multiple clients for each blocked playlist entry.
-3. Use yt-dlp's sleep_interval_requests pacing (default 1.0 second between extraction requests, configurable with YTDLP_SLEEP_REQUESTS from 0 to 10 seconds). Keep retry counts low and playlist fetch concurrency at 1 to reduce avoidable request bursts.
+3. Use yt-dlp's sleep_interval_requests pacing (default 1.0 second between internal extraction requests, configurable with YTDLP_SLEEP_REQUESTS from 0 to 10 seconds). Keep retry counts low, serialize playlist fetches across all guilds, and wait 5 seconds between remaining playlist entries. The first playable track is still started immediately.
 4. If a challenge or a recognized rate-limit response such as HTTP 429 hits a YouTube search, playlist listing or track fetch, open a shared 180-second circuit breaker. During that window, new YouTube requests fail fast instead of retrying playlist items or searching replacement titles.
-5. Playlist fetch concurrency is limited to 1. A failure in one worker is caught and counted, so asyncio.gather can finish cleanup and clear the loading status rather than leaving the Player stuck.
+5. Playlist entries are fetched sequentially through a semaphore shared by all guilds, with a 5-second pause between entries. If the circuit breaker opens, remaining items are counted as cooldown skips without launching more yt-dlp workers. Worker exceptions are caught and counted so cleanup can finish.
 6. Raw yt-dlp logger output is suppressed so terminal errors cannot append to the carriage-return progress line. The worker still records a short cause in the guild log.
 7. Optional YTDLP_COOKIES_FILE can point to a Netscape/Mozilla-format cookies file on the host. Mount/configure this file outside the repository. Never commit it, print its contents, or paste it into logs. Cookies are sensitive login credentials and can expire. Reference: https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp
 
@@ -1659,6 +1659,7 @@ The error “Sign in to confirm you're not a bot” is a YouTube access restrict
 - [ ] Verify both custom seek emoji render in the target Discord server and seek exactly 10 seconds. If the server cannot use the emojis, verify Unicode fallback.
 - [ ] Verify elapsed time increments every 10 seconds, pauses, resumes, seeks and resets on Next/Previous.
 - [ ] Simulate anti-bot and HTTP 429 errors in track fetch, playlist listing and search; verify the 180-second circuit breaker, at most one alternate client, and no title-search fallback during a block.
-- [ ] Verify sleep_interval_requests defaults to 1.0 second and YTDLP_SLEEP_REQUESTS is safely parsed; confirm raw ERROR: text never interleaves with progress.
+- [ ] Verify sleep_interval_requests defaults to 1.0 second, YTDLP_SLEEP_REQUESTS is safely parsed, and a 5-second inter-track pause serializes fetches across guilds.
+- [ ] Trigger an anti-bot challenge midway through a playlist and verify remaining entries are marked as cooldown skips, without more extraction attempts or misleading per-track block counts.
 - [ ] Force one background fetch worker to raise unexpectedly and verify the loading status is cleared at completion.
 - [ ] Test all button callbacks in Discord, including Radio/Mix, playlist count, Queue pagination, Stop, and external voice disconnect.
