@@ -789,8 +789,8 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
     if q:
         current_idx = max(0, min(current_idx, len(q) - 1))
 
-    history_start = max(0, current_idx - HISTORY_LIMIT)
-    history = q[history_start:current_idx] if q else []
+    history_start = max(0, current_idx - 3)
+    history = list(range(current_idx - 1, history_start - 1, -1)) if q else []
     upcoming_start = current_idx + 1
     upcoming = q[upcoming_start:upcoming_start + 5] if q else []
 
@@ -848,8 +848,8 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         queue_lines = []
         if history:
             queue_lines.append("📚 *History*")
-            for offset, track in enumerate(history, start=history_start):
-                url, track_title, track_duration, _requester, *_rest = track
+            for offset in history:
+                url, track_title, track_duration, _requester, *_rest = q[offset]
                 queue_title = _truncate_display_width(queue_display_titles.get(url, track_title), 31)
                 queue_lines.append(
                     f"{display_no(guild_id, offset):02d} ♫ {_pad_queue_title(queue_title, 31)} `{track_duration}`"
@@ -1455,7 +1455,7 @@ class PlaylistCountView(discord.ui.View):
         for index, amount in enumerate(choices[:-1]):
             button = discord.ui.Button(
                 label=str(amount),
-                style=discord.ButtonStyle.primary if index == 0 else discord.ButtonStyle.secondary,
+                style=discord.ButtonStyle.secondary,
                 custom_id=f"playlist_count_{amount}",
             )
             button.callback = self._make_callback(amount)
@@ -1569,7 +1569,7 @@ class RadioChoiceView(discord.ui.View):
         single = discord.ui.Button(
             emoji="▶️",
             label="เล่นเพลงนี้เท่านั้น",
-            style=discord.ButtonStyle.primary,
+            style=discord.ButtonStyle.secondary,
             custom_id="youtube_radio_single",
         )
         single.callback = self.single_btn
@@ -2818,6 +2818,114 @@ class QueueView(discord.ui.View):
 #  Player View
 # ─────────────────────────────────────────────
 
+def _player_seek_emoji(guild: discord.Guild, emoji_id: int, name: str, fallback: str):
+    """Use requested server emoji when accessible; otherwise retain functional Unicode controls."""
+    found = guild.get_emoji(emoji_id)
+    if found is not None:
+        return found
+    bot_member = getattr(guild, "me", None)
+    permissions = getattr(bot_member, "guild_permissions", None)
+    if permissions and getattr(permissions, "use_external_emojis", False):
+        return discord.PartialEmoji(name=name, id=emoji_id)
+    return fallback
+
+
+class PlayerQueueView(discord.ui.LayoutView):
+    """Ephemeral Components V2 Queue with 10 tracks/page and artwork beside each row."""
+
+    def __init__(self, guild: discord.Guild, requester_id: int, page: int = 0):
+        super().__init__(timeout=180)
+        self.guild = guild
+        self.requester_id = requester_id
+        self.page = page
+        self._build_layout()
+
+    def _build_layout(self):
+        self.clear_items()
+        gid = self.guild.id
+        queue = get_full_queue(gid)
+        total_pages = max(1, (len(queue) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
+        self.page = max(0, min(self.page, total_pages - 1))
+        start = self.page * QUEUE_PAGE_SIZE
+        page_tracks = queue[start:start + QUEUE_PAGE_SIZE]
+        parts = [discord.ui.TextDisplay(
+            f"## 🎶 QUEUE · หน้า {self.page + 1}/{total_pages}\nมีทั้งหมด **{len(queue)} เพลง**"
+        )]
+
+        if not page_tracks:
+            parts.append(discord.ui.TextDisplay("_คิวยังว่างอยู่_"))
+        else:
+            current_idx = get_now_idx(gid)
+            for pos, track in enumerate(page_tracks, start=start):
+                track_url, title, duration, requester, thumbnail, *_rest = track
+                shown = _truncate_display_width(queue_display_titles.get(track_url, title), 84)
+                title_link = _player_track_link(track_url, shown)
+                requester_name = (
+                    getattr(requester, "display_name", None)
+                    or getattr(requester, "name", None)
+                    or "ไม่ทราบชื่อ"
+                )
+                requester_name = discord.utils.escape_markdown(str(requester_name))
+                if pos == current_idx:
+                    line = (
+                        f"▶️ **{display_no(gid, pos):02d}. กำลังเล่น**\n"
+                        f"**{title_link} · {duration}**\n"
+                        f"👤 {requester_name}"
+                    )
+                else:
+                    line = (
+                        f"♫ **{display_no(gid, pos):02d}.** {title_link}\n"
+                        f"👤 {requester_name} · {duration}"
+                    )
+                if isinstance(thumbnail, str) and thumbnail.startswith(("https://", "http://")):
+                    parts.append(discord.ui.Section(
+                        discord.ui.TextDisplay(line),
+                        accessory=discord.ui.Thumbnail(
+                            thumbnail, description=f"ปกเพลง {_truncate_display_width(shown, 60)}"
+                        ),
+                    ))
+                else:
+                    parts.append(discord.ui.TextDisplay(line))
+
+        # Always show the pager, with both arrows disabled for a one-page or empty Queue.
+        row = discord.ui.ActionRow()
+        previous = discord.ui.Button(
+            label="◀", style=discord.ButtonStyle.secondary,
+            custom_id="player_queue_prev_page", disabled=self.page <= 0,
+        )
+        previous.callback = self.previous_page
+        indicator = discord.ui.Button(
+            label=f"หน้า {self.page + 1}/{total_pages}",
+            style=discord.ButtonStyle.secondary, custom_id="player_queue_page_indicator",
+            disabled=True,
+        )
+        next_button = discord.ui.Button(
+            label="▶", style=discord.ButtonStyle.secondary,
+            custom_id="player_queue_next_page", disabled=self.page >= total_pages - 1,
+        )
+        next_button.callback = self.next_page
+        row.add_item(previous)
+        row.add_item(indicator)
+        row.add_item(next_button)
+        parts.append(row)
+        self.add_item(discord.ui.Container(*parts, accent_colour=0x5865F2))
+
+    async def _change_page(self, interaction: discord.Interaction, delta: int):
+        self.page += delta
+        self._build_layout()
+        await interaction.response.edit_message(view=self)
+        player_queue_view_msgs[(self.guild.id, self.requester_id)] = (interaction.message, self)
+
+    async def previous_page(self, interaction: discord.Interaction):
+        await self._change_page(interaction, -1)
+
+    async def next_page(self, interaction: discord.Interaction):
+        await self._change_page(interaction, 1)
+
+    async def on_timeout(self):
+        player_queue_view_msgs.pop((self.guild.id, self.requester_id), None)
+
+
 class PlayerView(discord.ui.LayoutView):
     def __init__(self, guild, channel, loop, current_track=None, current_idx=None, loop_getter=None,
                  player_id=None):
@@ -2920,10 +3028,10 @@ class PlayerView(discord.ui.LayoutView):
             parts.append(discord.ui.TextDisplay("### 📻 YouTube Radio / Mix\nต้องการเล่นแบบไหน?"))
         else:
             hist_start = max(0, idx - 3)
-            history = q[hist_start:idx] if q else []
+            history_positions = range(idx - 1, hist_start - 1, -1) if q else range(0)
             hist_lines = []
-            for pos, track in enumerate(history, start=hist_start):
-                track_url, track_title, track_duration, *_ = track
+            for pos in history_positions:
+                track_url, track_title, track_duration, *_ = q[pos]
                 shown = _truncate_display_width(queue_display_titles.get(track_url, track_title), 70)
                 hist_lines.append(f"{display_no(gid, pos):02d} ♫ {_player_track_link(track_url, shown)} · {track_duration}")
             parts.append(discord.ui.TextDisplay("**HISTORY**\n" + ("\n".join(hist_lines) if hist_lines else "_ยังไม่มีประวัติเพลง_")))
@@ -2946,9 +3054,11 @@ class PlayerView(discord.ui.LayoutView):
         )
         specs = [
             (primary, "player_previous", None, discord.ButtonStyle.secondary, self.previous, "⏮️"),
-            (primary, "player_seek_back", "−10s", discord.ButtonStyle.secondary, self.seek_back, None),
+            (primary, "player_seek_back", None, discord.ButtonStyle.secondary, self.seek_back,
+             _player_seek_emoji(self.guild, 1455985625097306142, "backward10", "⏪")),
             (primary, "player_pause_resume", None, discord.ButtonStyle.secondary, self.pause_resume, "⏸️"),
-            (primary, "player_seek_forward", "+10s", discord.ButtonStyle.secondary, self.seek_forward, None),
+            (primary, "player_seek_forward", None, discord.ButtonStyle.secondary, self.seek_forward,
+             _player_seek_emoji(self.guild, 1455985627714551839, "forward10", "⏩")),
             (primary, "player_skip", None, discord.ButtonStyle.secondary, self.skip, "⏭️"),
             (secondary, "player_shuffle", None, discord.ButtonStyle.secondary, self.shuffle, "🔀"),
             (secondary, "player_stop", None, discord.ButtonStyle.danger, self.stop, "⏹️"),
@@ -2956,9 +3066,9 @@ class PlayerView(discord.ui.LayoutView):
         ]
         if self.player_menu == "radio":
             specs.extend([
-                (tertiary, "radio_mix_single", "เล่นเพลงนี้", discord.ButtonStyle.primary, self.radio_mix_single, "▶️"),
+                (tertiary, "radio_mix_single", "เล่นเพลงนี้", discord.ButtonStyle.secondary, self.radio_mix_single, "▶️"),
                 (tertiary, "radio_mix_load", "โหลดเพลงจาก Mix", discord.ButtonStyle.secondary, self.radio_mix_load, "📋"),
-                (tertiary, "radio_mix_cancel", "ยกเลิก", discord.ButtonStyle.danger, self.radio_mix_cancel, "✖️"),
+                (quaternary, "radio_mix_cancel", "ยกเลิก", discord.ButtonStyle.danger, self.radio_mix_cancel, "✖️"),
             ])
         elif self.player_menu == "playlist_count":
             count = min(len(self.player_menu_tracks), MAX_PLAYLIST_FETCH)
@@ -2966,7 +3076,7 @@ class PlayerView(discord.ui.LayoutView):
             for index, amount in enumerate(fixed_counts[:4]):
                 specs.append((
                     tertiary, f"playlist_count_{amount}", f"{amount} เพลง",
-                    discord.ButtonStyle.primary if index == 0 else discord.ButtonStyle.secondary,
+                    discord.ButtonStyle.secondary,
                     (lambda interaction, button, selected=amount: self.choose_playlist_count(interaction, selected)),
                     None,
                 ))
@@ -2976,31 +3086,30 @@ class PlayerView(discord.ui.LayoutView):
                 (lambda interaction, button, selected=count: self.choose_playlist_count(interaction, selected)),
                 "✅",
             ))
-            specs.append((
-                quaternary, "player_menu_back", "กลับเครื่องเล่น",
-                discord.ButtonStyle.secondary, self.menu_back, "↩️",
-            ))
         elif self.player_menu == "queue":
             total_pages = max(1, (len(q) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
             specs.extend([
-                (tertiary, "player_queue_previous", "ก่อนหน้า", discord.ButtonStyle.secondary, self.queue_previous_page, "◀️"),
-                (tertiary, "player_queue_page", f"{self.queue_page + 1}/{total_pages}", discord.ButtonStyle.secondary, self.menu_back, None),
-                (tertiary, "player_queue_next", "ถัดไป", discord.ButtonStyle.secondary, self.queue_next_page, "▶️"),
-                (tertiary, "player_menu_back", "กลับ", discord.ButtonStyle.secondary, self.menu_back, "↩️"),
+                (tertiary, "player_queue_previous", None, discord.ButtonStyle.secondary, self.queue_previous_page, "◀"),
+                (tertiary, "player_queue_page", f"หน้า {self.queue_page + 1}/{total_pages}", discord.ButtonStyle.secondary, self.menu_back, None),
+                (tertiary, "player_queue_next", None, discord.ButtonStyle.secondary, self.queue_next_page, "▶"),
             ])
         else:
             # Short icon shortcuts open a menu; the menu title and its child buttons render here.
             specs.extend([
                 (tertiary, "player_search", None, discord.ButtonStyle.secondary, self.search, "🔍"),
-                (tertiary, "player_playlist_count", None, discord.ButtonStyle.secondary, self.playlist_count_btn, "📋"),
-                (tertiary, "player_radio_mix", None, discord.ButtonStyle.secondary, self.radio_mix_btn, "📻"),
-                (tertiary, "player_show_queue", None, discord.ButtonStyle.secondary, self.show_queue, "🎶"),
+                (tertiary, "player_show_queue", None, discord.ButtonStyle.secondary, self.show_queue, "📋"),
                 (tertiary, "player_volume", None, discord.ButtonStyle.secondary, self.volume_btn, "🔊"),
             ])
         for row, cid, label, style, callback, emoji in specs:
             button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=cid)
             if cid == "player_queue_page":
                 button.disabled = True
+            if cid == "radio_mix_cancel":
+                # This button is alone in the second row, using the full row width when supported.
+                try:
+                    button.width = 5
+                except Exception:
+                    pass
             button.callback = lambda interaction, cb=callback, btn=button: cb(interaction, btn)
             row.add_item(button)
             self._buttons[cid] = button
@@ -3404,12 +3513,15 @@ class PlayerView(discord.ui.LayoutView):
     async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
-        self.player_menu = "queue"
-        self.queue_page = get_now_idx(self.guild.id) // QUEUE_PAGE_SIZE if get_full_queue(self.guild.id) else 0
-        self.radio_mix_query = None
-        self.radio_mix_requester = None
-        await interaction.response.defer()
-        await _refresh_player(self.guild.id)
+        queue = get_full_queue(self.guild.id)
+        page = get_now_idx(self.guild.id) // QUEUE_PAGE_SIZE if queue else 0
+        queue_view = PlayerQueueView(self.guild, interaction.user.id, page=page)
+        await interaction.response.send_message(view=queue_view, ephemeral=True)
+        try:
+            message = await interaction.original_response()
+            player_queue_view_msgs[(self.guild.id, interaction.user.id)] = (message, queue_view)
+        except Exception:
+            pass
 
     async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
