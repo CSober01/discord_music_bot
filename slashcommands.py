@@ -625,11 +625,15 @@ def fetch_playlist_tracks(query: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> l
     # Spotify URL รูปแบบอื่นที่ไม่รองรับ
     if "spotify.com" in query.lower():
         raise ValueError("SPOTIFY_DRM_ERROR")
-    
+
+    # Share the cooldown with single-track and search extraction to avoid repeated blocked requests.
+    if _is_youtube_cooldown_active():
+        raise ValueError("YOUTUBE_ANTI_BOT_COOLDOWN")
+
     opts = get_ydl_options(include_playlist=True)
     opts["socket_timeout"] = 30
-    opts["retries"] = 5
-    opts["fragment_retries"] = 5
+    opts["retries"] = 3
+    opts["fragment_retries"] = 3
     opts["playlistend"] = max_tracks
     opts["extract_flat"] = "in_playlist"
     
@@ -656,9 +660,10 @@ def fetch_playlist_tracks(query: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> l
                 tracks.append(track_info)
     except Exception as e:
         if _is_youtube_anti_bot_error(e):
+            _activate_youtube_anti_bot_cooldown()
             raise ValueError("YOUTUBE_ANTI_BOT") from e
         raise
-    
+
     return tracks
 
 def _fetch_track_once(query: str, player_client: str | None = None):
@@ -734,12 +739,15 @@ def _fetch_track_once(query: str, player_client: str | None = None):
         raise
 
 def search_tracks(query: str, limit: int = 5):
+    if _is_youtube_cooldown_active():
+        return []
+
     opts = get_ydl_options(include_playlist=False)
     opts["extract_flat"] = "in_playlist"
     opts["default_search"] = "ytsearch5"
     opts["socket_timeout"] = 30
-    opts["retries"] = 5
-    opts["fragment_retries"] = 5
+    opts["retries"] = 3
+    opts["fragment_retries"] = 3
     results = []
     
     try:
@@ -758,10 +766,12 @@ def search_tracks(query: str, limit: int = 5):
                         "duration": duration,
                     })
     except Exception as e:
+        if _is_youtube_anti_bot_error(e):
+            _activate_youtube_anti_bot_cooldown()
         logging.getLogger("yt_dlp").warning(
             "YouTube search failed (%s)", "anti-bot" if _is_youtube_anti_bot_error(e) else type(e).__name__
         )
-    
+
     return results
 
 async def send_search_results(results, guild, channel, loop, loop_getter, requester,
@@ -2236,6 +2246,22 @@ def _is_youtube_anti_bot_error(error: Exception) -> bool:
     )
 
 
+def _is_youtube_cooldown_active() -> bool:
+    """Return whether the shared YouTube anti-bot circuit breaker is still open."""
+    with _youtube_anti_bot_lock:
+        return time.monotonic() < _youtube_anti_bot_until
+
+
+def _activate_youtube_anti_bot_cooldown():
+    """Open/extend the shared circuit breaker after any YouTube anti-bot challenge."""
+    global _youtube_anti_bot_until
+    with _youtube_anti_bot_lock:
+        _youtube_anti_bot_until = max(
+            _youtube_anti_bot_until,
+            time.monotonic() + _YOUTUBE_ANTI_BOT_COOLDOWN_SECONDS,
+        )
+
+
 def fetch_track(query: str, anti_bot_retries: int = 2):
     """Fetch a track with conservative anti-bot-only client fallback.
 
@@ -2243,18 +2269,15 @@ def fetch_track(query: str, anti_bot_retries: int = 2):
     use a small alternative-client set. If all attempts fail, pause new extraction
     requests for 3 minutes instead of flooding YouTube with title-search fallbacks.
     """
-    global _youtube_anti_bot_until
-    with _youtube_anti_bot_lock:
-        if time.monotonic() < _youtube_anti_bot_until:
-            raise ValueError("YOUTUBE_ANTI_BOT_COOLDOWN")
+    if _is_youtube_cooldown_active():
+        raise ValueError("YOUTUBE_ANTI_BOT_COOLDOWN")
 
     clients = [None, "tv", "web_safari"][:max(1, min(anti_bot_retries + 1, 3))]
     last_error = None
     saw_anti_bot = False
     for attempt, client in enumerate(clients):
-        with _youtube_anti_bot_lock:
-            if time.monotonic() < _youtube_anti_bot_until:
-                raise ValueError("YOUTUBE_ANTI_BOT_COOLDOWN")
+        if _is_youtube_cooldown_active():
+            raise ValueError("YOUTUBE_ANTI_BOT_COOLDOWN")
         try:
             return _fetch_track_once(query, player_client=client)
         except Exception as error:
@@ -2270,8 +2293,7 @@ def fetch_track(query: str, anti_bot_retries: int = 2):
                 time.sleep(1.0 + attempt)
 
     if saw_anti_bot:
-        with _youtube_anti_bot_lock:
-            _youtube_anti_bot_until = time.monotonic() + _YOUTUBE_ANTI_BOT_COOLDOWN_SECONDS
+        _activate_youtube_anti_bot_cooldown()
         raise ValueError("YOUTUBE_ANTI_BOT") from last_error
     raise last_error
 
