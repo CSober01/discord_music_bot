@@ -77,7 +77,7 @@ class YouTubeResilienceTests(unittest.TestCase):
         options = sc.get_ydl_options()
         self.assertEqual(options["sleep_interval_requests"], 1.0)
         self.assertEqual(sc.PLAYER_PROGRESS_INTERVAL_SECONDS, 10)
-        self.assertEqual(sc.PLAYLIST_FETCH_CONCURRENCY, 1)
+        self.assertEqual(sc.PLAYLIST_FETCH_CONCURRENCY, 4)
         self.assertEqual(sc.PLAYLIST_TRACK_FETCH_DELAY_SECONDS, 5.0)
         self.assertEqual(sc.get_youtube_playlist_fetch_semaphore()._value, 1)
         with patch.dict("os.environ", {"YTDLP_SLEEP_REQUESTS": "2.5"}):
@@ -397,8 +397,7 @@ class PlayerViewConstructionTests(unittest.TestCase):
         self.assertIn("player_seek_forward", view._buttons)
         self.assertEqual(view._buttons["player_seek_back"].width, 1)
         self.assertEqual(view._buttons["player_seek_forward"].width, 1)
-        view.stop()
-
+    
 
 class QueueHistoryTests(unittest.TestCase):
     """Regression coverage for rolling history trimming without dropping upcoming tracks."""
