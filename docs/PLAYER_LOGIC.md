@@ -6,7 +6,7 @@ This document describes the expected behavior and operational safeguards in `sla
 
 - The elapsed-time display and progress bar refresh every **10 seconds** while Discord reports that audio is playing.
 - Pausing freezes the playback clock; pause/resume refreshes the player immediately.
-- Seek-back and seek-forward buttons move the source position by 10 seconds and display the labels `-10` and `+10` alongside their icons. The requested custom emoji IDs are:
+- Seek-back and seek-forward buttons move the source position by 10 seconds. The controls are compact icon-only buttons (no `-10` / `+10` text labels); the requested custom emoji IDs are:
   - Forward 10 seconds: `1455985627714551839`
   - Back 10 seconds: `1455985625097306142`
 - The player uses the custom emoji when it is available in the server or the bot has permission to use external emoji. Otherwise it falls back to Unicode controls so the buttons remain usable.
