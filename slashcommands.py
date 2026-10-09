@@ -2242,6 +2242,7 @@ def fetch_track(query: str, anti_bot_retries: int = 2):
 
     clients = [None, "tv", "web_safari"][:max(1, min(anti_bot_retries + 1, 3))]
     last_error = None
+    saw_anti_bot = False
     for attempt, client in enumerate(clients):
         with _youtube_anti_bot_lock:
             if time.monotonic() < _youtube_anti_bot_until:
@@ -2250,12 +2251,17 @@ def fetch_track(query: str, anti_bot_retries: int = 2):
             return _fetch_track_once(query, player_client=client)
         except Exception as error:
             last_error = error
-            if not _is_youtube_anti_bot_error(error):
+            if _is_youtube_anti_bot_error(error):
+                saw_anti_bot = True
+            elif not saw_anti_bot:
+                # Ordinary errors such as deleted/private videos should not trigger client retries.
                 raise
+            # After one anti-bot challenge, allow the remaining fallback clients to run even
+            # if a client-specific error (for example, no matching format) happens in between.
             if attempt + 1 < len(clients):
                 time.sleep(1.0 + attempt)
 
-    if last_error is not None and _is_youtube_anti_bot_error(last_error):
+    if saw_anti_bot:
         with _youtube_anti_bot_lock:
             _youtube_anti_bot_until = time.monotonic() + _YOUTUBE_ANTI_BOT_COOLDOWN_SECONDS
         raise ValueError("YOUTUBE_ANTI_BOT") from last_error
