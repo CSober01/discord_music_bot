@@ -1331,24 +1331,23 @@ class PlaylistCountView(discord.ui.View):
 
             self._busy = True
             try:
+                # Acknowledge and close the picker before any YouTube extraction work.
+                # The previous flow kept this view open while the first playable track
+                # was fetched synchronously, making the button appear unresponsive.
                 await interaction.response.defer()
-                selected = self.playlist_tracks[:amount]
-                await _add_playlist_to_queue(
-                    self.vc,
-                    self.guild,
-                    self.channel,
-                    self.loop_getter,
-                    selected,
-                    interaction.user,
-                )
                 await self._close()
                 if self.parent_view:
                     await self.parent_view._close()
+
+                selected = self.playlist_tracks[:amount]
+                asyncio.create_task(
+                    self._process_selection(selected, amount, interaction.user, interaction)
+                )
             except Exception as e:
                 log("📋 PLAYLIST COUNT ERROR", interaction, str(e))
                 try:
                     await interaction.followup.send(
-                        f"❌ ไม่สามารถโหลด {amount} เพลงจาก{self.source_label}ได้",
+                        f"❌ ไม่สามารถเริ่มโหลด {amount} เพลงจาก{self.source_label}ได้",
                         ephemeral=True,
                     )
                 except Exception:
@@ -1357,6 +1356,26 @@ class PlaylistCountView(discord.ui.View):
                 self._busy = False
 
         return callback
+
+    async def _process_selection(self, selected, amount, user, interaction):
+        try:
+            await _add_playlist_to_queue(
+                self.vc,
+                self.guild,
+                self.channel,
+                self.loop_getter,
+                selected,
+                user,
+            )
+        except Exception as e:
+            log("📋 PLAYLIST COUNT PROCESS ERROR", interaction, str(e))
+            try:
+                await interaction.followup.send(
+                    f"❌ ไม่สามารถโหลด {amount} เพลงจาก{self.source_label}ได้",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
 
     async def _close(self):
         self.stop()
@@ -2437,15 +2456,17 @@ class QueueView(discord.ui.View):
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="queue_previous_page", row=0)
     async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.defer()
-        except Exception:
-            pass
+        # Edit the component message in the same interaction; avoid defer + edit_original_response
+        # which can leave stale page controls on ephemeral Queue messages.
         if self.page <= 0:
-            return
+            self._sync_buttons()
+            return await interaction.response.edit_message(
+                embed=make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=self.page),
+                view=self,
+            )
         self.page -= 1
         self._sync_buttons()
-        await interaction.edit_original_response(
+        await interaction.response.edit_message(
             embed=make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=self.page),
             view=self,
         )
@@ -2456,15 +2477,15 @@ class QueueView(discord.ui.View):
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="queue_next_page", row=0)
     async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.response.defer()
-        except Exception:
-            pass
         if self.page >= self._page_count() - 1:
-            return
+            self._sync_buttons()
+            return await interaction.response.edit_message(
+                embed=make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=self.page),
+                view=self,
+            )
         self.page += 1
         self._sync_buttons()
-        await interaction.edit_original_response(
+        await interaction.response.edit_message(
             embed=make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=self.page),
             view=self,
         )
