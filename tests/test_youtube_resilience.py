@@ -79,7 +79,7 @@ class YouTubeResilienceTests(unittest.TestCase):
         self.assertEqual(sc.PLAYER_PROGRESS_INTERVAL_SECONDS, 10)
         self.assertEqual(sc.PLAYLIST_FETCH_CONCURRENCY, 4)
         self.assertEqual(sc.PLAYLIST_TRACK_FETCH_DELAY_SECONDS, 5.0)
-        self.assertEqual(sc.get_youtube_playlist_fetch_semaphore()._value, 1)
+        self.assertEqual(sc.get_youtube_playlist_fetch_semaphore()._value, 4)
         with patch.dict("os.environ", {"YTDLP_SLEEP_REQUESTS": "2.5"}):
             self.assertEqual(sc.get_ydl_options()["sleep_interval_requests"], 2.5)
         with patch.dict("os.environ", {"YTDLP_SLEEP_REQUESTS": "invalid"}):
@@ -435,6 +435,29 @@ class QueueHistoryTests(unittest.TestCase):
         self.assertEqual(sc.get_seq_offset(self.guild_id), 1)
         self.assertEqual(sc.display_no(self.guild_id, sc.get_now_idx(self.guild_id)), 12)
         self.assertEqual([track[1] for track in queue[-2:]], ["Track 13", "Track 14"])
+
+
+class PlayerButtonErrorHandlingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_player_button_exception_is_logged_and_user_is_notified(self):
+        interaction = object()
+        button = object()
+
+        async def broken_callback(_interaction, _button):
+            raise RuntimeError("injected button failure")
+
+        with patch.object(sc, "log") as log_mock, \
+             patch.object(sc, "safe_respond", new_callable=AsyncMock) as respond_mock:
+            await sc._safe_player_button_callback(
+                interaction, broken_callback, button, "player_skip"
+            )
+
+        log_mock.assert_called_once()
+        self.assertIn("player_skip", log_mock.call_args.args[2])
+        respond_mock.assert_awaited_once()
+        self.assertIs(respond_mock.await_args.args[0], interaction)
+        self.assertTrue(respond_mock.await_args.kwargs["ephemeral"])
+        self.assertIn("ปุ่มทำงานไม่สำเร็จ", respond_mock.await_args.kwargs["embed"].description)
+
 
 if __name__ == "__main__":
     unittest.main()

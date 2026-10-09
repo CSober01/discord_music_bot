@@ -167,7 +167,7 @@ PLAYER_PROGRESS_BAR = "━━━━━━━━●━━━━━━━━"
 HISTORY_LIMIT = 10  # เก็บเพลงที่เล่นไปแล้วล่าสุดเพื่อ Previous
 MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
 PLAYLIST_FETCH_CONCURRENCY = 4  # โหลดพร้อมกันได้ 4 รายการ โดยยังจำกัดคำขอ YouTube
-PLAYLIST_TRACK_FETCH_DELAY_SECONDS = 1.0  # ลดเวลารอระหว่างรายการ เพื่อให้ Playlist โหลดเข้าคิวเร็วขึ้น
+PLAYLIST_TRACK_FETCH_DELAY_SECONDS = 5.0  # เว้นช่วงระหว่างรายการเพื่อลด burst request ไปยัง YouTube
 PLAYER_PROGRESS_INTERVAL_SECONDS = 10  # อัปเดตตัวเลข/แถบเวลาบน Player ทุก 10 วินาที
 _youtube_playlist_fetch_semaphore: asyncio.Semaphore | None = None
 
@@ -1167,6 +1167,31 @@ async def safe_respond(interaction: discord.Interaction, content=None, embed=Non
         except Exception:
             pass
 
+async def _safe_player_button_callback(
+    interaction: discord.Interaction,
+    callback,
+    button: discord.ui.Button,
+    custom_id: str,
+):
+    """Make main-player button failures visible to users and preserve diagnostics in logs."""
+    try:
+        await callback(interaction, button)
+    except Exception as exc:
+        error_detail = f"button={custom_id}: {type(exc).__name__}: {_trunc(str(exc), 180)}"
+        try:
+            log("🎛️ PLAYER BUTTON ERROR", interaction, error_detail)
+        except Exception as log_exc:
+            print(f"[PLAYER BUTTON ERROR] {error_detail}; log error: {type(log_exc).__name__}")
+        await safe_respond(
+            interaction,
+            embed=discord.Embed(
+                description="❌ ปุ่มทำงานไม่สำเร็จ กรุณาลองอีกครั้ง",
+                color=discord.Color.red(),
+            ),
+            ephemeral=True,
+        )
+
+
 async def _refresh_queue_msg(guild_id: int):
     """Refresh every open ephemeral Queue for this guild and keep each user page."""
     targets = [(key, value) for key, value in queue_view_msgs.items() if key[0] == guild_id]
@@ -1259,7 +1284,17 @@ async def _refresh_player(guild_id: int, repost: bool = False, _from_progress: b
         view.now_playing_msg = await view.channel.send(view=view)
         await _refresh_player_queue_views(guild_id)
         return True
-    except Exception:
+    except Exception as exc:
+        try:
+            glog(
+                guild_id,
+                view.guild.name,
+                f"PLAYER_REFRESH_ERROR: {type(exc).__name__}: {_trunc(str(exc), 180)}",
+                level="error",
+                console=True,
+            )
+        except Exception:
+            print(f"[PLAYER REFRESH ERROR] guild={guild_id}: {type(exc).__name__}: {_trunc(str(exc), 180)}")
         return False
 
 
@@ -3484,7 +3519,10 @@ class PlayerView(discord.ui.LayoutView):
             button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=cid)
             if cid == "player_queue_page":
                 button.disabled = True
-            button.callback = lambda interaction, cb=callback, btn=button: cb(interaction, btn)
+            async def _run_button(interaction, cb=callback, btn=button, button_id=cid):
+                await _safe_player_button_callback(interaction, cb, btn, button_id)
+
+            button.callback = _run_button
             row.add_item(button)
             self._buttons[cid] = button
         parts.extend((primary, secondary, tertiary))
