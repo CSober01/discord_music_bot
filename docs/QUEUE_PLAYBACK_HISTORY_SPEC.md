@@ -1465,6 +1465,14 @@ The button contract remains:
 - These are real `discord.ui.Button` components and must not be represented as fake text controls in the Embed.
 - Button state must continue to reflect the actual playback/Queue state.
 
+### Deferred voice connection for YouTube Radio / Mix
+
+- Opening the YouTube Radio / Mix choice screen must not connect or move the bot into a voice channel.
+- Choosing `เล่นเพลงนี้เท่านั้น` may connect the bot because the user has made the playback choice.
+- Choosing `โหลดเพลงจาก Radio` may fetch flat playlist metadata to build the count picker, but must not connect or move the bot yet.
+- For the Radio / Mix playlist path, `PlaylistCountView` starts with no VoiceClient. Only after the requester selects a count does the background selection processor connect/move the bot and begin queueing the selected tracks.
+- If the requester is no longer in a voice channel, show the existing voice-channel error and do not start playback.
+
 ### Playlist count picker responsiveness
 
 - After the requester chooses a song count, acknowledge the interaction and close the `📋 เลือกจำนวนเพลง` picker before starting YouTube track extraction.
