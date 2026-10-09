@@ -2528,7 +2528,7 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
             playlist_loading_status.pop(guild.id, None)
         await _refresh_player(guild.id)
         if progress.anti_bot_blocks:
-            message = "❌ YouTube จำกัดคำขอชั่วคราว จึงยังโหลดเพลงจากรายการนี้ไม่ได้ ลองใหม่หลังจาก 3 นาที หรือกำหนด YTDLP_COOKIES_FILE ในเครื่องที่รันบอท"
+            message = "❌ YouTube จำกัดคำขอชั่วคราว จึงยังโหลดเพลงจากรายการนี้ไม่ได้ ลองใหม่หลังจาก 10 นาที หรือกำหนด YTDLP_COOKIES_FILE/YTDLP_COOKIES_FROM_BROWSER ในเครื่องที่รันบอท"
         else:
             message = "❌ ไม่พบเพลงที่เล่นได้จากรายการนี้"
         try:
