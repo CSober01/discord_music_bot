@@ -1532,7 +1532,7 @@ Page 1 / 1  •  5 songs  •  กำลังเล่น #3
 
 Background playlist fetch must not block playback of the first playable track.
 
-- `PLAYLIST_FETCH_CONCURRENCY = 5`.
+- `PLAYLIST_FETCH_CONCURRENCY = 1` (process-wide); remaining entries wait 5 seconds before each extraction.
 - Main Player shows loading status while additional playlist tracks are being fetched:
   `⏳ กำลังโหลดเพลงเพิ่มเติม • X / N`
 - `X` means the number of playlist entries whose fetch attempt has completed, including skipped/failed entries.
