@@ -1587,9 +1587,17 @@ class PlaylistCountView(discord.ui.LayoutView):
             # Radio/Mix playlist flow deliberately waits until a count is selected
             # before joining/moving the bot into a voice channel.
             if vc is None:
-                if self.parent_view is None:
-                    raise RuntimeError("Missing Radio/Mix parent view for deferred voice connection")
-                vc = await self.parent_view._connect_voice(interaction)
+                if self.parent_view is not None:
+                    vc = await self.parent_view._connect_voice(interaction)
+                else:
+                    vc = self.guild.voice_client
+                    if not vc:
+                        if not interaction.user.voice:
+                            await interaction.followup.send("❌ กรุณาเข้า Voice Channel ก่อน", ephemeral=True)
+                            return
+                        vc = await _connect_with_retry(interaction.user.voice.channel)
+                    elif interaction.user.voice and interaction.user.voice.channel != vc.channel:
+                        await vc.move_to(interaction.user.voice.channel)
                 if not vc:
                     return
 
@@ -1884,24 +1892,33 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                 view.message = prompt
                 return
 
-            # Playlist count options are embedded into the existing player when available.
-            if is_url and is_playlist_url(query_str):
+            # Treat playlist and YouTube Mix/Radio URLs alike: select how many tracks to add.
+            if is_url and (is_playlist_url(query_str) or is_youtube_radio_url(query_str)):
                 player = self.player_view or active_views.get(self.guild.id)
+                await _ack_done()
+                await self._delete_done_msg()
+                tracks = await asyncio.to_thread(fetch_playlist_tracks, query_str)
+                if not tracks:
+                    await _send_error("❌ ไม่พบเพลงใน Playlist นี้")
+                    return
+                source_label = "YouTube Mix" if is_youtube_radio_url(query_str) else "Playlist"
                 if player and player.current_track and await _is_current_player(player):
-                    await _ack_done()
-                    await self._delete_done_msg()
-                    tracks = await asyncio.to_thread(fetch_playlist_tracks, query_str)
-                    if not tracks:
-                        await _send_error("❌ ไม่พบเพลงใน Playlist นี้")
-                        return
                     player.player_menu = "playlist_count"
                     player.player_menu_tracks = tracks[:MAX_PLAYLIST_FETCH]
-                    player.player_menu_source = "Playlist"
+                    player.player_menu_source = source_label
                     player.player_menu_requester = interaction.user
                     player.radio_mix_query = None
                     player.radio_mix_requester = None
                     await _refresh_player(self.guild.id)
                     return
+                count_view = PlaylistCountView(
+                    tracks[:MAX_PLAYLIST_FETCH], self.guild, self.channel,
+                    self.loop_getter, interaction.user, None,
+                    parent_view=None, source_label=source_label,
+                )
+                prompt = await interaction.followup.send(view=count_view, ephemeral=True, wait=True)
+                count_view.message = prompt
+                return
 
             vc = self.guild.voice_client
             if not vc:
@@ -2035,7 +2052,7 @@ class PlaylistImportModal(discord.ui.Modal, title="📋 เพิ่มเพล
 
     async def on_submit(self, interaction: discord.Interaction):
         query = str(self.playlist_url).strip()
-        if not query.startswith(("https://", "http://")) or not is_playlist_url(query) or is_youtube_radio_url(query):
+        if not query.startswith(("https://", "http://")) or not (is_playlist_url(query) or is_youtube_radio_url(query)):
             return await interaction.response.send_message(
                 "❌ กรุณาวางลิงก์ YouTube Playlist ที่มีรายการเพลง", ephemeral=True
             )
@@ -3241,13 +3258,7 @@ class PlayerView(discord.ui.LayoutView):
             (secondary, "player_stop", None, discord.ButtonStyle.danger, self.stop, "⏹️"),
             (secondary, "player_loop", None, discord.ButtonStyle.secondary, self.loop_btn, "🔁"),
         ]
-        if self.player_menu == "radio":
-            specs.extend([
-                (tertiary, "radio_mix_single", "Radio", discord.ButtonStyle.secondary, self.radio_mix_single, "🎧"),
-                (tertiary, "radio_mix_load", "Mix", discord.ButtonStyle.secondary, self.radio_mix_load, "🔀"),
-                (quaternary, "radio_mix_cancel", "ยกเลิก", discord.ButtonStyle.danger, self.radio_mix_cancel, "❌"),
-            ])
-        elif self.player_menu == "playlist_count":
+        if self.player_menu == "playlist_count":
             count = min(len(self.player_menu_tracks), MAX_PLAYLIST_FETCH)
             # Add All already represents the exact count, so avoid duplicate count buttons.
             fixed_counts = [n for n in (5, 10, 20, 30) if n < count]
@@ -4167,57 +4178,36 @@ def register(tree: app_commands.CommandTree, loop_getter):
         try:
             is_url = query.strip().startswith("http://") or query.strip().startswith("https://")
 
-            # Embed the Radio/Mix child buttons in the active player.
-            if is_url and is_youtube_radio_url(query):
-                await _del_search()
-                player = active_views.get(interaction.guild.id)
-                if player and player.current_track and await _is_current_player(player):
-                    player.radio_mix_query = query
-                    player.radio_mix_requester = interaction.user
-                    player.player_menu_requester = interaction.user
-                    player.player_menu = "radio"
-                    await _refresh_player(interaction.guild.id)
-                    return
-                view = RadioChoiceView(
-                    query,
-                    interaction.guild,
-                    interaction.channel,
-                    loop_getter,
-                    interaction.user,
-                    loop_getter(),
-                )
-                prompt = await interaction.followup.send(
-                    embed=discord.Embed(
-                        title="📻 YouTube Radio / Mix",
-                        description="ต้องการเล่นแบบไหน?",
-                        color=0x1a1a2e,
-                    ),
-                    view=view,
-                    ephemeral=True,
-                    wait=True,
-                )
-                view.message = prompt
-                return
+            # YouTube Mix/Radio URLs now use the same playlist-count menu.
 
-            # When a Player is already visible, show playlist count choices in that player.
-            if is_url and is_playlist_url(query):
+            # Treat playlist and YouTube Mix/Radio URLs alike: select how many tracks to add.
+            if is_url and (is_playlist_url(query) or is_youtube_radio_url(query)):
+                await _del_search()
+                playlist_tracks = await asyncio.to_thread(fetch_playlist_tracks, query)
+                if not playlist_tracks:
+                    return await interaction.followup.send(
+                        embed=discord.Embed(description="❌ ไม่พบเพลงในเพลย์ลิสต์", color=discord.Color.red()),
+                        ephemeral=True,
+                    )
+                source_label = "YouTube Mix" if is_youtube_radio_url(query) else "Playlist"
                 player = active_views.get(interaction.guild.id)
                 if player and player.current_track and await _is_current_player(player):
-                    await _del_search()
-                    playlist_tracks = await asyncio.to_thread(fetch_playlist_tracks, query)
-                    if not playlist_tracks:
-                        return await interaction.followup.send(
-                            embed=discord.Embed(description="❌ ไม่พบเพลงในเพลย์ลิสต์", color=discord.Color.red()),
-                            ephemeral=True,
-                        )
                     player.player_menu = "playlist_count"
                     player.player_menu_tracks = playlist_tracks[:MAX_PLAYLIST_FETCH]
-                    player.player_menu_source = "Playlist"
+                    player.player_menu_source = source_label
                     player.player_menu_requester = interaction.user
                     player.radio_mix_query = None
                     player.radio_mix_requester = None
                     await _refresh_player(interaction.guild.id)
                     return
+                count_view = PlaylistCountView(
+                    playlist_tracks[:MAX_PLAYLIST_FETCH], interaction.guild,
+                    interaction.channel, loop_getter, interaction.user, None,
+                    parent_view=None, source_label=source_label,
+                )
+                prompt = await interaction.followup.send(view=count_view, ephemeral=True, wait=True)
+                count_view.message = prompt
+                return
 
             # OLAK / playlist processing continues with the existing voice connection flow.
             voice_channel = interaction.user.voice.channel
