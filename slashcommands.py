@@ -802,6 +802,14 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
             artist = display_meta.split(" — ", 1)[0]
 
     display_title = _clean_player_title(title)
+    position = _playback_position(guild_id) if guild_id is not None else 0.0
+    duration_seconds = _duration_seconds(duration)
+    shown_position = min(position, duration_seconds) if duration_seconds else position
+    elapsed_text = f"{int(shown_position // 60)}:{int(shown_position % 60):02d}"
+    slots = 16
+    filled = round((shown_position / duration_seconds) * slots) if duration_seconds else 0
+    filled = max(0, min(slots, filled))
+    progress_bar = "━" * filled + ("●" if filled < slots else "") + "━" * max(0, slots - filled - 1)
 
     embed = discord.Embed(color=0x5865F2)
     embed.description = (
@@ -809,7 +817,7 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         f"{QUEUE_DIVIDER}\n\n"
         f"🎧 **{display_title}**\n"
         f"    *{_truncate_display_width(artist, 44)} • YouTube*\n\n"
-        f"    **0:00** {PLAYER_PROGRESS_BAR} **{duration}**\n\n"
+        f"    **{elapsed_text}** {progress_bar} **{duration}**\n\n"
     )
 
     if guild_id is not None:
@@ -1165,9 +1173,9 @@ async def _refresh_player(guild_id: int, repost: bool = False, _from_progress: b
     try:
         vc = view.guild.voice_client
         view.volume_level = get_guild_volume(guild_id)
-        view._sync_state_buttons()
-
         view.refresh_layout()
+        # _build_layout recreates the buttons; sync disabled/style states after rebuilding.
+        view._sync_state_buttons()
         if not _from_progress:
             _ensure_player_progress_task(guild_id)
 
@@ -1182,14 +1190,29 @@ async def _refresh_player(guild_id: int, repost: bool = False, _from_progress: b
         if view.now_playing_msg:
             try:
                 await view.now_playing_msg.edit(view=view)
+                await _refresh_player_queue_views(guild_id)
                 return True
             except Exception:
                 view.now_playing_msg = None
 
         view.now_playing_msg = await view.channel.send(view=view)
+        await _refresh_player_queue_views(guild_id)
         return True
     except Exception:
         return False
+
+
+async def _refresh_player_queue_views(guild_id: int):
+    """Keep each user's open Components V2 Queue synchronized with playback state."""
+    targets = [(key, value) for key, value in player_queue_view_msgs.items() if key[0] == guild_id]
+    for key, (message, view) in targets:
+        try:
+            view._build_layout()
+            await message.edit(view=view)
+        except Exception:
+            player_queue_view_msgs.pop(key, None)
+
+
 async def _schedule_player_repost(guild_id: int, delay: float = 0.8):
     """Coalesce rapid Queue additions into one Player repost, avoiding message spam."""
     previous_task = player_repost_tasks.get(guild_id)
@@ -2459,6 +2482,7 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
             )
             msg = await channel.send(view=view)
             view.now_playing_msg = msg
+            await _refresh_player(guild.id)
         else:
             # เพลงแรกของชุดนี้ถูกต่อท้ายคิวอยู่แล้ว ต้องนำไปแสดงใน summary
             # ร่วมกับเพลงที่ background fetch เพิ่มภายหลังด้วย
@@ -2605,6 +2629,7 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
             )
             msg = await channel.send(view=view)
             view.now_playing_msg = msg
+            await _refresh_player(guild.id)
 
         return track_idx, title
 
@@ -3593,6 +3618,7 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                         loop,
                     ),
             )
+            await _refresh_player(guild.id)
             await _refresh_queue_msg(guild.id)
             return
 
@@ -3644,6 +3670,7 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                 try: await add_msg.delete()
                 except Exception: pass
 
+            await _refresh_player(guild.id)
             await _refresh_queue_msg(guild.id)
 
     # ── หมดคิวแล้ว (ไม่มีเพลงถัดไป) ──
