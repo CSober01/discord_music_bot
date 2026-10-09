@@ -300,7 +300,7 @@ def _player_track_link(stream_url: str, title: str) -> str:
     safe_title = discord.utils.escape_markdown(str(title))
     target_url = queue_watch_urls.get(stream_url)
     if not target_url and isinstance(stream_url, str) and re.match(
-        r"^https?://(?:www\\.)?(?:youtube\\.com/watch\\?|youtu\\.be/)", stream_url
+        r"^https?://(?:www\.)?(?:youtube\.com/watch\?|youtu\.be/)", stream_url
     ):
         target_url = stream_url
     if target_url and target_url.startswith(("https://", "http://")):
