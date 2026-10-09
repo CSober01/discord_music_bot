@@ -289,6 +289,14 @@ def clear_guild(guild_id: int):
     playlist_loading_status.pop(guild_id, None)
     for key in [key for key in queue_view_msgs if key[0] == guild_id]:
         queue_view_msgs.pop(key, None)
+    # Invalidate each ephemeral Components V2 Queue view too, so stale controls cannot linger in memory.
+    for key in [key for key in player_queue_view_msgs if key[0] == guild_id]:
+        entry = player_queue_view_msgs.pop(key, None)
+        if entry:
+            try:
+                entry[1].stop()
+            except Exception:
+                pass
     search_result_msgs.pop(guild_id, None)
 
 def _queue_pos_str(guild_id: int, idx: int) -> str:
