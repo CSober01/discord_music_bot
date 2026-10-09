@@ -1589,7 +1589,8 @@ class PlaylistChoiceView(discord.ui.LayoutView):
                     fetch_track, _remove_youtube_list_param(self.query))
                 track = (url, title, duration, self.requester, thumbnail)
             elif self.playlist_tracks:
-                url, title, duration, thumbnail, *_rest = self.playlist_tracks[0]
+                url, title, duration, thumbnail = await asyncio.to_thread(
+                    _resolve_playlist_choice_track, self.playlist_tracks[0])
                 track = (url, title, duration, self.requester, thumbnail)
             else:
                 await interaction.followup.send("❌ ไม่พบเพลงที่จะเล่น", ephemeral=True)
@@ -2545,6 +2546,39 @@ def fetch_track(query: str):
             _activate_youtube_anti_bot_cooldown()
             raise ValueError("YOUTUBE_ANTI_BOT") from error
         raise
+
+
+def _resolve_playlist_choice_track(track_info):
+    """Resolve a playlist/mix entry into a playable yt-dlp stream tuple.
+
+    YouTube playlist entries are dictionaries containing a watch URL or video ID;
+    Spotify entries contain title/artist metadata. Legacy already-resolved tuples
+    are preserved for any callers that still provide them.
+    """
+    if isinstance(track_info, dict):
+        source_url = track_info.get("url")
+        video_id = track_info.get("id")
+        title = str(track_info.get("title") or "").strip()
+        artist = str(track_info.get("artist") or "").strip()
+
+        if source_url:
+            query = source_url
+        elif video_id:
+            query = f"https://www.youtube.com/watch?v={video_id}"
+        elif title:
+            query = f"{title} {artist}".strip()
+        else:
+            raise ValueError("PLAYLIST_TRACK_MISSING_SOURCE")
+
+        # fetch_track resolves the watch URL/search text into the actual audio URL.
+        return fetch_track(query)
+
+    if isinstance(track_info, (tuple, list)) and len(track_info) >= 4:
+        stream_url, title, duration, thumbnail, *_rest = track_info
+        if isinstance(stream_url, str) and stream_url.startswith(("http://", "https://")):
+            return stream_url, title, duration, thumbnail
+
+    raise ValueError("PLAYLIST_TRACK_MISSING_SOURCE")
 
 
 def _fetch_playlist_track_sync(track_info: dict, guild_id: int, guild_name: str):
@@ -3560,7 +3594,8 @@ class PlayerView(discord.ui.LayoutView):
                     fetch_track, _remove_youtube_list_param(query))
                 track = (url, title, duration, requester, thumbnail)
             elif self.player_menu_tracks:
-                url, title, duration, thumbnail, *_rest = self.player_menu_tracks[0]
+                url, title, duration, thumbnail = await asyncio.to_thread(
+                    _resolve_playlist_choice_track, self.player_menu_tracks[0])
                 track = (url, title, duration, requester, thumbnail)
             else:
                 self._clear_menu()

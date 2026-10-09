@@ -322,6 +322,51 @@ class StalePlaylistWorkerTests(unittest.IsolatedAsyncioTestCase):
 
 
 
+class PlaylistChoiceTrackResolutionTests(unittest.TestCase):
+    def test_youtube_playlist_dictionary_resolves_watch_url_to_audio_stream(self):
+        entry = {
+            "id": "dQw4w9WgXcQ",
+            "title": "Example Song",
+            "duration": 210,
+            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        }
+        resolved = ("https://audio.example/stream", "Example Song", "3:30", "thumbnail")
+        with patch.object(sc, "fetch_track", return_value=resolved) as fetch:
+            actual = sc._resolve_playlist_choice_track(entry)
+
+        self.assertEqual(actual, resolved)
+        fetch.assert_called_once_with("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+    def test_youtube_playlist_dictionary_can_resolve_by_video_id(self):
+        entry = {"id": "dQw4w9WgXcQ", "title": "Example Song", "duration": 210}
+        resolved = ("https://audio.example/stream", "Example Song", "3:30", None)
+        with patch.object(sc, "fetch_track", return_value=resolved) as fetch:
+            actual = sc._resolve_playlist_choice_track(entry)
+
+        self.assertEqual(actual, resolved)
+        fetch.assert_called_once_with("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+    def test_spotify_playlist_dictionary_uses_title_and_artist_search(self):
+        entry = {"title": "Example Song", "artist": "Example Artist"}
+        resolved = ("https://audio.example/stream", "Example Song", "3:30", None)
+        with patch.object(sc, "fetch_track", return_value=resolved) as fetch:
+            actual = sc._resolve_playlist_choice_track(entry)
+
+        self.assertEqual(actual, resolved)
+        fetch.assert_called_once_with("Example Song Example Artist")
+
+    def test_legacy_resolved_tuple_remains_supported(self):
+        entry = ("https://audio.example/stream", "Example Song", "3:30", "thumbnail", None)
+        self.assertEqual(
+            sc._resolve_playlist_choice_track(entry),
+            ("https://audio.example/stream", "Example Song", "3:30", "thumbnail"),
+        )
+
+    def test_playlist_choice_rejects_entry_without_a_source(self):
+        with self.assertRaisesRegex(ValueError, "PLAYLIST_TRACK_MISSING_SOURCE"):
+            sc._resolve_playlist_choice_track({"duration": 210})
+
+
 class QueueHistoryTests(unittest.TestCase):
     """Regression coverage for rolling history trimming without dropping upcoming tracks."""
 
