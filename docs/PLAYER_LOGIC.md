@@ -11,7 +11,7 @@ This document describes the expected behavior and operational safeguards in `sla
   - Back 10 seconds: `1455985625097306142`
 - The player uses the custom emoji when it is available in the server or the bot has permission to use external emoji. Otherwise it falls back to Unicode controls so the buttons remain usable.
 - The divider before the controls uses the shared `QUEUE_DIVIDER` constant so its length remains consistent.
-- There is no separate YouTube Radio/Mix choice menu. YouTube playlist and Mix/Radio URLs go directly to track-count selection: show the number found, a short preview, available count choices (5/10/20/30), an Add All action (up to 50 tracks), and Cancel. When a player is active, choices appear in the player; otherwise a standalone picker is shown.
+- Playlist and Mix/Radio URLs use a two-step choice flow. First show exactly two text lines (`🎵 เลือกเพลงจาก Playlist` and `พบรายการเพลงใน Playlist นี้`) with working Discord buttons for `เล่นเพลงนี้เพลงเดียว`, `เลือกเพลงเพิ่มเติม`, and `ยกเลิก`. Do not show preview tracks. If the URL identifies a specific video, the single-track action removes the playlist parameter and plays that video; for a playlist-only URL, it plays the first resolved entry. When a player is active, these buttons replace the submenu content inside the main player; otherwise a standalone Components V2 picker is used. The second step offers valid count choices (5/10/20/30 plus the exact total for non-standard totals up to 30), `เพิ่มทั้งหมด` capped at 50 tracks, and Cancel.
 - A seek replaces the FFmpeg audio source and increments the playback generation. The completion callback from the replaced source must not advance the queue.
 
 ## Queue and playlist behavior
