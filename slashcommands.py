@@ -2351,73 +2351,89 @@ def fetch_track(query: str):
 
 
 def _fetch_playlist_track_sync(track_info: dict, guild_id: int, guild_name: str):
-    """ดึงข้อมูล track เดียวจาก playlist entry (sync, รันใน thread)
-    ถ้าดึงจาก URL/ID ตรงไม่ได้ (เช่น age-restricted, bot-check, private, ถูกลบ)
-    จะลองค้นหาด้วยชื่อเพลงแทน เพื่อหาวิดีโอทดแทนที่เข้าถึงได้ แทนที่จะข้ามเพลงไปเฉยๆ
-    รายละเอียดเต็ม (ชื่อเพลง/เหตุผล) บันทึกเข้าไฟล์ log ของ guild เท่านั้น (console=False)
-    เพราะ console จะโชว์แค่ตัวเลขความคืบหน้ารวมผ่าน _PlaylistFetchProgress แทน
-    คืนค่า (result, outcome) — outcome: "direct" | "fallback_ok" | "fallback_fail"
+    """Fetch one playlist entry, falling back to title search only for ordinary errors.
+
+    YouTube anti-bot/rate-limit responses must never trigger title-search fallback.
+    Detailed errors are written to the guild log; the console shows aggregate progress.
+    Returns (result, outcome): direct | fallback_ok | fallback_fail | anti_bot.
     """
     orig_title = track_info.get("title", "Unknown")
 
-    def _reason(e: Exception) -> str:
-        # ตัดข้อความ error ยาวๆ ของ yt-dlp เหลือแค่บรรทัดแรกสั้นๆ พอให้รู้สาเหตุ
-        first_line = str(e).splitlines()[0] if str(e) else str(e)
+    def _reason(error: Exception) -> str:
+        first_line = str(error).splitlines()[0] if str(error) else str(error)
         return _trunc(first_line.replace("ERROR: [youtube] ", ""), 60)
 
-    try:
-        if "url" in track_info:
-            return fetch_track(track_info["url"]), "direct"
+    def _log_anti_bot(error: Exception, context: str):
+        glog(
+            guild_id,
+            guild_name,
+            f"⏸ YouTube จำกัดคำขอ ไม่ค้นชื่อซ้ำ: {_trunc(orig_title, 40)} "
+            f"[{context}: {_reason(error)}]",
+            level="warning",
+            console=False,
+        )
 
-        elif "id" in track_info and track_info.get("id"):
-            yt_url = f"https://www.youtube.com/watch?v={track_info['id']}"
-            try:
-                return fetch_track(yt_url), "direct"
-            except Exception as e:
-                if _is_youtube_anti_bot_error(e):
-                    glog(guild_id, guild_name,
-                         f"⏸ YouTube ปฏิเสธคำขอ/อยู่ในช่วงพัก ไม่ลองค้นชื่อซ้ำ: {_trunc(orig_title, 40)} [{_reason(e)}]",
-                         level="warning", console=False)
-                    return None, "anti_bot"
-                glog(guild_id, guild_name,
-                     f"⚠ ดึงตรงไม่ได้ [{_reason(e)}] — ลองหาแทน: {_trunc(orig_title, 40)}",
-                     level="warning", console=False)
-                try:
-                    result = fetch_track(orig_title)
-                    found_title = result[1] if result else "?"
-                    glog(guild_id, guild_name,
-                         f"✅ ทดแทนสำเร็จ: {_trunc(orig_title, 35)} → {_trunc(found_title, 35)}",
-                         level="info", console=False)
-                    return result, "fallback_ok"
-                except Exception as e2:
-                    if _is_youtube_anti_bot_error(e2):
-                        glog(guild_id, guild_name,
-                             f"⏸ YouTube จำกัดคำขอระหว่างค้นเพลงทดแทน: {_trunc(orig_title, 40)} [{_reason(e2)}]",
-                             level="warning", console=False)
-                        return None, "anti_bot"
-                    glog(guild_id, guild_name,
-                         f"❌ ข้ามเพลง [{_reason(e2)}]: {_trunc(orig_title, 40)}",
-                         level="error", console=False)
-                    return None, "fallback_fail"
-
-        elif "artist" in track_info:
-            search_query = f"{track_info['title']} {track_info['artist']}"
-            glog(guild_id, guild_name,
-                 f"🎵 Spotify→YT: {_trunc(track_info['title'], 40)} — {_trunc(track_info['artist'], 30)}",
-                 level="info", console=False)
-            # Route Spotify-to-YouTube lookups through the shared cooldown and fallback policy.
+    # Spotify entries have title/artist rather than a source URL or YouTube ID.
+    if not track_info.get("url") and not track_info.get("id") and track_info.get("artist"):
+        search_query = f"{track_info.get('title', 'Unknown')} {track_info['artist']}"
+        glog(
+            guild_id, guild_name,
+            f"🎵 Spotify→YT: {_trunc(track_info.get('title', 'Unknown'), 40)} — "
+            f"{_trunc(track_info['artist'], 30)}",
+            level="info", console=False,
+        )
+        try:
             return fetch_track(search_query), "direct"
+        except Exception as error:
+            if _is_youtube_anti_bot_error(error):
+                _log_anti_bot(error, "Spotify lookup")
+                return None, "anti_bot"
+            glog(
+                guild_id, guild_name,
+                f"❌ Spotify track ข้าม [{_reason(error)}]: {_trunc(orig_title, 40)}",
+                level="error", console=False,
+            )
+            return None, "fallback_fail"
 
+    source_url = track_info.get("url")
+    if not source_url and track_info.get("id"):
+        source_url = f"https://www.youtube.com/watch?v={track_info['id']}"
+
+    if not source_url:
         return None, "fallback_fail"
-    except Exception as e:
-        if _is_youtube_anti_bot_error(e):
-            glog(guild_id, guild_name,
-                 f"⏸ ข้ามรายการชั่วคราวเพราะ YouTube จำกัดคำขอ: {_trunc(orig_title, 40)} [{_reason(e)}]",
-                 level="warning", console=False)
+
+    # Try the exact source first. Only ordinary failures may proceed to title fallback.
+    try:
+        return fetch_track(source_url), "direct"
+    except Exception as error:
+        if _is_youtube_anti_bot_error(error):
+            _log_anti_bot(error, "direct fetch")
             return None, "anti_bot"
-        glog(guild_id, guild_name,
-             f"❌ ข้ามเพลง [{_reason(e)}]: {_trunc(orig_title, 40)}",
-             level="error", console=False)
+
+        glog(
+            guild_id, guild_name,
+            f"⚠ ดึงตรงไม่ได้ [{_reason(error)}] — ลองค้นชื่อแทน: {_trunc(orig_title, 40)}",
+            level="warning", console=False,
+        )
+
+    try:
+        result = fetch_track(orig_title)
+        found_title = result[1] if result else "?"
+        glog(
+            guild_id, guild_name,
+            f"✅ ทดแทนสำเร็จ: {_trunc(orig_title, 35)} → {_trunc(found_title, 35)}",
+            level="info", console=False,
+        )
+        return result, "fallback_ok"
+    except Exception as error:
+        if _is_youtube_anti_bot_error(error):
+            _log_anti_bot(error, "title fallback")
+            return None, "anti_bot"
+        glog(
+            guild_id, guild_name,
+            f"❌ ข้ามเพลง [{_reason(error)}]: {_trunc(orig_title, 40)}",
+            level="error", console=False,
+        )
         return None, "fallback_fail"
 
 
