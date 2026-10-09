@@ -2894,6 +2894,8 @@ class PlayerView(discord.ui.LayoutView):
             ])
         for row, cid, label, style, callback, emoji in specs:
             button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=cid)
+            if cid == "player_queue_page":
+                button.disabled = True
             button.callback = lambda interaction, cb=callback, btn=button: cb(interaction, btn)
             row.add_item(button)
             self._buttons[cid] = button
