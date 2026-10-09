@@ -2826,7 +2826,14 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
     async with get_queue_lock(guild.id):
         track = (url, title, duration, requester, thumbnail)
         track_idx = add_to_queue(guild.id, track)
-        first_was_empty = not (vc.is_playing() or vc.is_paused())
+        current_view = active_views.get(guild.id)
+        player_session_active = bool(
+            current_view
+            and current_view.current_track
+            and current_view.player_id == _get_player_session(guild.id)
+            and vc.is_connected()
+        )
+        first_was_empty = not (vc.is_playing() or vc.is_paused() or player_session_active)
 
         if first_was_empty:
             set_now_idx(guild.id, track_idx)
@@ -2868,8 +2875,11 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
             # เพลงแรกของชุดนี้ถูกต่อท้ายคิวอยู่แล้ว ต้องนำไปแสดงใน summary
             # ร่วมกับเพลงที่ background fetch เพิ่มภายหลังด้วย
             first_added = track
-            await _schedule_player_repost(guild.id)
-            await _refresh_queue_msg(guild.id)
+
+    if not first_was_empty:
+        # Refresh outside Queue lock so a slow Discord edit cannot delay navigation.
+        await _schedule_player_repost(guild.id)
+        await _refresh_queue_msg(guild.id)
 
     # ── step 3: ดึงเพลงที่เหลือ (ถ้ามี) แบบ concurrent ใน background — ไม่บล็อกการเล่นเพลงแรก ──
     if remaining_tracks:
@@ -2962,8 +2972,9 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
             track = (url, title, duration, requester, thumbnail)
             add_to_queue(guild.id, track)
             added.append(track)
-        await _schedule_player_repost(guild.id)
-        await _refresh_queue_msg(guild.id)
+
+    await _schedule_player_repost(guild.id)
+    await _refresh_queue_msg(guild.id)
 
     if playlist_loading_status.get(guild.id) is progress:
         playlist_loading_status.pop(guild.id, None)
@@ -2973,29 +2984,35 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
     await _send_playlist_added_summary(guild.id, channel, requester, added)
 
 async def _add_and_play(vc, guild, channel, loop_getter, track):
-    """เพิ่มเพลงเข้า queue และเล่นถ้าว่าง
-    คืนค่า (track_idx, title) — track_idx คือลำดับจริงในคิว (0-based)
-    """
+    """Append to an active Player or start playback if no Player session exists."""
+    queue_add_info = None
     async with get_queue_lock(guild.id):
         track_idx = add_to_queue(guild.id, track)
         url, title, duration, requester, thumbnail, *_rest = track
+        current_view = active_views.get(guild.id)
+        player_session_active = bool(
+            current_view
+            and current_view.current_track
+            and current_view.player_id == _get_player_session(guild.id)
+            and vc.is_connected()
+        )
 
-        if vc.is_playing() or vc.is_paused():
+        # VoiceClient can briefly report not-playing between an audio callback and
+        # play_next(). An active Player session means new tracks must append to Queue;
+        # otherwise the new request could jump over already-upcoming tracks.
+        if vc.is_playing() or vc.is_paused() or player_session_active:
             pos = display_no(guild.id, track_idx)
             display_title = queue_display_titles.get(url, title)
             short_title = _truncate_display_width(display_title, 50)
-            pub_msg = await channel.send(embed=discord.Embed(
-                description=f"📋 เพิ่มใน Queue **#{pos}**\n🎵 {short_title}  |  ขอโดย: {requester.mention}",
-                color=0x1a1a2e))
-            queue_add_msgs.setdefault(guild.id, {})[track_idx] = pub_msg
-            await _schedule_player_repost(guild.id)
-            await _refresh_queue_msg(guild.id)
+            queue_add_info = (pos, short_title, requester, track)
         else:
             set_now_idx(guild.id, track_idx)
             _trim_queue(guild.id)
             track_idx = get_now_idx(guild.id)
             source = discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
+                discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS),
+                volume=get_guild_volume(guild.id),
+            )
             loop = loop_getter()
             session_id = _new_player_session(guild.id)
             view = PlayerView(
@@ -3029,7 +3046,27 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
             view.now_playing_msg = msg
             await _refresh_player(guild.id)
 
-        return track_idx, title
+    # For an active Queue, perform Discord HTTP edits outside the Queue lock.
+    if queue_add_info:
+        pos, short_title, requester, queued_track = queue_add_info
+        pub_msg = await channel.send(embed=discord.Embed(
+            description=f"📋 เพิ่มใน Queue **#{pos}**\n🎵 {short_title}  |  ขอโดย: {requester.mention}",
+            color=0x1a1a2e,
+        ))
+        keep_message = False
+        async with get_queue_lock(guild.id):
+            queue = get_full_queue(guild.id)
+            queued_idx = next((i for i, item in enumerate(queue) if item is queued_track), None)
+            if queued_idx is not None and queued_idx > get_now_idx(guild.id):
+                queue_add_msgs.setdefault(guild.id, {})[queued_idx] = pub_msg
+                keep_message = True
+        if not keep_message:
+            await _delete_message_quietly(pub_msg)
+        else:
+            await _schedule_player_repost(guild.id)
+            await _refresh_queue_msg(guild.id)
+
+    return track_idx, title
 
 
 async def _send_playlist_added_summary(guild_id: int, channel, requester, tracks: list):
@@ -3154,13 +3191,10 @@ async def _do_play_at_idx(
         add_msg = queue_add_msgs.get(guild_id, {}).pop(idx, None)
 
     if add_msg:
-        try:
-            await add_msg.delete()
-        except Exception:
-            pass
+        asyncio.create_task(_delete_message_quietly(add_msg))
 
-    await _refresh_player(guild_id)
-    await _refresh_queue_msg(guild_id)
+    asyncio.create_task(_refresh_player(guild_id))
+    asyncio.create_task(_refresh_queue_msg(guild_id))
     return True
 
 
