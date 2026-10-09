@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - main
+      - v0.4.0-reapply
 
 permissions:
   contents: read
