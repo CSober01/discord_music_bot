@@ -1,10 +1,11 @@
 """Regression tests for YouTube anti-bot handling and playlist progress."""
 
+import asyncio
 import io
 import time
 import unittest
 from contextlib import redirect_stdout
-from unittest.mock import call, patch
+from unittest.mock import AsyncMock, patch
 
 import slashcommands as sc
 
@@ -44,9 +45,22 @@ class YouTubeResilienceTests(unittest.TestCase):
         fetch.assert_called_once_with("Song Artist")
 
     def test_spotify_direct_lookup_preserves_youtube_anti_bot_error(self):
+        class BlockedYoutubeDL:
+            def __init__(self, options):
+                self.options = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def extract_info(self, query, download=False):
+                raise RuntimeError("Sign in to confirm you're not a bot")
+
         with patch.object(sc, "extract_spotify_track_id", return_value="spotify-id"), \
              patch.object(sc, "get_spotify_track_info", return_value={"title": "Song", "artist": "Artist"}), \
-             patch.object(sc, "_fetch_spotify_track_from_search", side_effect=RuntimeError("Sign in to confirm you're not a bot")):
+             patch.object(sc.yt_dlp, "YoutubeDL", BlockedYoutubeDL):
             with self.assertRaisesRegex(RuntimeError, "Sign in to confirm"):
                 sc._fetch_track_once("https://open.spotify.com/track/spotify-id")
 
@@ -70,46 +84,59 @@ class YouTubeResilienceTests(unittest.TestCase):
         with patch.dict("os.environ", {"YTDLP_SLEEP_REQUESTS": "invalid"}):
             self.assertEqual(sc.get_ydl_options()["sleep_interval_requests"], 1.0)
 
-    def test_fetch_track_opens_circuit_breaker_after_bounded_client_fallback(self):
+    def test_cookie_options_support_browser_and_prefer_explicit_file(self):
+        with patch.dict("os.environ", {"YTDLP_COOKIES_FROM_BROWSER": "edge"}, clear=True):
+            options = sc.get_ydl_options()
+            self.assertEqual(options["cookiesfrombrowser"], ("edge", None, None, None))
+            self.assertNotIn("cookiefile", options)
+
+        cookie_path = "C:/discord-music-bot/cookies.txt"
+        with patch.dict(
+            "os.environ",
+            {
+                "YTDLP_COOKIES_FILE": cookie_path,
+                "YTDLP_COOKIES_FROM_BROWSER": "edge",
+            },
+            clear=True,
+        ):
+            options = sc.get_ydl_options()
+            self.assertEqual(options["cookiefile"], cookie_path)
+            self.assertNotIn("cookiesfrombrowser", options)
+
+    def test_fetch_track_opens_circuit_breaker_without_retry_after_anti_bot(self):
+        query = "https://youtu.be/blocked"
         with patch.object(
-            sc,
-            "_fetch_track_once",
-            side_effect=[
-                RuntimeError("Sign in to confirm you're not a bot"),
-                RuntimeError("HTTP Error 429: Too Many Requests"),
-            ],
-        ) as extract, patch.object(sc.time, "sleep"):
+            sc, "_fetch_track_once",
+            side_effect=RuntimeError("Sign in to confirm you're not a bot"),
+        ) as extract:
             with self.assertRaisesRegex(ValueError, "YOUTUBE_ANTI_BOT"):
-                sc.fetch_track("https://youtu.be/blocked")
-        self.assertEqual(extract.call_count, 2)
+                sc.fetch_track(query)
+
+        extract.assert_called_once_with(query)
         self.assertTrue(sc._is_youtube_cooldown_active())
-
-    def test_fetch_track_tries_alternative_client_only_after_anti_bot(self):
-        result = ("stream-url", "Track title", "3:22", "thumbnail")
-        with patch.object(
-            sc,
-            "_fetch_track_once",
-            side_effect=[ValueError("Sign in to confirm you're not a bot"), result],
-        ) as extract, patch.object(sc.time, "sleep"):
-            self.assertEqual(sc.fetch_track("https://youtu.be/example"), result)
-
-        self.assertEqual(
-            extract.call_args_list,
-            [
-                call("https://youtu.be/example", player_client=None),
-                call("https://youtu.be/example", player_client="tv"),
-            ],
+        self.assertGreaterEqual(
+            sc._youtube_anti_bot_until - time.monotonic(),
+            sc._YOUTUBE_ANTI_BOT_COOLDOWN_SECONDS - 1,
         )
 
-    def test_regular_error_does_not_trigger_client_fallback(self):
+    def test_fetch_track_does_not_retry_after_anti_bot(self):
+        query = "https://youtu.be/example"
+        with patch.object(
+            sc, "_fetch_track_once",
+            side_effect=ValueError("Sign in to confirm you're not a bot"),
+        ) as extract:
+            with self.assertRaisesRegex(ValueError, "YOUTUBE_ANTI_BOT"):
+                sc.fetch_track(query)
+        extract.assert_called_once_with(query)
+
+    def test_regular_error_does_not_trigger_retry(self):
+        query = "https://youtu.be/private"
         with patch.object(
             sc, "_fetch_track_once", side_effect=ValueError("Private video")
         ) as extract:
             with self.assertRaisesRegex(ValueError, "Private video"):
-                sc.fetch_track("https://youtu.be/private")
-        extract.assert_called_once_with(
-            "https://youtu.be/private", player_client=None
-        )
+                sc.fetch_track(query)
+        extract.assert_called_once_with(query)
 
     def test_open_circuit_breaker_prevents_new_extraction(self):
         sc._youtube_anti_bot_until = time.monotonic() + 120
@@ -206,6 +233,41 @@ class YouTubeResilienceTests(unittest.TestCase):
                 sc.search_tracks("blocked search")
 
         self.assertTrue(sc._is_youtube_cooldown_active())
+
+
+class StalePlaylistWorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_invalidated_playlist_workers_do_not_fetch_or_print_false_summary(self):
+        class FakeGuild:
+            id = 987654
+            name = "Test guild"
+
+        guild = FakeGuild()
+        progress = sc._PlaylistFetchProgress(guild.id, guild.name, total=2)
+        previous_generation = sc.playlist_fetch_generation.get(guild.id)
+        sc.playlist_fetch_generation[guild.id] = 2
+        sc.playlist_loading_status[guild.id] = progress
+        output = io.StringIO()
+        try:
+            with patch.object(
+                sc, "get_youtube_playlist_fetch_semaphore", return_value=asyncio.Semaphore(1)
+            ), patch.object(sc, "_fetch_playlist_track_sync") as fetch, \
+                 patch.object(sc, "_refresh_player", new_callable=AsyncMock) as refresh, \
+                 redirect_stdout(output):
+                await sc._bg_fetch_rest(
+                    guild, None, [{"id": "one"}, {"id": "two"}],
+                    None, progress, fetch_token=1,
+                )
+
+            fetch.assert_not_called()
+            refresh.assert_awaited_once_with(guild.id)
+            self.assertNotIn("โหลดครบ", output.getvalue())
+            self.assertNotIn(guild.id, sc.playlist_loading_status)
+        finally:
+            sc.playlist_loading_status.pop(guild.id, None)
+            if previous_generation is None:
+                sc.playlist_fetch_generation.pop(guild.id, None)
+            else:
+                sc.playlist_fetch_generation[guild.id] = previous_generation
 
 
 if __name__ == "__main__":
