@@ -795,7 +795,9 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
 
         if queue_lines:
             embed.description += "\n".join(queue_lines) + "\n"
-        embed.description += f"{QUEUE_DIVIDER}\n"
+            # The divider above is already the only divider needed when no
+            # History, Next, or loading section is rendered.
+            embed.description += f"{QUEUE_DIVIDER}\n"
         footer_text = queue_pos or (
             f"กำลังเล่น #{display_no(guild_id, current_idx)} จาก {get_total_added(guild_id)} เพลง"
             if q else "ไม่มีเพลง"
