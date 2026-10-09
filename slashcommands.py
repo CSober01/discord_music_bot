@@ -166,7 +166,7 @@ PLAYER_PROGRESS_BAR = "━━━━━━━━●━━━━━━━━"
 
 HISTORY_LIMIT = 10  # เก็บเพลงที่เล่นไปแล้วล่าสุดเพื่อ Previous
 MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
-PLAYLIST_FETCH_CONCURRENCY = 4  # โหลดพร้อมกันได้ 4 รายการ โดยยังจำกัดคำขอ YouTube
+PLAYLIST_FETCH_CONCURRENCY = 1  # ดึงทีละรายการเพื่อเว้นช่วง request ไปยัง YouTube
 PLAYLIST_TRACK_FETCH_DELAY_SECONDS = 5.0  # เว้นช่วงระหว่างรายการเพื่อลด burst request ไปยัง YouTube
 PLAYER_PROGRESS_INTERVAL_SECONDS = 10  # อัปเดตตัวเลข/แถบเวลาบน Player ทุก 10 วินาที
 _youtube_playlist_fetch_semaphore: asyncio.Semaphore | None = None
@@ -1192,6 +1192,14 @@ async def _safe_player_button_callback(
         )
 
 
+async def _delete_message_quietly(message):
+    """Delete a stale bot message without blocking a playback-state lock."""
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
 async def _refresh_queue_msg(guild_id: int):
     """Refresh every open ephemeral Queue for this guild and keep each user page."""
     targets = [(key, value) for key, value in queue_view_msgs.items() if key[0] == guild_id]
@@ -1461,10 +1469,11 @@ class QueueDoneView(discord.ui.View):
                 _delete_queue_add_msgs(self.guild.id),
             )
             async with get_navigation_lock(self.guild.id):
-                guild_stopped.add(self.guild.id)
-                clear_guild(self.guild.id)
-                vc.stop()
-                await vc.disconnect()
+                async with get_queue_lock(self.guild.id):
+                    guild_stopped.add(self.guild.id)
+                    clear_guild(self.guild.id)
+                    vc.stop()
+                    await vc.disconnect()
         done_msg = (self.done_msg_ref[0] if self.done_msg_ref else None) \
                    or queue_done_msgs.pop(self.guild.id, None)
         queue_done_msgs.pop(self.guild.id, None)
@@ -1694,10 +1703,8 @@ class PlaylistCountView(discord.ui.LayoutView):
                 f"พบ **{count} เพลง** — เลือกจำนวนที่ต้องการเพิ่มเข้าคิว"
             )
         ]
-        # Show fixed choices and the exact count when it is a small non-standard total.
+        # Numeric choices are fixed at 5/10/20/30; Add All handles every other total.
         choices = [n for n in (5, 10, 20, 30) if n <= count]
-        if count and count <= 30 and count not in (5, 10, 20, 30):
-            choices.append(count)
         row = discord.ui.ActionRow()
         for amount in choices:
             button = discord.ui.Button(
@@ -3065,16 +3072,42 @@ async def _send_playlist_added_summary(guild_id: int, channel, requester, tracks
 #  เรียกหลัง interaction ถูก defer แล้วเท่านั้น
 # ─────────────────────────────────────────────
 
-async def _do_play_at_idx(view: "PlayerView", idx: int):
-    """Switch to an existing queue item and start playback safely."""
+async def _do_play_at_idx(
+    view: "PlayerView",
+    idx: int,
+    relative_delta: int | None = None,
+):
+    """Switch to an existing Queue entry, resolving relative moves atomically."""
     guild_id = view.guild.id
     session_id = _get_player_session(guild_id)
     if not session_id or view.player_id != session_id:
         raise RuntimeError("Player session is no longer active")
 
     async with get_queue_lock(guild_id):
+        if (
+            _get_player_session(guild_id) != session_id
+            or active_views.get(guild_id) is not view
+        ):
+            raise RuntimeError("Player session changed before navigation")
+
         q = get_full_queue(guild_id)
-        if not q or idx < 0 or idx >= len(q):
+        if not q:
+            raise IndexError("Queue is empty")
+
+        if relative_delta is not None:
+            idx = get_now_idx(guild_id) + relative_delta
+            if relative_delta < 0 and idx < 0:
+                return False
+            if relative_delta > 0 and idx >= len(q):
+                if loop_modes.get(guild_id, "off") == "queue":
+                    idx = 0
+                else:
+                    vc = view.guild.voice_client
+                    if vc and (vc.is_playing() or vc.is_paused()):
+                        vc.stop()
+                    return None
+
+        if idx < 0 or idx >= len(q):
             raise IndexError(f"Invalid queue index: {idx}")
 
         set_now_idx(guild_id, idx)
@@ -3100,8 +3133,6 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
             discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS),
             volume=view.volume_level,
         )
-
-        # Generate a unique token before stopping the old source.
         token = _next_playback_generation(guild_id)
         vc.stop()
         _mark_playback_started(guild_id)
@@ -3120,7 +3151,6 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
                     view.loop,
                 ),
         )
-
         add_msg = queue_add_msgs.get(guild_id, {}).pop(idx, None)
 
     if add_msg:
@@ -3131,11 +3161,8 @@ async def _do_play_at_idx(view: "PlayerView", idx: int):
 
     await _refresh_player(guild_id)
     await _refresh_queue_msg(guild_id)
+    return True
 
-
-# ─────────────────────────────────────────────
-#  Full Queue View — ephemeral, per-user
-# ─────────────────────────────────────────────
 
 class QueueView(discord.ui.View):
     def __init__(self, guild, page=0):
@@ -3473,8 +3500,6 @@ class PlayerView(discord.ui.LayoutView):
         elif self.player_menu == "playlist_count":
             count = min(len(self.player_menu_tracks), MAX_PLAYLIST_FETCH)
             choices = [n for n in (5, 10, 20, 30) if n <= count]
-            if count and count <= 30 and count not in (5, 10, 20, 30):
-                choices.append(count)
             for amount in choices[:4]:
                 specs.append((
                     tertiary, f"playlist_count_{amount}", f"{amount} เพลง",
@@ -3732,38 +3757,55 @@ class PlayerView(discord.ui.LayoutView):
         if not await check_in_voice(interaction):
             return
         async with get_navigation_lock(self.guild.id):
+            if not await _is_current_player(self):
+                return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
             idx = get_now_idx(self.guild.id)
             if idx <= 0:
                 return await safe_respond(interaction, embed=discord.Embed(
                     description="❌ ไม่มีเพลงก่อนหน้าแล้ว", color=discord.Color.red()), ephemeral=True)
-            log("⏮ PREV", interaction, f"idx {idx} → {idx-1}")
-            await _do_play_at_idx(self, idx - 1)
+            q = get_full_queue(self.guild.id)
+            current_title = q[idx][1] if 0 <= idx < len(q) else "?"
+            log("⏮ PREV", interaction, f"idx {idx} → previous from {_trunc(current_title, 50)}")
+            moved = await _do_play_at_idx(self, idx - 1, relative_delta=-1)
+            if moved is False:
+                return await safe_respond(interaction, embed=discord.Embed(
+                    description="❌ ไม่มีเพลงก่อนหน้าแล้ว", color=discord.Color.red()), ephemeral=True)
 
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+        if not await check_in_voice(interaction):
+            return
         try:
             await interaction.response.defer()
         except Exception:
             pass
-        if not await check_in_voice(interaction): return
-        vc = self.guild.voice_client
-        title = _trunc(self.current_track[1]) if self.current_track else "?"
-        if vc.is_playing():
-            playback_seek_offsets[self.guild.id] = _playback_position(self.guild.id)
-            playback_started_at[self.guild.id] = None
-            vc.pause()
-            log("⏸ PAUSE", interaction, f"Track: {title}")
-        elif vc.is_paused():
-            playback_started_at[self.guild.id] = time.monotonic()
-            vc.resume()
-            log("▶️ RESUME", interaction, f"Track: {title}")
-        else:
-            return await safe_respond(interaction, embed=discord.Embed(
-                description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red()), ephemeral=True)
+
+        guild_id = self.guild.id
+        async with get_navigation_lock(guild_id):
+            async with get_queue_lock(guild_id):
+                if not await _is_current_player(self):
+                    return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+                vc = self.guild.voice_client
+                if not vc:
+                    return await safe_respond(interaction, content="❌ บอทไม่ได้อยู่ใน Voice Channel", ephemeral=True)
+                title = _trunc(self.current_track[1]) if self.current_track else "?"
+                if vc.is_playing():
+                    playback_seek_offsets[guild_id] = _playback_position(guild_id)
+                    playback_started_at[guild_id] = None
+                    vc.pause()
+                    log("⏸ PAUSE", interaction, f"Track: {title}")
+                elif vc.is_paused():
+                    playback_started_at[guild_id] = time.monotonic()
+                    vc.resume()
+                    log("▶️ RESUME", interaction, f"Track: {title}")
+                else:
+                    return await safe_respond(interaction, embed=discord.Embed(
+                        description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red()), ephemeral=True)
+
         await asyncio.gather(
-            _refresh_player(self.guild.id),
-            _refresh_queue_msg(self.guild.id),
+            _refresh_player(guild_id),
+            _refresh_queue_msg(guild_id),
         )
 
     async def seek_back(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3782,49 +3824,57 @@ class PlayerView(discord.ui.LayoutView):
         except Exception:
             pass
 
-        vc = self.guild.voice_client
-        if not vc or not self.current_track or not (vc.is_playing() or vc.is_paused()):
-            return await safe_respond(interaction, content="❌ ไม่มีเพลงที่กำลังเล่นอยู่", ephemeral=True)
+        guild_id = self.guild.id
+        seek_title = "?"
+        target = 0.0
+        async with get_navigation_lock(guild_id):
+            async with get_queue_lock(guild_id):
+                if not await _is_current_player(self):
+                    return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
+                vc = self.guild.voice_client
+                if not vc or not self.current_track or not (vc.is_playing() or vc.is_paused()):
+                    return await safe_respond(interaction, content="❌ ไม่มีเพลงที่กำลังเล่นอยู่", ephemeral=True)
 
-        url, title, duration, *_ = self.current_track
-        current_position = _playback_position(self.guild.id)
-        max_position = max(0.0, _duration_seconds(duration) - 1.0)
-        target = max(0.0, min(max_position, current_position + delta))
-        was_paused = vc.is_paused()
-        source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(
-                url,
-                before_options=f"-ss {target:.2f} {FFMPEG_OPTIONS['before_options']}",
-                options=FFMPEG_OPTIONS["options"],
-            ),
-            volume=get_guild_volume(self.guild.id),
-        )
-        session_id = _get_player_session(self.guild.id)
-        idx = get_now_idx(self.guild.id)
-        track = self.current_track
-        token = _next_playback_generation(self.guild.id)
-        vc.stop()
-        vc.play(
-            source,
-            after=lambda e, _session_id=session_id, _token=token, _idx=idx, _track=track:
-                asyncio.run_coroutine_threadsafe(
-                    play_next(
-                        self.guild, self.channel, self.loop,
-                        current_track=_track,
-                        current_idx=_idx,
-                        error=e,
-                        playback_token=_token,
-                        player_session_id=_session_id,
+                url, seek_title, duration, *_ = self.current_track
+                current_position = _playback_position(guild_id)
+                max_position = max(0.0, _duration_seconds(duration) - 1.0)
+                target = max(0.0, min(max_position, current_position + delta))
+                was_paused = vc.is_paused()
+                source = discord.PCMVolumeTransformer(
+                    discord.FFmpegPCMAudio(
+                        url,
+                        before_options=f"-ss {target:.2f} {FFMPEG_OPTIONS['before_options']}",
+                        options=FFMPEG_OPTIONS["options"],
                     ),
-                    self.loop,
-                ),
-        )
-        playback_seek_offsets[self.guild.id] = target
-        playback_started_at[self.guild.id] = None if was_paused else time.monotonic()
-        if was_paused:
-            vc.pause()
-        log("⏩ SEEK", interaction, f"Track: {_trunc(title, 60)}, position={target:.1f}s")
-        await _refresh_player(self.guild.id)
+                    volume=get_guild_volume(guild_id),
+                )
+                session_id = _get_player_session(guild_id)
+                idx = get_now_idx(guild_id)
+                track = self.current_track
+                token = _next_playback_generation(guild_id)
+                vc.stop()
+                vc.play(
+                    source,
+                    after=lambda e, _session_id=session_id, _token=token, _idx=idx, _track=track:
+                        asyncio.run_coroutine_threadsafe(
+                            play_next(
+                                self.guild, self.channel, self.loop,
+                                current_track=_track,
+                                current_idx=_idx,
+                                error=e,
+                                playback_token=_token,
+                                player_session_id=_session_id,
+                            ),
+                            self.loop,
+                        ),
+                )
+                playback_seek_offsets[guild_id] = target
+                playback_started_at[guild_id] = None if was_paused else time.monotonic()
+                if was_paused:
+                    vc.pause()
+
+        log("⏩ SEEK", interaction, f"Track: {_trunc(seek_title, 60)}, position={target:.1f}s")
+        await _refresh_player(guild_id)
 
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
@@ -3836,18 +3886,21 @@ class PlayerView(discord.ui.LayoutView):
         if not await check_in_voice(interaction):
             return
         async with get_navigation_lock(self.guild.id):
+            if not await _is_current_player(self):
+                return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
             vc = self.guild.voice_client
-            if not (vc.is_playing() or vc.is_paused()):
+            if not vc or not (vc.is_playing() or vc.is_paused()):
                 return await safe_respond(interaction, embed=discord.Embed(
                     description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red()), ephemeral=True)
             idx = get_now_idx(self.guild.id)
             q = get_full_queue(self.guild.id)
-            if idx + 1 >= len(q):
-                log("⏭ SKIP", interaction, f"idx {idx} → end")
-                vc.stop()
-                return
-            log("⏭ SKIP", interaction, f"idx {idx} → {idx+1}")
-            await _do_play_at_idx(self, idx + 1)
+            if not q or idx < 0 or idx >= len(q):
+                return await safe_respond(interaction, content="❌ ไม่พบเพลงปัจจุบันใน Queue", ephemeral=True)
+            next_idx = idx + 1
+            if next_idx >= len(q) and loop_modes.get(self.guild.id, "off") == "queue":
+                next_idx = 0
+            log("⏭ SKIP", interaction, f"idx {idx} → {next_idx if next_idx < len(q) else 'end'}")
+            await _do_play_at_idx(self, next_idx, relative_delta=1)
 
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
@@ -3865,12 +3918,13 @@ class PlayerView(discord.ui.LayoutView):
                 _delete_search_result_msgs(self.guild.id),
                 _delete_queue_view_msg(self.guild.id),
             )
-            guild_stopped.add(self.guild.id)
-            now_playing_msg = self.now_playing_msg
-            self.now_playing_msg = None
-            clear_guild(self.guild.id)
-            vc.stop()
-            await vc.disconnect()
+            async with get_queue_lock(self.guild.id):
+                guild_stopped.add(self.guild.id)
+                now_playing_msg = self.now_playing_msg
+                self.now_playing_msg = None
+                clear_guild(self.guild.id)
+                vc.stop()
+                await vc.disconnect()
         old_done = queue_done_msgs.pop(self.guild.id, None)
         if old_done:
             try: await old_done.delete()
@@ -4048,8 +4102,18 @@ class PlayerView(discord.ui.LayoutView):
                     return await safe_respond(interaction, embed=discord.Embed(
                         description="❌ ต้องมีเพลงถัดไปอย่างน้อย 2 เพลงจึงจะเปิด Shuffle ได้",
                         color=discord.Color.orange()), ephemeral=True)
+                messages_by_track = {
+                    id(q[old_idx]): message
+                    for old_idx, message in queue_add_msgs.get(self.guild.id, {}).items()
+                    if 0 <= old_idx < len(q)
+                }
                 random.shuffle(upcoming)
                 q[idx + 1:] = upcoming
+                queue_add_msgs[self.guild.id] = {
+                    new_idx: messages_by_track[id(track)]
+                    for new_idx, track in enumerate(q)
+                    if id(track) in messages_by_track
+                }
                 shuffle_enabled.add(self.guild.id)
                 shuffle_state = "on"
                 upcoming_count = len(upcoming)
@@ -4087,8 +4151,9 @@ async def handle_external_voice_disconnect(guild: discord.Guild):
         old_view.now_playing_msg = None
 
     async with get_navigation_lock(guild.id):
-        guild_stopped.add(guild.id)
-        clear_guild(guild.id)
+        async with get_queue_lock(guild.id):
+            guild_stopped.add(guild.id)
+            clear_guild(guild.id)
 
     await asyncio.gather(
         _delete_queue_add_msgs(guild.id),
@@ -4188,10 +4253,48 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
     else:
         next_idx = current_idx + 1
 
-    # Acquire lock ก่อนจะแก้ index ป้องกัน race condition กับ skip/prev
+    # Revalidate after acquiring the Queue lock. A callback may have waited here
+    # while Previous/Skip/Seek replaced the source.
+    queue_end_token = None
+    queue_end_session_id = None
+    queue_end_current_idx = None
+    queue_end_view = None
+    queue_end_message = None
     async with get_queue_lock(guild.id):
+        if player_session_id is not None and player_session_id != _get_player_session(guild.id):
+            return
+        if playback_token is not None and playback_token != playback_generation.get(guild.id):
+            return
+        if guild.id in guild_stopped:
+            guild_stopped.discard(guild.id)
+            return
         q = get_full_queue(guild.id)
+        live_idx = get_now_idx(guild.id)
+        if current_idx is not None and current_idx != live_idx:
+            return
+        if not q or live_idx < 0 or live_idx >= len(q):
+            return
+        if current_track is not None and q[live_idx] is not current_track:
+            return
+
+        current_idx = live_idx
+        loop_mode = loop_modes.get(guild.id, "off")
+        q_snapshot = q
+        if loop_mode == "track" and error is None:
+            next_idx = current_idx
+        elif loop_mode == "queue" and error is None and q and current_idx >= len(q) - 1:
+            next_idx = 0
+        else:
+            next_idx = current_idx + 1
         has_next = next_idx < len(q)
+        if not has_next:
+            queue_end_token = _next_playback_generation(guild.id)
+            queue_end_session_id = _get_player_session(guild.id)
+            queue_end_current_idx = current_idx
+            queue_end_view = active_views.pop(guild.id, None)
+            if queue_end_view:
+                queue_end_message = queue_end_view.now_playing_msg
+                queue_end_view.now_playing_msg = None
 
         if loop_mode == "track" and error is None and has_next:
             set_now_idx(guild.id, next_idx)
@@ -4205,11 +4308,9 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             if old_view:
                 old_view.current_track = track
                 old_view.current_idx = next_idx
-                await _refresh_player(guild.id)
             else:
                 view = PlayerView(guild, channel, loop, current_track=track, current_idx=next_idx, loop_getter=lambda: loop)
                 active_views[guild.id] = view
-                await _refresh_player(guild.id)
 
             token = _next_playback_generation(guild.id)
             session_id = _get_player_session(guild.id)
@@ -4232,8 +4333,8 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                         loop,
                     ),
             )
-            await _refresh_player(guild.id)
-            await _refresh_queue_msg(guild.id)
+            asyncio.create_task(_refresh_player(guild.id))
+            asyncio.create_task(_refresh_queue_msg(guild.id))
             return
 
         if has_next:
@@ -4250,11 +4351,9 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             if old_view:
                 old_view.current_track = track
                 old_view.current_idx = next_idx
-                await _refresh_player(guild.id)
             else:
                 view = PlayerView(guild, channel, loop, current_track=track, current_idx=next_idx, loop_getter=lambda: loop)
                 active_views[guild.id] = view
-                await _refresh_player(guild.id)
 
             token = _next_playback_generation(guild.id)
             session_id = _get_player_session(guild.id)
@@ -4281,11 +4380,10 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             # ลบ "เพิ่มใน Queue" ของเพลงนี้
             add_msg = queue_add_msgs.get(guild.id, {}).pop(next_idx, None)
             if add_msg:
-                try: await add_msg.delete()
-                except Exception: pass
+                asyncio.create_task(_delete_message_quietly(add_msg))
 
-            await _refresh_player(guild.id)
-            await _refresh_queue_msg(guild.id)
+            asyncio.create_task(_refresh_player(guild.id))
+            asyncio.create_task(_refresh_queue_msg(guild.id))
 
     # ── หมดคิวแล้ว (ไม่มีเพลงถัดไป) ──
     # ต้องทำ "นอก" queue_lock เสมอ เพราะมี await asyncio.sleep(300) ยาวมาก
@@ -4306,11 +4404,9 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             guild_stopped.discard(guild.id)
             return
 
-        # ลบ Player เดิม
-        old_view = active_views.pop(guild.id, None)
-        if old_view and old_view.now_playing_msg:
+        if queue_end_message:
             try:
-                await old_view.now_playing_msg.delete()
+                await queue_end_message.delete()
             except Exception as e:
                 glog(
                     guild.id,
@@ -4319,11 +4415,22 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                     level="error",
                     console=True,
                 )
-            finally:
-                old_view.now_playing_msg = None
+
+        def _queue_end_is_current():
+            return (
+                queue_end_token is not None
+                and playback_generation.get(guild.id) == queue_end_token
+                and _get_player_session(guild.id) == queue_end_session_id
+                and active_views.get(guild.id) is None
+                and get_now_idx(guild.id) == queue_end_current_idx
+            )
+        if not _queue_end_is_current():
+            return
 
         # ล้างข้อความ Queue/Search
         try:
+            if not _queue_end_is_current():
+                return
             await _delete_queue_view_msg(guild.id)
         except Exception as e:
             glog(
@@ -4335,6 +4442,8 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             )
 
         try:
+            if not _queue_end_is_current():
+                return
             await _delete_queue_add_msgs(guild.id)
         except Exception as e:
             glog(
@@ -4346,6 +4455,8 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             )
 
         try:
+            if not _queue_end_is_current():
+                return
             await _delete_search_result_msgs(guild.id)
         except Exception as e:
             glog(
@@ -4358,6 +4469,8 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
 
         # แสดง Queue Done
         try:
+            if not _queue_end_is_current():
+                return
             old_done = queue_done_msgs.pop(guild.id, None)
             if old_done:
                 try:
@@ -4380,6 +4493,12 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             )
 
             msg = await channel.send(embed=done_embed, view=view)
+            if not _queue_end_is_current():
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                return
             done_msg_ref[0] = msg
             queue_done_msgs[guild.id] = msg
 
@@ -4402,54 +4521,44 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             return
 
         # รอ 5 นาที แล้วตรวจว่ามีเพลงใหม่เข้ามาหรือยัง
-        session_id_at_queue_end = _get_player_session(guild.id)
+        session_id_at_queue_end = queue_end_session_id
         await asyncio.sleep(300)
 
-        # A new Player/Stop may have replaced or invalidated this session
-        # while the 5-minute idle timer was sleeping.
-        if session_id_at_queue_end != _get_player_session(guild.id):
-            return
-
-        q_after_wait = get_full_queue(guild.id)
-        vc = guild.voice_client
-
-        if (
-            vc
-            and not vc.is_playing()
-            and not vc.is_paused()
-            and next_idx >= len(q_after_wait)
-        ):
-            try:
-                await _delete_search_result_msgs(guild.id)
-            except Exception:
-                pass
-
-            try:
-                await _delete_queue_view_msg(guild.id)
-            except Exception:
-                pass
-
-            try:
-                await vc.disconnect()
-            except Exception:
-                pass
-
-            clear_guild(guild.id)
-
-            done_msg = queue_done_msgs.pop(guild.id, None)
-            if done_msg:
+        async with get_navigation_lock(guild.id):
+            async with get_queue_lock(guild.id):
+                if (
+                    session_id_at_queue_end != _get_player_session(guild.id)
+                    or playback_generation.get(guild.id) != queue_end_token
+                    or active_views.get(guild.id) is not None
+                ):
+                    return
+                q_after_wait = get_full_queue(guild.id)
+                vc = guild.voice_client
+                if not vc or vc.is_playing() or vc.is_paused() or next_idx < len(q_after_wait):
+                    return
                 try:
-                    await done_msg.delete()
+                    await _delete_search_result_msgs(guild.id)
+                    await _delete_queue_view_msg(guild.id)
                 except Exception:
                     pass
-
-            glog(
-                guild.id,
-                guild.name,
-                "[QUEUE_END] Disconnected after 5 minutes.",
-                level="info",
-                console=True,
-            )
+                try:
+                    await vc.disconnect()
+                except Exception:
+                    pass
+                clear_guild(guild.id)
+                done_msg = queue_done_msgs.pop(guild.id, None)
+                if done_msg:
+                    try:
+                        await done_msg.delete()
+                    except Exception:
+                        pass
+                glog(
+                    guild.id,
+                    guild.name,
+                    "[QUEUE_END] Disconnected after 5 minutes.",
+                    level="info",
+                    console=True,
+                )
 
 
 # ─────────────────────────────────────────────
@@ -4693,10 +4802,11 @@ def register(tree: app_commands.CommandTree, loop_getter):
             old_view.now_playing_msg = None
 
         async with get_navigation_lock(interaction.guild.id):
-            guild_stopped.add(interaction.guild.id)
-            clear_guild(interaction.guild.id)
-            vc.stop()
-            await vc.disconnect()
+            async with get_queue_lock(interaction.guild.id):
+                guild_stopped.add(interaction.guild.id)
+                clear_guild(interaction.guild.id)
+                vc.stop()
+                await vc.disconnect()
 
         old_done = queue_done_msgs.pop(interaction.guild.id, None)
         if old_done:
@@ -4783,29 +4893,27 @@ def register(tree: app_commands.CommandTree, loop_getter):
             return await safe_respond(interaction, embed=discord.Embed(
                 description=f"❌ คุณต้องอยู่ใน **{vc.channel.name}** ถึงจะใช้งานได้",
                 color=discord.Color.red()), ephemeral=True)
-        
-        # Check if there's a current track playing
         current_view = active_views.get(interaction.guild.id)
         if not current_view or not current_view.current_track:
             return await safe_respond(interaction, embed=discord.Embed(
                 description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red()), ephemeral=True)
-        
-        # Get the current index
-        idx = get_now_idx(interaction.guild.id)
-        q = get_full_queue(interaction.guild.id)
-        
-        # Check if there's a next track to play
-        if idx + 1 >= len(q):
-            # No more tracks, stop playback
-            log("⏭ SKIP", interaction, f"idx {idx} → end")
-            try: await interaction.response.send_message("⏳ กำลังข้าม...", ephemeral=True)
-            except Exception: pass
-            vc.stop()
-            return
+        try:
+            await interaction.response.send_message("⏳ กำลังข้าม...", ephemeral=True)
+        except Exception:
+            pass
 
-        # Skip to next track using existing logic from PlayerView.skip()
-        log("⏭ SKIP", interaction, f"idx {idx} → {idx+1}")
-        try: await interaction.response.send_message("⏳ กำลังข้าม...", ephemeral=True)
-        except Exception: pass
         async with get_navigation_lock(interaction.guild.id):
-            await _do_play_at_idx(current_view, idx + 1)
+            if not await _is_current_player(current_view):
+                return
+            vc = interaction.guild.voice_client
+            if not vc or not (vc.is_playing() or vc.is_paused()):
+                return
+            idx = get_now_idx(interaction.guild.id)
+            q = get_full_queue(interaction.guild.id)
+            if not q or idx < 0 or idx >= len(q):
+                return
+            next_idx = idx + 1
+            if next_idx >= len(q) and loop_modes.get(interaction.guild.id, "off") == "queue":
+                next_idx = 0
+            log("⏭ /skip", interaction, f"idx {idx} → {next_idx if next_idx < len(q) else 'end'}")
+            await _do_play_at_idx(current_view, next_idx, relative_delta=1)
