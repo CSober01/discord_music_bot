@@ -166,7 +166,8 @@ PLAYER_PROGRESS_BAR = "━━━━━━━━●━━━━━━━━"
 
 HISTORY_LIMIT = 10  # เก็บเพลงที่เล่นไปแล้วล่าสุดเพื่อ Previous
 MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
-PLAYLIST_FETCH_CONCURRENCY = 2  # ลด burst request เพื่อช่วยลดโอกาสถูก YouTube จำกัดคำขอ
+PLAYLIST_FETCH_CONCURRENCY = 1  # ดึงทีละรายการเพื่อลด burst ของคำขอ YouTube
+PLAYER_PROGRESS_INTERVAL_SECONDS = 10  # อัปเดตตัวเลข/แถบเวลาบน Player ทุก 10 วินาที
 
 
 def get_full_queue(guild_id: int) -> list:
@@ -314,6 +315,15 @@ class _QuietYtDlpLogger:
         return
 
 
+def _bounded_float_env(name: str, default: float, minimum: float, maximum: float) -> float:
+    """Read a numeric environment setting safely and clamp it to a sensible range."""
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
 def get_ydl_options(include_playlist: bool = False, player_client: str | None = None) -> dict:
     """Build shared yt-dlp options with optional secret cookies and per-attempt client fallback."""
     opts = {
@@ -325,10 +335,12 @@ def get_ydl_options(include_playlist: bool = False, player_client: str | None = 
         "source_address": "0.0.0.0",
         "remote_components": ["ejs:github"],
         "socket_timeout": 60,
-        "retries": 3,
-        "fragment_retries": 3,
+        "retries": 2,
+        "fragment_retries": 2,
         "file_access_retries": 2,
-        "extractor_retries": 2,
+        "extractor_retries": 1,
+        # Pause between HTTP requests while extracting YouTube metadata.
+        "sleep_interval_requests": _bounded_float_env("YTDLP_SLEEP_REQUESTS", 1.0, 0.0, 10.0),
         "skip_unavailable_fragments": True,
     }
     cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
@@ -459,8 +471,8 @@ def _fetch_spotify_track_from_search(search_query: str):
     """
     opts = get_ydl_options(include_playlist=False)
     opts["socket_timeout"] = 30
-    opts["retries"] = 5
-    opts["fragment_retries"] = 5
+    opts["retries"] = 2
+    opts["fragment_retries"] = 2
     
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(search_query, download=False)
@@ -632,8 +644,8 @@ def fetch_playlist_tracks(query: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> l
 
     opts = get_ydl_options(include_playlist=True)
     opts["socket_timeout"] = 30
-    opts["retries"] = 3
-    opts["fragment_retries"] = 3
+    opts["retries"] = 2
+    opts["fragment_retries"] = 2
     opts["playlistend"] = max_tracks
     opts["extract_flat"] = "in_playlist"
     
@@ -682,8 +694,8 @@ def _fetch_track_once(query: str, player_client: str | None = None):
                 
                 opts = get_ydl_options(include_playlist=False, player_client=player_client)
                 opts["socket_timeout"] = 30
-                opts["retries"] = 5
-                opts["fragment_retries"] = 5
+                opts["retries"] = 2
+                opts["fragment_retries"] = 2
                 
                 try:
                     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -715,8 +727,8 @@ def _fetch_track_once(query: str, player_client: str | None = None):
     
     opts = get_ydl_options(include_playlist=False, player_client=player_client)
     opts["socket_timeout"] = 30
-    opts["retries"] = 5
-    opts["fragment_retries"] = 5
+    opts["retries"] = 2
+    opts["fragment_retries"] = 2
     
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -746,8 +758,8 @@ def search_tracks(query: str, limit: int = 5):
     opts["extract_flat"] = "in_playlist"
     opts["default_search"] = "ytsearch5"
     opts["socket_timeout"] = 30
-    opts["retries"] = 3
-    opts["fragment_retries"] = 3
+    opts["retries"] = 2
+    opts["fragment_retries"] = 2
     results = []
     
     try:
@@ -1160,7 +1172,7 @@ _player_progress_tasks: dict[int, asyncio.Task] = {}
 async def _player_progress_loop(guild_id: int):
     try:
         while guild_id in active_views:
-            await asyncio.sleep(10)
+            await asyncio.sleep(PLAYER_PROGRESS_INTERVAL_SECONDS)
             view = active_views.get(guild_id)
             vc = view.guild.voice_client if view else None
             if not view or not view.current_track:
@@ -2254,6 +2266,11 @@ def _is_youtube_anti_bot_error(error: Exception) -> bool:
         or "confirm you're not a bot" in message
         or ("not a bot" in message and "sign in" in message)
         or "login_required" in message
+        # Include temporary YouTube throttling errors so workers do not search fallback titles.
+        or "http error 429" in message
+        or "too many requests" in message
+        or "rate limit" in message
+        or "this content isn't available, try again later" in message
     )
 
 
@@ -2293,7 +2310,8 @@ def fetch_track(query: str, anti_bot_retries: int = 2):
     if _is_youtube_cooldown_active():
         raise ValueError("YOUTUBE_ANTI_BOT_COOLDOWN")
 
-    clients = [None, "tv", "web_safari"][:max(1, min(anti_bot_retries + 1, 3))]
+    # Only one alternate client is attempted after a challenge to limit extra requests.
+    clients = [None, "tv"][:max(1, min(anti_bot_retries + 1, 2))]
     last_error = None
     saw_anti_bot = False
     for attempt, client in enumerate(clients):
