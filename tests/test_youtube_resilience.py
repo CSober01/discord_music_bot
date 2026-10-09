@@ -201,6 +201,36 @@ class YouTubeResilienceTests(unittest.TestCase):
         self.assertIn("YouTube จำกัด 1", output.getvalue())
         self.assertNotIn("ERROR: [youtube]", output.getvalue())
 
+    def test_playlist_url_ordinary_failure_uses_title_fallback(self):
+        track = {
+            "url": "https://www.youtube.com/watch?v=example",
+            "title": "Replacement Song",
+        }
+        result = ("stream-url", "Replacement Song", "3:30", "thumbnail")
+        with patch.object(
+            sc, "fetch_track",
+            side_effect=[ValueError("Private video"), result],
+        ) as fetch, patch.object(sc, "glog"):
+            actual = sc._fetch_playlist_track_sync(track, 123, "Test guild")
+
+        self.assertEqual(actual, (result, "fallback_ok"))
+        self.assertEqual(fetch.call_count, 2)
+        fetch.assert_any_call(track["url"])
+        fetch.assert_any_call("Replacement Song")
+
+    def test_playlist_url_anti_bot_does_not_use_title_fallback(self):
+        track = {
+            "url": "https://www.youtube.com/watch?v=blocked",
+            "title": "Blocked Song",
+        }
+        with patch.object(
+            sc, "fetch_track", side_effect=ValueError("YOUTUBE_ANTI_BOT")
+        ) as fetch, patch.object(sc, "glog"):
+            actual = sc._fetch_playlist_track_sync(track, 123, "Test guild")
+
+        self.assertEqual(actual, (None, "anti_bot"))
+        fetch.assert_called_once_with(track["url"])
+
     def test_queue_page_size_and_playlist_cap(self):
         self.assertEqual(sc.QUEUE_PAGE_SIZE, 10)
         self.assertEqual(sc.MAX_PLAYLIST_FETCH, 50)
