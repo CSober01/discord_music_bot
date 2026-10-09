@@ -291,5 +291,43 @@ class StalePlaylistWorkerTests(unittest.IsolatedAsyncioTestCase):
                 sc.playlist_fetch_generation[guild.id] = previous_generation
 
 
+
+class QueueHistoryTests(unittest.TestCase):
+    """Regression coverage for rolling history trimming without dropping upcoming tracks."""
+
+    def setUp(self):
+        self.guild_id = 987653
+        self.saved = {}
+        for name in ("full_queues", "now_playing_idx", "queue_seq_offset", "guild_total_added"):
+            mapping = getattr(sc, name)
+            self.saved[name] = (self.guild_id in mapping, mapping.get(self.guild_id))
+        sc.full_queues[self.guild_id] = [
+            (f"url-{i}", f"Track {i + 1}", "3:00", None, None)
+            for i in range(14)
+        ]
+        sc.now_playing_idx[self.guild_id] = 11
+        sc.queue_seq_offset[self.guild_id] = 0
+        sc.guild_total_added[self.guild_id] = 14
+
+    def tearDown(self):
+        for name, (existed, value) in self.saved.items():
+            mapping = getattr(sc, name)
+            if existed:
+                mapping[self.guild_id] = value
+            else:
+                mapping.pop(self.guild_id, None)
+        sc.queue_add_msgs.pop(self.guild_id, None)
+
+    def test_trim_history_keeps_current_and_all_upcoming_tracks(self):
+        sc._trim_queue(self.guild_id)
+        queue = sc.get_full_queue(self.guild_id)
+
+        self.assertEqual(len(queue), 13)
+        self.assertEqual(queue[sc.get_now_idx(self.guild_id)][1], "Track 12")
+        self.assertEqual(sc.get_now_idx(self.guild_id), 10)
+        self.assertEqual(sc.get_seq_offset(self.guild_id), 1)
+        self.assertEqual(sc.display_no(self.guild_id, sc.get_now_idx(self.guild_id)), 12)
+        self.assertEqual([track[1] for track in queue[-2:]], ["Track 13", "Track 14"])
+
 if __name__ == "__main__":
     unittest.main()
