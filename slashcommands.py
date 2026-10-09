@@ -1526,10 +1526,6 @@ class PlaylistChoiceView(discord.ui.LayoutView):
         first_row.add_item(single)
         first_row.add_item(more)
         cancel_row = discord.ui.ActionRow()
-        try:
-            cancel.width = 5
-        except Exception:
-            pass
         cancel_row.add_item(cancel)
         cancel.callback = self._cancel
         self.add_item(discord.ui.Container(
@@ -1694,10 +1690,6 @@ class PlaylistCountView(discord.ui.LayoutView):
             custom_id="playlist_count_cancel",
         )
         cancel_row = discord.ui.ActionRow()
-        try:
-            cancel.width = 5
-        except Exception:
-            pass
         cancel_row.add_item(cancel)
         cancel.callback = self._cancel_selection
         parts.append(cancel_row)
@@ -1837,20 +1829,12 @@ class RadioChoiceView(discord.ui.LayoutView):
             style=discord.ButtonStyle.danger,
             custom_id="youtube_radio_cancel",
         )
-        try:
-            cancel.width = 5
-        except Exception:
-            pass
         cancel.callback = self.cancel_btn
 
         choice_row = discord.ui.ActionRow()
         choice_row.add_item(single)
         choice_row.add_item(playlist)
         cancel_row = discord.ui.ActionRow()
-        try:
-            cancel.width = 5
-        except Exception:
-            pass
         cancel_row.add_item(cancel)
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("## 📻 YouTube Radio / Mix"),
@@ -3498,17 +3482,10 @@ class PlayerView(discord.ui.LayoutView):
             ])
         for row, cid, label, style, callback, emoji in specs:
             button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=cid)
-            if cid in {"player_seek_back", "player_seek_forward"}:
-                # Icon-only seek controls use the same compact width as the other player controls.
-                button.width = 1
             if cid == "player_queue_page":
                 button.disabled = True
             if cid in {"playlist_choice_cancel", "playlist_count_cancel", "radio_mix_cancel"}:
-                # Keep Cancel alone on a full-width row in the Components V2 menu.
-                try:
-                    button.width = 5
-                except Exception:
-                    pass
+                # Keep Cancel alone on its own row; discord.py buttons have fixed width.
             button.callback = lambda interaction, cb=callback, btn=button: cb(interaction, btn)
             row.add_item(button)
             self._buttons[cid] = button

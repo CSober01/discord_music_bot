@@ -367,6 +367,39 @@ class PlaylistChoiceTrackResolutionTests(unittest.TestCase):
             sc._resolve_playlist_choice_track({"duration": 210})
 
 
+class PlayerViewConstructionTests(unittest.TestCase):
+    def test_player_view_builds_with_read_only_button_width(self):
+        class FakeGuild:
+            id = 987652
+
+            @staticmethod
+            def get_emoji(emoji_id):
+                return None
+
+        # Building the active player layout must not assign to Button.width,
+        # which is a read-only property in supported discord.py versions.
+        view = sc.PlayerView(
+            FakeGuild(),
+            channel=None,
+            loop=None,
+            current_track=(
+                "https://audio.example/stream",
+                "Example Song",
+                "3:30",
+                None,
+                None,
+            ),
+            current_idx=0,
+            loop_getter=lambda: None,
+        )
+
+        self.assertIn("player_seek_back", view._buttons)
+        self.assertIn("player_seek_forward", view._buttons)
+        self.assertEqual(view._buttons["player_seek_back"].width, 1)
+        self.assertEqual(view._buttons["player_seek_forward"].width, 1)
+        view.stop()
+
+
 class QueueHistoryTests(unittest.TestCase):
     """Regression coverage for rolling history trimming without dropping upcoming tracks."""
 
