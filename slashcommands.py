@@ -3350,7 +3350,7 @@ class PlayerView(discord.ui.LayoutView):
             for pos in history_positions:
                 track_url, track_title, track_duration, *_ = q[pos]
                 shown = _truncate_display_width(queue_display_titles.get(track_url, track_title), 70)
-                hist_lines.append(f"{display_no(gid, pos):02d} ♫ {_player_track_link(track_url, shown)} · {track_duration}")
+                hist_lines.append(f"{display_no(gid, pos)}. ♫ {_player_track_link(track_url, shown)} · {track_duration}")
             parts.append(discord.ui.TextDisplay("**HISTORY**\n" + ("\n".join(hist_lines) if hist_lines else "_ยังไม่มีประวัติเพลง_")))
             next_start = idx + 1
             upcoming = q[next_start:next_start + 3] if q else []
@@ -3358,7 +3358,7 @@ class PlayerView(discord.ui.LayoutView):
             for pos, track in enumerate(upcoming, start=next_start):
                 track_url, track_title, track_duration, *_ = track
                 shown = _truncate_display_width(queue_display_titles.get(track_url, track_title), 70)
-                next_lines.append(f"{display_no(gid, pos):02d} ♫ {_player_track_link(track_url, shown)} · {track_duration}")
+                next_lines.append(f"{display_no(gid, pos)}. ♫ {_player_track_link(track_url, shown)} · {track_duration}")
             parts.append(discord.ui.TextDisplay("**UP NEXT**\n" + ("\n".join(next_lines) if next_lines else "_ไม่มีเพลงถัดไป_")))
 
         loading = playlist_loading_status.get(gid)
