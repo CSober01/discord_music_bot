@@ -19,6 +19,7 @@ import unicodedata
 import random
 import uuid
 import time
+import threading
 
 
 def _html_unescape(text: str) -> str:
@@ -101,6 +102,7 @@ active_views: dict[int, "PlayerView"] = {}
 queue_done_msgs: dict[int, object] = {}
 queue_add_msgs: dict[int, dict[int, object]] = {}
 queue_view_msgs: dict[tuple[int, int], tuple[object, "QueueView"]] = {}
+player_queue_view_msgs: dict[tuple[int, int], tuple[object, "PlayerQueueView"]] = {}
 search_result_msgs: dict[int, list] = {}
 player_repost_tasks: dict[int, asyncio.Task] = {}
 
@@ -158,13 +160,13 @@ def _next_playback_generation(guild_id: int) -> int:
 # Player UI state
 loop_modes: dict[int, str] = {}
 shuffle_enabled: set[int] = set()
-QUEUE_PAGE_SIZE = 20
+QUEUE_PAGE_SIZE = 10
 QUEUE_DIVIDER = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 PLAYER_PROGRESS_BAR = "━━━━━━━━●━━━━━━━━"
 
 HISTORY_LIMIT = 10  # เก็บเพลงที่เล่นไปแล้วล่าสุดเพื่อ Previous
 MAX_PLAYLIST_FETCH = 50  # ดึงเพลงจาก playlist สูงสุด 50 อัน
-PLAYLIST_FETCH_CONCURRENCY = 5  # จำกัดจำนวน request พร้อมกันไปหา YouTube กันโดน rate-limit (HTTP 429)
+PLAYLIST_FETCH_CONCURRENCY = 2  # ลด burst request เพื่อช่วยลดโอกาสถูก YouTube จำกัดคำขอ
 
 
 def get_full_queue(guild_id: int) -> list:
@@ -292,22 +294,40 @@ def clear_guild(guild_id: int):
 def _queue_pos_str(guild_id: int, idx: int) -> str:
     return f"กำลังเล่น #{display_no(guild_id, idx)} จาก {get_total_added(guild_id)} เพลง"
 
-def get_ydl_options(include_playlist: bool = False) -> dict:
-    """Use yt-dlp's current YouTube client defaults and shared retry settings."""
+class _QuietYtDlpLogger:
+    """Suppress raw yt-dlp output so it cannot corrupt the playlist progress line."""
+    def debug(self, message):
+        return
+
+    def warning(self, message):
+        return
+
+    def error(self, message):
+        return
+
+
+def get_ydl_options(include_playlist: bool = False, player_client: str | None = None) -> dict:
+    """Build shared yt-dlp options with optional secret cookies and per-attempt client fallback."""
     opts = {
         "format": "bestaudio/best",
         "quiet": True,
         "no_warnings": True,
+        "logger": _QuietYtDlpLogger(),
         "default_search": "ytsearch",
         "source_address": "0.0.0.0",
         "remote_components": ["ejs:github"],
         "socket_timeout": 60,
-        "retries": 5,
-        "fragment_retries": 5,
-        "file_access_retries": 3,
-        "extractor_retries": 3,
+        "retries": 3,
+        "fragment_retries": 3,
+        "file_access_retries": 2,
+        "extractor_retries": 2,
         "skip_unavailable_fragments": True,
     }
+    cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
+    if cookies_file and os.path.isfile(cookies_file):
+        opts["cookiefile"] = cookies_file
+    if player_client:
+        opts.setdefault("extractor_args", {}).setdefault("youtube", {})["player_client"] = [player_client]
     opts["noplaylist"] = not include_playlist
     return opts
 
@@ -627,12 +647,13 @@ def fetch_playlist_tracks(query: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> l
                 
                 tracks.append(track_info)
     except Exception as e:
-        print(f"Fetch playlist error: {str(e)}")
+        if _is_youtube_anti_bot_error(e):
+            raise ValueError("YOUTUBE_ANTI_BOT") from e
         raise
     
     return tracks
 
-def _fetch_track_once(query: str):
+def _fetch_track_once(query: str, player_client: str | None = None):
     """ดึงข้อมูล single track
     รองรับ: YouTube URLs, Spotify Track URLs, Search queries
     """
@@ -646,7 +667,7 @@ def _fetch_track_once(query: str):
                 search_query = f"{track_info['title']} {track_info['artist']}"
                 print(f"  {'🎵 Spotify→YT':<13}: {track_info['title']} — {track_info['artist']}")
                 
-                opts = get_ydl_options(include_playlist=False)
+                opts = get_ydl_options(include_playlist=False, player_client=player_client)
                 opts["socket_timeout"] = 30
                 opts["retries"] = 5
                 opts["fragment_retries"] = 5
@@ -665,7 +686,7 @@ def _fetch_track_once(query: str):
                         _remember_queue_display_title(info, url)
                         return url, title, f"{minutes}:{seconds:02d}", info.get("thumbnail")
                 except Exception as e:
-                    print(f"YouTube search error: {str(e)}")
+                    logging.getLogger("yt_dlp").warning("YouTube extraction failed: %s", type(e).__name__)
                     raise ValueError("SPOTIFY_NO_YOUTUBE_MATCH")
             else:
                 raise ValueError("SPOTIFY_SCRAPE_ERROR")
@@ -679,7 +700,7 @@ def _fetch_track_once(query: str):
     if "spotify.com" in query.lower():
         raise ValueError("SPOTIFY_UNSUPPORTED_LINK")
     
-    opts = get_ydl_options(include_playlist=False)
+    opts = get_ydl_options(include_playlist=False, player_client=player_client)
     opts["socket_timeout"] = 30
     opts["retries"] = 5
     opts["fragment_retries"] = 5
@@ -729,7 +750,9 @@ def search_tracks(query: str, limit: int = 5):
                         "duration": duration,
                     })
     except Exception as e:
-        print(f"Search error: {str(e)}")
+        logging.getLogger("yt_dlp").warning(
+            "YouTube search failed (%s)", "anti-bot" if _is_youtube_anti_bot_error(e) else type(e).__name__
+        )
     
     return results
 
