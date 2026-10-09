@@ -1645,7 +1645,7 @@ The error “Sign in to confirm you're not a bot” is a YouTube access restrict
 
    On Windows, install Deno in PowerShell using `winget install DenoLand.Deno`, then close/reopen the terminal and verify with `deno --version`. After updating the project dependencies, restart the bot process so the Python process picks up the installed runtime. Official instructions: https://docs.deno.com/runtime/getting_started/installation/
 2. Keep yt-dlp's default YouTube client as the first attempt. Only after a detected anti-bot error, try the limited alternative clients tv and web_safari.
-3. If all profiles hit anti-bot protection, open a 180-second circuit breaker. During that window, new track extraction fails fast instead of retrying every playlist item or searching a replacement title.
+3. If any YouTube search, playlist listing or track fetch hits anti-bot protection, open a shared 180-second circuit breaker. During that window, new YouTube requests fail fast instead of retrying playlist items or searching replacement titles.
 4. Playlist fetch concurrency is limited to 2. A failure in one worker is caught and counted, so asyncio.gather can finish cleanup and clear the loading status rather than leaving the Player stuck.
 5. Raw yt-dlp logger output is suppressed so terminal errors cannot append to the carriage-return progress line. The worker still records a short cause in the guild log.
 6. Optional YTDLP_COOKIES_FILE can point to a Netscape/Mozilla-format cookies file on the host. Mount/configure this file outside the repository. Never commit it, print its contents, or paste it into logs. Cookies are sensitive login credentials and can expire. Reference: https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp
@@ -1657,6 +1657,6 @@ The error “Sign in to confirm you're not a bot” is a YouTube access restrict
 - [ ] With 4, 5, 11, 25, 48 and 80 found tracks, check count buttons and the 50-track cap.
 - [ ] Verify both custom seek emoji render in the target Discord server and seek exactly 10 seconds. If the server cannot use the emojis, verify Unicode fallback.
 - [ ] Verify elapsed time increments every 10 seconds, pauses, resumes, seeks and resets on Next/Previous.
-- [ ] Simulate an anti-bot error and verify alternative clients are attempted only after that error, the circuit breaker stops extra calls for 180 seconds, and no raw ERROR: text interleaves with progress.
+- [ ] Simulate anti-bot errors in track fetch, playlist listing and search; verify they share the 180-second circuit breaker, alternative clients run only after the challenge, and raw ERROR: text never interleaves with progress.
 - [ ] Force one background fetch worker to raise unexpectedly and verify the loading status is cleared at completion.
 - [ ] Test all button callbacks in Discord, including Radio/Mix, playlist count, Queue pagination, Stop, and external voice disconnect.
