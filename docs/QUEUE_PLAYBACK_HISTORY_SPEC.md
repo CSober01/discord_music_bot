@@ -315,17 +315,18 @@ QUEUE_PAGE_SIZE ยังคงเป็น 20
 
 ห้ามใช้ Queue snapshot เก่า
 
-## 20. make_now_playing_embed()
+## 20. Player Rendering
 
 Player ต้องอ่าน Queue state เดียวกับ /queue
 
 ถ้า Current = #30:
-  History: #20-#29
+  History ที่แสดง: #27-#29
   Current: #30
-  Upcoming: #31-#35
+  Upcoming ที่แสดง: #31-#33
 
-สูงสุด 7 เพลง:
+Player แสดงสูงสุด 7 เพลง:
   3 History + 1 Current + 3 Upcoming
+  แต่ Previous ยังใช้ History จริงย้อนหลังได้สูงสุด 10 เพลง
 
 ถ้ามีไม่ถึงจำนวนดังกล่าวให้แสดงเท่าที่มี
 
