@@ -11,14 +11,17 @@ This document describes the expected behavior and operational safeguards in `sla
   - Back 10 seconds: `1455985625097306142`
 - The player uses the custom emoji when it is available in the server or the bot has permission to use external emoji. Otherwise it falls back to Unicode controls so the buttons remain usable.
 - The divider before the controls uses the shared `QUEUE_DIVIDER` constant so its length remains consistent.
-- Playlist and Mix/Radio URLs use an explicit choice flow without preview tracks. Playlist choice shows two lines (`🎵 เลือกเพลงจาก Playlist` and `พบรายการเพลงใน Playlist นี้`) with `เล่นเพลงนี้เพลงเดียว`, `เลือกเพลงเพิ่มเติม`, and `ยกเลิก`. The Radio/Mix menu in the main player shows `เล่นเพลงนี้เท่านั้น`, `โหลดเพลงจาก Mix`, and a full-width `ยกเลิก` row. When a player is active, these controls render inside the same Components V2 player container; the standalone picker uses the same source-aware labels. If a URL identifies a specific video, the single-track action removes the playlist parameter and plays that video; for a playlist-only URL, it plays the first resolved entry. The count picker offers each of 5/10/20/30 that is less than or equal to the detected track count, plus the exact total for a non-standard count up to 30. `เพิ่มทั้งหมด` is capped at 50 tracks. Cancel stays on its own row.
+- The Main Player shows a prominent Markdown-heading link for the current YouTube track; no explicit underline styling is applied. The title opens the source-page URL only when yt-dlp provides a safe URL. Artist/source appears below it, followed by playback position, active shuffle/repeat indicators (hidden when off), volume meter, and requester on separate lines.
+- The Main Player has exactly two control rows: Row 1 = Previous, seek back 10 seconds, Pause/Resume, seek forward 10 seconds, Next. Row 2 = Search, Queue, Shuffle, Repeat, Stop. The ordinary buttons use Secondary styling rather than blue Primary styling; Stop remains red/Danger.
+- History and Up Next are displayed below both control rows, with up to three recent history tracks and three upcoming tracks. Their titles are YouTube links when a safe page URL exists. Queue and playlist-count pages, plus Radio/Mix choices, are separate ephemeral views rather than submenus embedded in the Main Player. These views have no Cancel button; they expire and close automatically.
+- For a URL identifying one video, the single-track action removes the playlist parameter and plays that video; for a playlist-only URL, it plays the first resolved entry. The count picker offers each of 5/10/20/30 that is less than or equal to the detected track count, plus Add All using the actual discovered count capped at 50 tracks.
 - A seek replaces the FFmpeg audio source and increments the playback generation. The completion callback from the replaced source must not advance the queue.
 
 ## Queue and playlist behavior
 
 - A playlist import is capped at `MAX_PLAYLIST_FETCH = 50` entries.
 - The first playable entry is resolved first so playback can begin before the entire playlist has been processed.
-- Remaining entries share one process-wide semaphore and a five-second delay to reduce request bursts.
+- Remaining entries are fetched four at a time under one process-wide semaphore shared across all guilds. Each completed batch is appended to the Queue and displayed immediately; there is no extra five-second delay between playlist entries. yt-dlp's configured internal request pacing and the shared anti-bot cooldown remain in place.
 - Playlist progress is an in-place console line. yt-dlp's raw stderr is suppressed so a fatal `ERROR: [youtube]...` line cannot overwrite the progress display; exceptions still propagate and are recorded in the guild log. A completed batch prints a summary; a batch invalidated by stop/disconnect must not print a false completion summary.
 - The player queue page contains 10 tracks. Previous/next controls are disabled at the page boundaries.
 - Previously played entries are retained in the queue up to `HISTORY_LIMIT = 10`; the player displays the latest three previous entries and up to three upcoming entries.
@@ -87,6 +90,7 @@ Before merging or deploying changes, verify:
 - [ ] Pause/resume freezes and resumes the displayed elapsed time.
 - [ ] Seek controls move exactly 10 seconds and do not cause the next track to start unexpectedly.
 - [ ] A 20-track queue has two pages; previous/next controls disable at the correct boundaries.
+- [ ] A playlist with more than four entries appends additional tracks in batches of up to four and updates Queue/Player after each batch, without a fixed five-second delay.
 - [ ] Stop/disconnect during playlist loading prevents stale workers from issuing more requests.
 - [ ] Simulated `Sign in to confirm you're not a bot` opens cooldown, skips title fallback, and produces a readable user message.
 - [ ] No cookie file or token appears in logs, commits, or repository files.
