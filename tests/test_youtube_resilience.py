@@ -111,8 +111,29 @@ class YouTubeResilienceTests(unittest.TestCase):
     def test_search_short_circuits_while_circuit_breaker_is_open(self):
         sc._youtube_anti_bot_until = time.monotonic() + 120
         with patch.object(sc.yt_dlp, "YoutubeDL") as youtube_dl:
-            self.assertEqual(sc.search_tracks("test search"), [])
+            with self.assertRaisesRegex(ValueError, "YOUTUBE_ANTI_BOT_COOLDOWN"):
+                sc.search_tracks("test search")
         youtube_dl.assert_not_called()
+
+    def test_search_anti_bot_opens_shared_circuit_breaker(self):
+        class BlockedYoutubeDL:
+            def __init__(self, options):
+                self.options = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def extract_info(self, query, download=False):
+                raise RuntimeError("Sign in to confirm you're not a bot")
+
+        with patch.object(sc.yt_dlp, "YoutubeDL", BlockedYoutubeDL):
+            with self.assertRaisesRegex(ValueError, "YOUTUBE_ANTI_BOT"):
+                sc.search_tracks("blocked search")
+
+        self.assertTrue(sc._is_youtube_cooldown_active())
 
 
 if __name__ == "__main__":
