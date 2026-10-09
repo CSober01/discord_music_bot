@@ -2299,7 +2299,8 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
 
     if playlist_loading_status.get(guild.id) is progress:
         playlist_loading_status.pop(guild.id, None)
-    await _refresh_player(guild.id)
+    # The debounced repost renders the final Queue and loading state together.
+    await _schedule_player_repost(guild.id)
 
     await _send_playlist_added_summary(guild.id, channel, requester, added)
 
