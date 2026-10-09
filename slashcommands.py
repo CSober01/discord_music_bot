@@ -745,11 +745,26 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
 
     if guild_id is not None:
         volume_pct = round(get_guild_volume(guild_id) * 100)
-        embed.description += (
-            f"    👤 {requester_str}          🔊 {volume_pct}%\n"
-            f"    🔀 Shuffle            🔁 Repeat\n\n"
-            f"{QUEUE_DIVIDER}\n"
-        )
+        embed.description += f"    👤 {requester_str}          🔊 {volume_pct}%\n"
+
+        status_lines = []
+        if guild_id in shuffle_enabled:
+            status_lines.append("🔀 Shuffle: เปิด")
+
+        repeat_mode = loop_modes.get(guild_id, "off")
+        repeat_labels = {
+            "track": "🔁 Repeat: วนเพลงนี้",
+            "queue": "🔁 Repeat: วน Queue",
+        }
+        if repeat_mode in repeat_labels:
+            status_lines.append(repeat_labels[repeat_mode])
+
+        if status_lines:
+            embed.description += "    " + "            ".join(status_lines) + "\n\n"
+        else:
+            embed.description += "\n"
+
+        embed.description += f"{QUEUE_DIVIDER}\n"
 
         queue_lines = []
         if history:
@@ -762,7 +777,8 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
                 )
 
         if upcoming:
-            queue_lines.append("")
+            if history:
+                queue_lines.append("")
             queue_lines.append("⏭️ *Next*")
             for offset, track in enumerate(upcoming, start=upcoming_start):
                 url, track_title, track_duration, _requester, *_rest = track
@@ -2428,6 +2444,7 @@ class QueueView(discord.ui.View):
         if self.page <= 0:
             return
         self.page -= 1
+        self._sync_buttons()
         await interaction.edit_original_response(
             embed=make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=self.page),
             view=self,
@@ -2446,6 +2463,7 @@ class QueueView(discord.ui.View):
         if self.page >= self._page_count() - 1:
             return
         self.page += 1
+        self._sync_buttons()
         await interaction.edit_original_response(
             embed=make_queue_embed(self.guild.id, current_idx=get_now_idx(self.guild.id), page=self.page),
             view=self,
@@ -2701,13 +2719,24 @@ class PlayerView(discord.ui.View):
         async with get_queue_lock(self.guild.id):
             q = get_full_queue(self.guild.id)
             idx = get_now_idx(self.guild.id)
-            upcoming = q[idx + 1:]
-            if len(upcoming) < 2:
-                return await safe_respond(interaction, embed=discord.Embed(description="❌ ต้องมีเพลงถัดไปอย่างน้อย 2 เพลงจึงจะ Shuffle ได้", color=discord.Color.orange()), ephemeral=True)
-            random.shuffle(upcoming)
-            q[idx + 1:] = upcoming
-            shuffle_enabled.add(self.guild.id)
-        log("🔀 SHUFFLE", interaction, f"upcoming={len(upcoming)}")
+
+            if self.guild.id in shuffle_enabled:
+                shuffle_enabled.discard(self.guild.id)
+                shuffle_state = "off"
+                upcoming_count = max(0, len(q) - idx - 1)
+            else:
+                upcoming = q[idx + 1:]
+                if len(upcoming) < 2:
+                    return await safe_respond(interaction, embed=discord.Embed(
+                        description="❌ ต้องมีเพลงถัดไปอย่างน้อย 2 เพลงจึงจะเปิด Shuffle ได้",
+                        color=discord.Color.orange()), ephemeral=True)
+                random.shuffle(upcoming)
+                q[idx + 1:] = upcoming
+                shuffle_enabled.add(self.guild.id)
+                shuffle_state = "on"
+                upcoming_count = len(upcoming)
+
+        log("🔀 SHUFFLE", interaction, f"state={shuffle_state}, upcoming={upcoming_count}")
         await asyncio.gather(_refresh_player(self.guild.id), _refresh_queue_msg(self.guild.id))
 
 
