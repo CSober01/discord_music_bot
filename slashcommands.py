@@ -1505,13 +1505,16 @@ class PlaylistChoiceView(discord.ui.LayoutView):
         self.message = None
         self._busy = False
 
+        is_radio_mix = "radio" in self.source_label.lower() or "mix" in self.source_label.lower()
+        single_label = "เล่นเพลงนี้เท่านั้น" if is_radio_mix else "เล่นเพลงนี้เพลงเดียว"
+        more_label = "โหลดเพลงจาก Mix" if is_radio_mix else "เลือกเพลงเพิ่มเติม"
         single = discord.ui.Button(
-            label="เล่นเพลงนี้เพลงเดียว", emoji="▶️",
+            label=single_label, emoji="▶️",
             style=discord.ButtonStyle.success, custom_id="playlist_play_single",
         )
         single.callback = self._play_single
         more = discord.ui.Button(
-            label="เลือกเพลงเพิ่มเติม", emoji="📋",
+            label=more_label, emoji="📋",
             style=discord.ButtonStyle.primary, custom_id="playlist_choose_more",
         )
         more.callback = self._choose_more
@@ -1523,10 +1526,16 @@ class PlaylistChoiceView(discord.ui.LayoutView):
         first_row.add_item(single)
         first_row.add_item(more)
         cancel_row = discord.ui.ActionRow()
+        try:
+            cancel.width = 5
+        except Exception:
+            pass
         cancel_row.add_item(cancel)
         cancel.callback = self._cancel
         self.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("## 🎵 เลือกเพลงจาก Playlist\nพบรายการเพลงใน Playlist นี้"),
+            discord.ui.TextDisplay(
+                f"## 🎵 เลือกเพลงจาก {self.source_label}\nพบรายการเพลงใน {self.source_label} นี้"
+            ),
             first_row,
             cancel_row,
             accent_colour=0x5865F2,
@@ -1654,7 +1663,7 @@ class PlaylistCountView(discord.ui.LayoutView):
             )
         ]
         # Show fixed choices and the exact count when it is a small non-standard total.
-        choices = [n for n in (5, 10, 20, 30) if n < count]
+        choices = [n for n in (5, 10, 20, 30) if n <= count]
         if count and count <= 30 and count not in (5, 10, 20, 30):
             choices.append(count)
         row = discord.ui.ActionRow()
@@ -1669,6 +1678,7 @@ class PlaylistCountView(discord.ui.LayoutView):
 
         add_all = discord.ui.Button(
             label=f"เพิ่มทั้งหมด ({count})",
+            emoji="➕",
             style=discord.ButtonStyle.success,
             custom_id="playlist_count_all",
         )
@@ -1683,6 +1693,10 @@ class PlaylistCountView(discord.ui.LayoutView):
             custom_id="playlist_count_cancel",
         )
         cancel_row = discord.ui.ActionRow()
+        try:
+            cancel.width = 5
+        except Exception:
+            pass
         cancel_row.add_item(cancel)
         cancel.callback = self._cancel_selection
         parts.append(cancel_row)
@@ -1832,6 +1846,10 @@ class RadioChoiceView(discord.ui.LayoutView):
         choice_row.add_item(single)
         choice_row.add_item(playlist)
         cancel_row = discord.ui.ActionRow()
+        try:
+            cancel.width = 5
+        except Exception:
+            pass
         cancel_row.add_item(cancel)
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("## 📻 YouTube Radio / Mix"),
@@ -3332,10 +3350,16 @@ class PlayerView(discord.ui.LayoutView):
                 f"### 🎶 QUEUE · {self.queue_page + 1}/{total_pages}\n"
                 + ("\n".join(lines) if lines else "_คิวยังว่างอยู่_")
             ))
-        elif self.player_menu == "playlist_choice":
+        elif self.player_menu == "radio":
             parts.append(discord.ui.TextDisplay(
-                "### 🎵 เลือกเพลงจาก Playlist\n"
-                "พบรายการเพลงใน Playlist นี้"
+                "### 📻 YOUTUBE RADIO / MIX\n"
+                "เลือกว่าจะเล่นเพลงเดียวหรือโหลดเพลงจาก Mix"
+            ))
+        elif self.player_menu == "playlist_choice":
+            source_label = self.player_menu_source.strip() or "Playlist"
+            parts.append(discord.ui.TextDisplay(
+                f"### 🎵 เลือกเพลงจาก {source_label}\n"
+                f"พบรายการเพลงใน {source_label} นี้"
             ))
         elif self.player_menu == "playlist_count":
             count = min(len(self.player_menu_tracks), MAX_PLAYLIST_FETCH)
@@ -3385,17 +3409,20 @@ class PlayerView(discord.ui.LayoutView):
             (secondary, "player_loop", None, discord.ButtonStyle.secondary, self.loop_btn, "🔁"),
         ]
         if self.player_menu == "playlist_choice":
+            is_radio_mix = "radio" in self.player_menu_source.lower() or "mix" in self.player_menu_source.lower()
+            single_label = "เล่นเพลงนี้เท่านั้น" if is_radio_mix else "เล่นเพลงนี้เพลงเดียว"
+            more_label = "โหลดเพลงจาก Mix" if is_radio_mix else "เลือกเพลงเพิ่มเติม"
             specs.extend([
-                (tertiary, "playlist_play_single", "เล่นเพลงนี้เพลงเดียว",
+                (tertiary, "playlist_play_single", single_label,
                  discord.ButtonStyle.success, self.play_playlist_single, "▶️"),
-                (tertiary, "playlist_choose_more", "เลือกเพลงเพิ่มเติม",
+                (tertiary, "playlist_choose_more", more_label,
                  discord.ButtonStyle.primary, self.choose_more_playlist, "📋"),
                 (quaternary, "playlist_choice_cancel", "ยกเลิก",
                  discord.ButtonStyle.danger, self.cancel_playlist_choice, "❌"),
             ])
         elif self.player_menu == "playlist_count":
             count = min(len(self.player_menu_tracks), MAX_PLAYLIST_FETCH)
-            choices = [n for n in (5, 10, 20, 30) if n < count]
+            choices = [n for n in (5, 10, 20, 30) if n <= count]
             if count and count <= 30 and count not in (5, 10, 20, 30):
                 choices.append(count)
             for amount in choices[:4]:
@@ -3409,12 +3436,21 @@ class PlayerView(discord.ui.LayoutView):
                 tertiary, "playlist_count_all", f"เพิ่มทั้งหมด ({count})",
                 discord.ButtonStyle.success,
                 (lambda interaction, button, selected=count: self.choose_playlist_count(interaction, selected)),
-                "✅",
+                "➕",
             ))
             specs.append((
                 quaternary, "playlist_count_cancel", "ยกเลิก",
                 discord.ButtonStyle.danger, self.cancel_playlist_count, "❌",
             ))
+        elif self.player_menu == "radio":
+            specs.extend([
+                (tertiary, "radio_mix_single", "เล่นเพลงนี้เท่านั้น",
+                 discord.ButtonStyle.secondary, self.radio_mix_single, "🎧"),
+                (tertiary, "radio_mix_load", "โหลดเพลงจาก Mix",
+                 discord.ButtonStyle.primary, self.radio_mix_load, "🔀"),
+                (quaternary, "radio_mix_cancel", "ยกเลิก",
+                 discord.ButtonStyle.danger, self.radio_mix_cancel, "❌"),
+            ])
         elif self.player_menu == "queue":
             total_pages = max(1, (len(q) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
             specs.extend([
@@ -3433,8 +3469,8 @@ class PlayerView(discord.ui.LayoutView):
             button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=cid)
             if cid == "player_queue_page":
                 button.disabled = True
-            if cid == "radio_mix_cancel":
-                # This button is alone in the second row, using the full row width when supported.
+            if cid in {"playlist_choice_cancel", "playlist_count_cancel", "radio_mix_cancel"}:
+                # Keep Cancel alone on a full-width row in the Components V2 menu.
                 try:
                     button.width = 5
                 except Exception:
