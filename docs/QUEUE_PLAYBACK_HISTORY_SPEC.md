@@ -1642,6 +1642,8 @@ This section supersedes older UI notes above where they conflict with the implem
 The error “Sign in to confirm you're not a bot” is a YouTube access restriction; yt-dlp cannot guarantee that every video or IP/session will be allowed. The following mitigations reduce avoidable repeated requests but do not bypass YouTube authorization:
 
 1. Update yt-dlp with the default extra regularly. This installs the matching yt-dlp-ejs challenge scripts. A supported JavaScript runtime is also required for current YouTube challenge solving; Deno is the recommended runtime. Reference: https://github.com/yt-dlp/yt-dlp/wiki/EJS
+
+   On Windows, install Deno in PowerShell using `winget install DenoLand.Deno`, then close/reopen the terminal and verify with `deno --version`. After updating the project dependencies, restart the bot process so the Python process picks up the installed runtime. Official instructions: https://docs.deno.com/runtime/getting_started/installation/
 2. Keep yt-dlp's default YouTube client as the first attempt. Only after a detected anti-bot error, try the limited alternative clients tv and web_safari.
 3. If all profiles hit anti-bot protection, open a 180-second circuit breaker. During that window, new track extraction fails fast instead of retrying every playlist item or searching a replacement title.
 4. Playlist fetch concurrency is limited to 2. A failure in one worker is caught and counted, so asyncio.gather can finish cleanup and clear the loading status rather than leaving the Player stuck.
