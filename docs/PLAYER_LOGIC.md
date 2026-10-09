@@ -29,7 +29,7 @@ The message `Sign in to confirm you're not a bot` means YouTube is refusing the 
 2. On an anti-bot/login challenge, stop retrying alternate player clients and open a **10-minute process-wide cooldown**.
 3. Do not perform a title-search replacement for an entry when the direct fetch was blocked by an anti-bot challenge.
 4. During cooldown, count remaining playlist entries as skipped/cooldown instead of sending another extraction request.
-5. If the playlist is stopped, disconnected, or invalidated by a new playback session, background workers check the playlist generation before making their next request. Stale workers return without fetching more tracks.
+5. If the playlist is stopped, disconnected, or invalidated by a new playback session, background workers check the playlist generation before making their next request. Stale workers return without starting additional fetches. A synchronous yt-dlp request already in progress cannot be forcibly cancelled and may finish, but queued workers will not start more requests.
 
 This reduces unnecessary requests but cannot guarantee that YouTube will never block a host. If YouTube continues to reject requests, wait for the cooldown and configure valid authentication rather than increasing retries.
 
