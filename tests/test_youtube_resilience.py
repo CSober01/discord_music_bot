@@ -23,6 +23,40 @@ class YouTubeResilienceTests(unittest.TestCase):
         )
         self.assertTrue(sc._is_youtube_anti_bot_error(error))
 
+    def test_detects_temporary_youtube_rate_limit_messages(self):
+        messages = (
+            "HTTP Error 429: Too Many Requests",
+            "This content isn't available, try again later",
+            "YouTube rate limit exceeded",
+        )
+        for message in messages:
+            with self.subTest(message=message):
+                self.assertTrue(sc._is_youtube_anti_bot_error(RuntimeError(message)))
+
+    def test_ydl_options_use_safe_request_pacing_and_ten_second_player_refresh(self):
+        options = sc.get_ydl_options()
+        self.assertEqual(options["sleep_interval_requests"], 1.0)
+        self.assertEqual(sc.PLAYER_PROGRESS_INTERVAL_SECONDS, 10)
+        self.assertEqual(sc.PLAYLIST_FETCH_CONCURRENCY, 1)
+        with patch.dict("os.environ", {"YTDLP_SLEEP_REQUESTS": "2.5"}):
+            self.assertEqual(sc.get_ydl_options()["sleep_interval_requests"], 2.5)
+        with patch.dict("os.environ", {"YTDLP_SLEEP_REQUESTS": "invalid"}):
+            self.assertEqual(sc.get_ydl_options()["sleep_interval_requests"], 1.0)
+
+    def test_fetch_track_opens_circuit_breaker_after_bounded_client_fallback(self):
+        with patch.object(
+            sc,
+            "_fetch_track_once",
+            side_effect=[
+                RuntimeError("Sign in to confirm you're not a bot"),
+                RuntimeError("HTTP Error 429: Too Many Requests"),
+            ],
+        ) as extract, patch.object(sc.time, "sleep"):
+            with self.assertRaisesRegex(ValueError, "YOUTUBE_ANTI_BOT"):
+                sc.fetch_track("https://youtu.be/blocked")
+        self.assertEqual(extract.call_count, 2)
+        self.assertTrue(sc._is_youtube_cooldown_active())
+
     def test_fetch_track_tries_alternative_client_only_after_anti_bot(self):
         result = ("stream-url", "Track title", "3:22", "thumbnail")
         with patch.object(
@@ -64,6 +98,17 @@ class YouTubeResilienceTests(unittest.TestCase):
         ) as extract, patch.object(sc, "glog"):
             result = sc._fetch_playlist_track_sync(track, 123, "Test guild")
 
+        self.assertEqual(result, (None, "anti_bot"))
+        extract.assert_called_once_with(
+            "https://www.youtube.com/watch?v=CwGbMYLjIpQ"
+        )
+
+    def test_playlist_rate_limit_does_not_trigger_title_search_fallback(self):
+        track = {"id": "CwGbMYLjIpQ", "title": "Blocked title"}
+        with patch.object(
+            sc, "fetch_track", side_effect=ValueError("HTTP Error 429: Too Many Requests")
+        ) as extract, patch.object(sc, "glog"):
+            result = sc._fetch_playlist_track_sync(track, 123, "Test guild")
         self.assertEqual(result, (None, "anti_bot"))
         extract.assert_called_once_with(
             "https://www.youtube.com/watch?v=CwGbMYLjIpQ"
