@@ -353,9 +353,16 @@ def get_ydl_options(include_playlist: bool = False, player_client: str | None = 
         "sleep_interval_requests": _bounded_float_env("YTDLP_SLEEP_REQUESTS", 1.0, 0.0, 10.0),
         "skip_unavailable_fragments": True,
     }
+    # Prefer an explicit cookie file. If none is configured, optionally read a
+    # signed-in browser profile on the same machine. Never commit either credential.
     cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
-    if cookies_file and os.path.isfile(cookies_file):
+    cookies_browser = os.environ.get("YTDLP_COOKIES_FROM_BROWSER", "").strip().lower()
+    if cookies_file:
+        # Pass the configured path through even when it is wrong so yt-dlp reports
+        # a clear file error instead of silently making anonymous requests.
         opts["cookiefile"] = cookies_file
+    elif cookies_browser in {"brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale"}:
+        opts["cookiesfrombrowser"] = (cookies_browser, None, None, None)
     if player_client:
         opts.setdefault("extractor_args", {}).setdefault("youtube", {})["player_client"] = [player_client]
     opts["noplaylist"] = not include_playlist
@@ -2265,7 +2272,7 @@ def get_queue_lock(guild_id: int) -> asyncio.Lock:
 
 # YouTube can temporarily block an IP/session with a login or anti-bot challenge.
 # A short circuit breaker prevents every playlist entry from causing another search request.
-_YOUTUBE_ANTI_BOT_COOLDOWN_SECONDS = 180
+_YOUTUBE_ANTI_BOT_COOLDOWN_SECONDS = 600
 _youtube_anti_bot_until = 0.0
 _youtube_anti_bot_lock = threading.Lock()
 
@@ -2292,8 +2299,9 @@ def _youtube_blocked_user_message(error: Exception) -> str | None:
     if not _is_youtube_anti_bot_error(error):
         return None
     return (
-        "⏸️ YouTube จำกัดคำขอชั่วคราว บอทพักการเรียก YouTube 3 นาทีเพื่อไม่ให้ถูกบล็อกซ้ำ "
-        "กรุณาลองใหม่ภายหลัง หากยังเกิดซ้ำ ให้ตั้ง YTDLP_COOKIES_FILE เป็นไฟล์ cookies ที่ถูกต้อง"
+        "⏸️ YouTube ปฏิเสธคำขอชั่วคราว บอทหยุดเรียก YouTube 10 นาทีเพื่อลดการถูกบล็อกซ้ำ "
+        "ตั้งค่า YTDLP_COOKIES_FILE เป็นไฟล์ cookies ที่ถูกต้อง หรือใช้ "
+        "YTDLP_COOKIES_FROM_BROWSER=edge/chrome/firefox แล้วรีสตาร์ตบอท"
     )
 
 
@@ -2313,41 +2321,23 @@ def _activate_youtube_anti_bot_cooldown():
         )
 
 
-def fetch_track(query: str, anti_bot_retries: int = 2):
-    """Fetch a track with conservative anti-bot-only client fallback.
+def fetch_track(query: str):
+    """Fetch one track and open the shared circuit breaker on a YouTube challenge.
 
-    The default yt-dlp client is tried first. Only after an anti-bot challenge,
-    use a small alternative-client set. If all attempts fail, pause new extraction
-    requests for 3 minutes instead of flooding YouTube with title-search fallbacks.
+    Do not rotate player clients or retry a request after an anti-bot response:
+    repeated attempts can make an IP/session throttle worse. The caller will
+    skip title fallback for this error and the shared cooldown blocks more requests.
     """
     if _is_youtube_cooldown_active():
         raise ValueError("YOUTUBE_ANTI_BOT_COOLDOWN")
 
-    # Only one alternate client is attempted after a challenge to limit extra requests.
-    clients = [None, "tv"][:max(1, min(anti_bot_retries + 1, 2))]
-    last_error = None
-    saw_anti_bot = False
-    for attempt, client in enumerate(clients):
-        if _is_youtube_cooldown_active():
-            raise ValueError("YOUTUBE_ANTI_BOT_COOLDOWN")
-        try:
-            return _fetch_track_once(query, player_client=client)
-        except Exception as error:
-            last_error = error
-            if _is_youtube_anti_bot_error(error):
-                saw_anti_bot = True
-            elif not saw_anti_bot:
-                # Ordinary errors such as deleted/private videos should not trigger client retries.
-                raise
-            # After one anti-bot challenge, allow the remaining fallback clients to run even
-            # if a client-specific error (for example, no matching format) happens in between.
-            if attempt + 1 < len(clients):
-                time.sleep(1.0 + attempt)
-
-    if saw_anti_bot:
-        _activate_youtube_anti_bot_cooldown()
-        raise ValueError("YOUTUBE_ANTI_BOT") from last_error
-    raise last_error
+    try:
+        return _fetch_track_once(query)
+    except Exception as error:
+        if _is_youtube_anti_bot_error(error):
+            _activate_youtube_anti_bot_cooldown()
+            raise ValueError("YOUTUBE_ANTI_BOT") from error
+        raise
 
 
 def _fetch_playlist_track_sync(track_info: dict, guild_id: int, guild_name: str):
@@ -2630,6 +2620,10 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
 
     async def _fetch_one(track_info):
         async with sem:
+            # Stop stale workers before they make another network request. This matters
+            # when /stop, disconnect, or a new Player invalidates the active playlist batch.
+            if fetch_token != playlist_fetch_generation.get(guild.id, 0):
+                return None
             if _is_youtube_cooldown_active():
                 result, outcome = None, "cooldown"
             else:
@@ -2637,6 +2631,8 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
                 # has already started; this delay applies only to the remaining entries.
                 if progress.done > 0:
                     await asyncio.sleep(PLAYLIST_TRACK_FETCH_DELAY_SECONDS)
+                if fetch_token != playlist_fetch_generation.get(guild.id, 0):
+                    return None
                 if _is_youtube_cooldown_active():
                     result, outcome = None, "cooldown"
                 else:
@@ -2655,14 +2651,15 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
             return result
 
     fetch_results = await asyncio.gather(*(_fetch_one(t) for t in rest_tracks))
-    progress.print_summary()
 
     if fetch_token != playlist_fetch_generation.get(guild.id, 0):
-        print(f"[{guild.name}] 🛑 Playlist bg fetch ยกเลิก — session เปลี่ยนระหว่าง fetch")
+        print(f"\n[{guild.name}] 🛑 Playlist bg fetch ยกเลิก — session เปลี่ยนระหว่าง fetch")
         if playlist_loading_status.get(guild.id) is progress:
             playlist_loading_status.pop(guild.id, None)
             await _refresh_player(guild.id)
         return
+
+    progress.print_summary()
 
     fetched = [(url, title, duration, thumbnail)
                for r in fetch_results if r is not None
