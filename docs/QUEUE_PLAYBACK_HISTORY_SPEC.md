@@ -1597,18 +1597,64 @@ Player หลักใช้ `discord.ui.LayoutView` และ `discord.ui.Conta
 - Components V2 message ห้ามส่ง `embed=` หรือ `content=` ควบคู่กับ `LayoutView`; เนื้อหาต้องอยู่ใน TextDisplay/Container.
 - เมื่อ Stop หรือ external disconnect ให้ลบ Player V2 message แล้วส่งข้อความสรุปแบบ legacy แยกต่างหาก เพราะ V2 message ไม่สามารถเปลี่ยนกลับไปใช้ Embed เดิมในข้อความเดียวกันได้.
 - ต้องทดสอบ callback ของทุกปุ่ม, Previous/Next, queue refresh, repost debounce, natural end, stop และ external disconnect บน Discord จริงก่อน merge.
-- แถบเวลาใน Player เป็นตัวแสดงสถานะตาม implementation ปัจจุบัน; การแสดง elapsed time แบบเคลื่อนไหวต้องมีระบบติดตามเวลาเล่นและ refresh เพิ่มเติม.
+- Player คำนวณ elapsed time จาก playback clock และ refresh หน้าจอทุก 10 วินาทีขณะเล่น รวมถึง refresh ทันทีหลังเปลี่ยนเพลง/seek/pause/resume.
 
 
-### Player controls and embedded actions
-- The live Player message uses Discord Components V2; it is not a preview-only mockup.
-- Control row 1: Previous, seek −10 seconds, Pause/Resume, seek +10 seconds, Next.
-- Control row 2: Shuffle, Stop, Repeat.
-- The normal third row uses compact icon-only shortcuts for Search, Playlist, Radio/Mix, Queue and Volume. Do not turn menu headings into text buttons.
-- After a Playlist URL is provided, show the found-track count, preview and quantity-choice buttons inside the same Player container.
-- After a Radio/Mix URL is provided, show the “play this track” and “load tracks from Mix” choices inside the same Player container. Loading a Mix changes that in-player panel to the quantity selector.
-- The Queue shortcut changes the content area of the same Player to a paginated queue list; Previous/Next page and Back controls stay in that container.
-- Keep the two primary playback-control rows visible while an in-player submenu is open.
-- Volume opens the volume control modal.
-- Show current playback time and a proportional progress bar, refreshed while audio is playing.
-- Avoid decorative separator lines inside the player container; keep song titles clickable only when a safe YouTube page URL is available.
+### Current implementation update — 2026-10-09
+
+This section supersedes older UI notes above where they conflict with the implemented interaction.
+
+#### Main Player controls
+
+- Row 1: Previous, seek back 10 seconds, Pause/Resume, seek forward 10 seconds, Next.
+- The seek buttons use the requested custom emoji IDs: 1455985625097306142 for back 10 seconds and 1455985627714551839 for forward 10 seconds. There is no additional −10s / +10s label.
+- When an emoji is not available to the bot in the current server and external emoji usage is not permitted, the button falls back to a Unicode seek symbol rather than risking the entire Player message failing to send.
+- Row 2: Shuffle, Stop, Repeat. Ordinary controls use Secondary styling; Stop remains Danger styling.
+- Normal shortcut row contains Search, Queue and Volume. Playlist-count and Radio/Mix are opened by their existing commands/flows, not extra Player shortcuts.
+- The History section shows the latest three previous tracks in newest-first order. Previous-track navigation still uses the up-to-10 History entries in Queue state.
+
+#### Queue page
+
+- The Player's Queue shortcut opens a separate ephemeral Components V2 Queue view with 10 tracks per page.
+- Each row displays the logical Queue number, title link when a safe YouTube page URL exists, requester and total duration. The current track is marked ▶️ กำลังเล่น; no elapsed time is displayed in Queue rows.
+- Each available thumbnail appears as the Section accessory beside its row. Discord Components V2 places a Section accessory on the right; it does not provide a built-in left-side accessory option.
+- Pager buttons are Secondary gray ◀ / ▶ only. The page indicator is disabled and informational. Previous is disabled on the first page; Next is disabled on the last page. Both arrows are disabled for an empty Queue or a Queue of 10 or fewer tracks.
+- The Queue has its own message so the Player stays intact and the Queue can include up to 10 thumbnail sections without exceeding Discord Components V2's 40-component total limit.
+- A user's open Queue view is refreshed when the Player state refreshes. Navigation edits the ephemeral Queue message and preserves that user's page.
+
+#### Playlist count and Radio/Mix
+
+- Playlist choices are 5, 10, 20 and 30 whenever the found count is greater than or equal to that choice. Add All always uses the actual available count capped at 50. The cap applies to selected tracks, not just the button label.
+- The playlist-count submenu has no “กลับเครื่องเล่น” button.
+- Radio/Mix presents ▶️ เล่นเพลงนี้ and 📋 โหลดเพลงจาก Mix side-by-side, then ✖️ ยกเลิก on the second row. Cancel does not add tracks.
+- The Queue submenu has no Back button; its pager uses arrow-only controls.
+
+#### Playback clock and button-state synchronization
+
+- Player elapsed time and its proportional bar refresh every 10 seconds while audio is playing.
+- Starting a track from a single-song flow or playlist starts the refresh task immediately after the Player message is assigned.
+- Switching tracks resets the displayed playback clock immediately. Pause freezes elapsed time; resume restarts its clock; seeking updates the displayed time immediately.
+- The player refresh function rebuilds the layout before syncing button styles/disabled states, because layout rebuild creates new Button objects. This order is a correctness requirement.
+- The open Queue page is updated along with the Player when the refresh loop runs.
+
+#### YouTube anti-bot response
+
+The error “Sign in to confirm you're not a bot” is a YouTube access restriction; yt-dlp cannot guarantee that every video or IP/session will be allowed. The following mitigations reduce avoidable repeated requests but do not bypass YouTube authorization:
+
+1. Update yt-dlp with the default extra regularly. This installs the matching yt-dlp-ejs challenge scripts. A supported JavaScript runtime is also required for current YouTube challenge solving; Deno is the recommended runtime. Reference: https://github.com/yt-dlp/yt-dlp/wiki/EJS
+2. Keep yt-dlp's default YouTube client as the first attempt. Only after a detected anti-bot error, try the limited alternative clients tv and web_safari.
+3. If all profiles hit anti-bot protection, open a 180-second circuit breaker. During that window, new track extraction fails fast instead of retrying every playlist item or searching a replacement title.
+4. Playlist fetch concurrency is limited to 2. A failure in one worker is caught and counted, so asyncio.gather can finish cleanup and clear the loading status rather than leaving the Player stuck.
+5. Raw yt-dlp logger output is suppressed so terminal errors cannot append to the carriage-return progress line. The worker still records a short cause in the guild log.
+6. Optional YTDLP_COOKIES_FILE can point to a Netscape/Mozilla-format cookies file on the host. Mount/configure this file outside the repository. Never commit it, print its contents, or paste it into logs. Cookies are sensitive login credentials and can expire. Reference: https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp
+
+#### Regression checklist before merge
+
+- [ ] Run python -m py_compile slashcommands.py bot.py.
+- [ ] With 0, 1, 10, 11, 20 and 21 tracks, check Queue pager states and page content.
+- [ ] With 4, 5, 11, 25, 48 and 80 found tracks, check count buttons and the 50-track cap.
+- [ ] Verify both custom seek emoji render in the target Discord server and seek exactly 10 seconds. If the server cannot use the emojis, verify Unicode fallback.
+- [ ] Verify elapsed time increments every 10 seconds, pauses, resumes, seeks and resets on Next/Previous.
+- [ ] Simulate an anti-bot error and verify alternative clients are attempted only after that error, the circuit breaker stops extra calls for 180 seconds, and no raw ERROR: text interleaves with progress.
+- [ ] Force one background fetch worker to raise unexpectedly and verify the loading status is cleared at completion.
+- [ ] Test all button callbacks in Discord, including Radio/Mix, playlist count, Queue pagination, Stop, and external voice disconnect.
