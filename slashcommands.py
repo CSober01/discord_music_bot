@@ -107,6 +107,7 @@ player_repost_tasks: dict[int, asyncio.Task] = {}
 # เก็บชื่อแบบสั้นสำหรับแสดงใน Queue โดยผูกกับ stream URL
 # ไม่แก้ title ต้นฉบับ เพื่อให้หน้าผลการค้นหายังแสดงชื่อวิดีโอเต็มเหมือนเดิม
 queue_display_titles: dict[str, str] = {}
+queue_watch_urls: dict[str, str] = {}
 
 # guild_volumes = ระดับเสียงที่ผู้ใช้ตั้งไว้ต่อ server (guild)
 # จำไว้ตราบใดที่บอทยังอยู่ใน Voice Channel (ไม่ว่าเพลงจะเปลี่ยนกี่รอบ)
@@ -240,6 +241,7 @@ def clear_guild(guild_id: int):
     for track in full_queues.get(guild_id, []):
         if track:
             queue_display_titles.pop(track[0], None)
+            queue_watch_urls.pop(track[0], None)
     full_queues[guild_id] = []
     now_playing_idx[guild_id] = 0
     queue_seq_offset[guild_id] = 0
@@ -281,16 +283,29 @@ def get_ydl_options(include_playlist: bool = False) -> dict:
     return opts
 
 def _remember_queue_display_title(info: dict, stream_url: str):
-    """เก็บ artist — track สำหรับ Queue เมื่อ extractor มี metadata ที่เชื่อถือได้.
-
-    title ต้นฉบับยังถูกส่งกลับเหมือนเดิม จึงไม่กระทบหน้าผลการค้นหา.
-    """
-    artist = info.get("artist")
-    track = info.get("track")
+    """Store display metadata and the source-page URL separately from the stream URL."""
+    watch_url = info.get("webpage_url") or info.get("original_url")
+    if isinstance(watch_url, str) and watch_url.startswith(("https://", "http://")):
+        queue_watch_urls[stream_url] = watch_url
+    else:
+        queue_watch_urls.pop(stream_url, None)
+    artist, track = info.get("artist"), info.get("track")
     if artist and track:
         queue_display_titles[stream_url] = f"{artist} — {track}"
     else:
         queue_display_titles.pop(stream_url, None)
+
+def _player_track_link(stream_url: str, title: str) -> str:
+    """Link a title only when yt-dlp supplied a real source-page URL."""
+    safe_title = discord.utils.escape_markdown(str(title))
+    target_url = queue_watch_urls.get(stream_url)
+    if not target_url and isinstance(stream_url, str) and re.match(
+        r"^https?://(?:www\\.)?(?:youtube\\.com/watch\\?|youtu\\.be/)", stream_url
+    ):
+        target_url = stream_url
+    if target_url and target_url.startswith(("https://", "http://")):
+        return f"[{safe_title}]({target_url.replace(')', '%29')})"
+    return safe_title
 
 # ─────────────────────────────────────────────
 #  Spotify — ดึงข้อมูลจากหน้า embed สาธารณะ ไม่ใช้ Web API
@@ -1072,19 +1087,7 @@ async def _refresh_player(guild_id: int, repost: bool = False):
         view.volume_level = get_guild_volume(guild_id)
         view._sync_state_buttons()
 
-        # Keep Play/Pause icon synchronized with the actual voice state.
-        for item in view.children:
-            if item.custom_id == "player_pause_resume":
-                if vc and vc.is_paused():
-                    item.emoji = "▶️"
-                else:
-                    item.emoji = "⏸️"
-
-        _url, title, duration, requester, thumbnail, *_rest = view.current_track
-        embed = make_now_playing_embed(
-            title, duration, requester, thumbnail,
-            _queue_pos_str(guild_id, get_now_idx(guild_id)),
-        )
+        view.refresh_layout()
 
         if repost and view.now_playing_msg:
             old_message = view.now_playing_msg
@@ -1096,12 +1099,12 @@ async def _refresh_player(guild_id: int, repost: bool = False):
 
         if view.now_playing_msg:
             try:
-                await view.now_playing_msg.edit(embed=embed, view=view)
+                await view.now_playing_msg.edit(view=view)
                 return True
             except Exception:
                 view.now_playing_msg = None
 
-        view.now_playing_msg = await view.channel.send(embed=embed, view=view)
+        view.now_playing_msg = await view.channel.send(view=view)
         return True
     except Exception:
         return False
@@ -2217,9 +2220,7 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
                         loop,
                     ),
             )
-            embed = make_now_playing_embed(title, duration, requester, thumbnail,
-                                           _queue_pos_str(guild.id, track_idx))
-            msg = await channel.send(embed=embed, view=view)
+            msg = await channel.send(view=view)
             view.now_playing_msg = msg
         else:
             # เพลงแรกของชุดนี้ถูกต่อท้ายคิวอยู่แล้ว ต้องนำไปแสดงใน summary
@@ -2358,7 +2359,7 @@ async def _add_and_play(vc, guild, channel, loop_getter, track):
             )
             embed = make_now_playing_embed(title, duration, requester, thumbnail,
                                            _queue_pos_str(guild.id, track_idx))
-            msg = await channel.send(embed=embed, view=view)
+            msg = await channel.send(view=view)
             view.now_playing_msg = msg
 
         return track_idx, title
@@ -2547,7 +2548,7 @@ class QueueView(discord.ui.View):
 #  Player View
 # ─────────────────────────────────────────────
 
-class PlayerView(discord.ui.View):
+class PlayerView(discord.ui.LayoutView):
     def __init__(self, guild, channel, loop, current_track=None, current_idx=None, loop_getter=None,
                  player_id=None):
         super().__init__(timeout=None)
@@ -2560,39 +2561,113 @@ class PlayerView(discord.ui.View):
         self.current_idx = current_idx if current_idx is not None else get_now_idx(guild.id)
         self.now_playing_msg: discord.Message | None = None
         self.volume_level: float = get_guild_volume(guild.id)
+        self._buttons: dict[str, discord.ui.Button] = {}
+        self._build_layout()
+
+    def _build_layout(self):
+        """Build one Components V2 container with song lists and controls inside."""
+        self.clear_items()
+        self._buttons = {}
+        if not self.current_track:
+            self.add_item(discord.ui.Container(discord.ui.TextDisplay("## 🎵 PLAYER\nไม่มีเพลงที่กำลังเล่นอยู่"), accent_colour=0x5865F2))
+            return
+
+        url, title, duration, requester, thumbnail, *_rest = self.current_track
+        gid = self.guild.id
+        q = get_full_queue(gid)
+        idx = max(0, min(get_now_idx(gid), len(q)-1)) if q else 0
+        display_title = _clean_player_title(title)
+        artist = "YouTube"
+        if q and 0 <= idx < len(q):
+            meta = queue_display_titles.get(q[idx][0])
+            if meta and " — " in meta:
+                artist = meta.split(" — ", 1)[0]
+        now = f"## 🎵 NOW PLAYING\n{_player_track_link(url, display_title)}\n*{discord.utils.escape_markdown(_truncate_display_width(artist, 44))} · YouTube*"
+        parts = []
+        if thumbnail and str(thumbnail).startswith(("https://", "http://")):
+            parts.append(discord.ui.Section(discord.ui.TextDisplay(now), accessory=discord.ui.Thumbnail(thumbnail, description="ภาพปกเพลง")))
+        else:
+            parts.append(discord.ui.TextDisplay(now))
+
+        filled = max(0, min(10, round(get_guild_volume(gid) * 10)))
+        volume_bar = "▰" * filled + "▱" * (10 - filled)
+        who = requester.mention if requester else "ไม่ทราบชื่อ"
+        parts.append(discord.ui.TextDisplay(f"**0:00** {PLAYER_PROGRESS_BAR} **{duration}**\n👤 {who}  🔊 {volume_bar}"))
+        status = []
+        if gid in shuffle_enabled:
+            status.append("🔀 Shuffle: เปิด")
+        repeat = loop_modes.get(gid, "off")
+        if repeat == "track": status.append("🔂 วนเพลงนี้")
+        elif repeat == "queue": status.append("🔁 วน Queue")
+        if status: parts.append(discord.ui.TextDisplay(" · ".join(status)))
+        parts.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small))
+
+        hist_start = max(0, idx - 3)
+        history = q[hist_start:idx] if q else []
+        hist_lines = []
+        for pos, track in enumerate(history, start=hist_start):
+            track_url, track_title, track_duration, *_ = track
+            shown = _truncate_display_width(queue_display_titles.get(track_url, track_title), 70)
+            hist_lines.append(f"{display_no(gid, pos):02d} ♫ {_player_track_link(track_url, shown)} · `{track_duration}`")
+        parts.append(discord.ui.TextDisplay("**HISTORY**\n" + ("\n".join(hist_lines) if hist_lines else "_ยังไม่มีประวัติเพลง_")))
+        parts.append(discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small))
+
+        next_start = idx + 1
+        upcoming = q[next_start:next_start + 3] if q else []
+        next_lines = []
+        for pos, track in enumerate(upcoming, start=next_start):
+            track_url, track_title, track_duration, *_ = track
+            shown = _truncate_display_width(queue_display_titles.get(track_url, track_title), 70)
+            next_lines.append(f"{display_no(gid, pos):02d} ♫ {_player_track_link(track_url, shown)} · `{track_duration}`")
+        parts.append(discord.ui.TextDisplay("**UP NEXT**\n" + ("\n".join(next_lines) if next_lines else "_ไม่มีเพลงถัดไป_")))
+        loading = playlist_loading_status.get(gid)
+        if loading and loading.done < loading.total:
+            parts.append(discord.ui.TextDisplay(f"⏳ กำลังโหลดเพลงเพิ่มเติม · {loading.done}/{loading.total}"))
+
+        primary, secondary = discord.ui.ActionRow(), discord.ui.ActionRow()
+        specs = [
+            (primary,"player_previous","⏮️",discord.ButtonStyle.secondary,self.previous),
+            (primary,"player_pause_resume","⏸️",discord.ButtonStyle.secondary,self.pause_resume),
+            (primary,"player_skip","⏭️",discord.ButtonStyle.secondary,self.skip),
+            (primary,"player_stop","⏹️",discord.ButtonStyle.danger,self.stop),
+            (primary,"player_loop","🔁",discord.ButtonStyle.secondary,self.loop_btn),
+            (secondary,"player_shuffle","🔀",discord.ButtonStyle.secondary,self.shuffle),
+            (secondary,"player_search","🔍",discord.ButtonStyle.secondary,self.search),
+            (secondary,"player_show_queue","📋",discord.ButtonStyle.primary,self.show_queue),
+            (secondary,"player_volume","🔊",discord.ButtonStyle.secondary,self.volume_btn),
+        ]
+        for row, cid, emoji, style, callback in specs:
+            button = discord.ui.Button(emoji=emoji, style=style, custom_id=cid)
+            button.callback = lambda interaction, cb=callback, btn=button: cb(interaction, btn)
+            row.add_item(button)
+            self._buttons[cid] = button
+        parts.extend((discord.ui.Separator(visible=True, spacing=discord.SeparatorSpacing.small),primary,secondary))
+        self.add_item(discord.ui.Container(*parts, accent_colour=0x5865F2))
         self._sync_state_buttons()
 
+    def refresh_layout(self):
+        self._build_layout()
+
     def _sync_state_buttons(self):
-        for item in self.children:
-            if item.custom_id == "player_shuffle":
-                item.style = (
-                    discord.ButtonStyle.success
-                    if self.guild.id in shuffle_enabled
-                    else discord.ButtonStyle.secondary
-                )
-            elif item.custom_id == "player_loop":
+        for cid, item in self._buttons.items():
+            if cid == "player_shuffle":
+                item.style = discord.ButtonStyle.success if self.guild.id in shuffle_enabled else discord.ButtonStyle.secondary
+            elif cid == "player_loop":
                 mode = loop_modes.get(self.guild.id, "off")
-                item.style = (
-                    discord.ButtonStyle.success
-                    if mode != "off"
-                    else discord.ButtonStyle.secondary
-                )
-                item.emoji = {"off": "🔁", "track": "🔂", "queue": "🔁"}[mode]
-            elif item.custom_id == "player_pause_resume":
+                item.style = discord.ButtonStyle.success if mode != "off" else discord.ButtonStyle.secondary
+                item.emoji = {"off":"🔁","track":"🔂","queue":"🔁"}[mode]
+            elif cid == "player_pause_resume":
                 vc = self.guild.voice_client
                 item.emoji = "▶️" if vc and vc.is_paused() else "⏸️"
-            elif item.custom_id == "player_previous":
+            elif cid == "player_previous":
                 item.disabled = get_now_idx(self.guild.id) <= 0
-            elif item.custom_id == "player_skip":
+            elif cid == "player_skip":
                 q = get_full_queue(self.guild.id)
                 idx = get_now_idx(self.guild.id)
-                mode = loop_modes.get(self.guild.id, "off")
-                item.disabled = not q or (idx + 1 >= len(q) and mode != "queue")
-            elif item.custom_id == "player_stop":
+                item.disabled = not q or (idx + 1 >= len(q) and loop_modes.get(self.guild.id, "off") != "queue")
+            elif cid == "player_stop":
                 item.style = discord.ButtonStyle.danger
-                item.disabled = False
-            elif item.custom_id == "player_show_queue":
-                item.style = discord.ButtonStyle.primary
+            elif cid == "player_show_queue":
                 item.disabled = not bool(get_full_queue(self.guild.id))
 
     async def delete_now_playing(self):
@@ -2601,16 +2676,6 @@ class PlayerView(discord.ui.View):
             except Exception: pass
             self.now_playing_msg = None
 
-    def _current_embed(self):
-        if not self.current_track:
-            return discord.Embed(description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red())
-        _url, title, duration, requester, thumbnail, *_ = self.current_track
-        return make_now_playing_embed(
-            title, duration, requester, thumbnail,
-            _queue_pos_str(self.guild.id, get_now_idx(self.guild.id)),
-        )
-
-    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_previous")
     async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
@@ -2628,7 +2693,6 @@ class PlayerView(discord.ui.View):
             log("⏮ PREV", interaction, f"idx {idx} → {idx-1}")
             await _do_play_at_idx(self, idx - 1)
 
-    @discord.ui.button(emoji="⏸️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_pause_resume")
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
@@ -2653,7 +2717,6 @@ class PlayerView(discord.ui.View):
             _refresh_queue_msg(self.guild.id),
         )
 
-    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary, row=0, custom_id="player_skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
@@ -2677,7 +2740,6 @@ class PlayerView(discord.ui.View):
             log("⏭ SKIP", interaction, f"idx {idx} → {idx+1}")
             await _do_play_at_idx(self, idx + 1)
 
-    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0, custom_id="player_stop")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
@@ -2707,16 +2769,12 @@ class PlayerView(discord.ui.View):
         done_embed = make_done_embed()
         if now_playing_msg:
             try:
-                await now_playing_msg.edit(embed=done_embed, view=None)
-                queue_done_msgs[self.guild.id] = now_playing_msg
+                await now_playing_msg.delete()
             except Exception:
-                done_msg = await self.channel.send(embed=done_embed)
-                queue_done_msgs[self.guild.id] = done_msg
-        else:
-            done_msg = await self.channel.send(embed=done_embed)
-            queue_done_msgs[self.guild.id] = done_msg
+                pass
+        done_msg = await self.channel.send(embed=done_embed)
+        queue_done_msgs[self.guild.id] = done_msg
 
-    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=0, custom_id="player_loop")
     async def loop_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
@@ -2734,7 +2792,6 @@ class PlayerView(discord.ui.View):
         log("🔁 REPEAT", interaction, mode_text)
         await asyncio.gather(_refresh_player(self.guild.id), _refresh_queue_msg(self.guild.id))
 
-    @discord.ui.button(emoji="🔍", style=discord.ButtonStyle.secondary, row=1, custom_id="player_search")
     async def search(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
@@ -2743,7 +2800,6 @@ class PlayerView(discord.ui.View):
         modal = SearchModal(self.guild, self.channel, loop, self.loop_getter)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=1, custom_id="player_volume")
     async def volume_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
@@ -2755,7 +2811,6 @@ class PlayerView(discord.ui.View):
         modal = VolumeModal(vc, self)
         await interaction.response.send_modal(modal)
 
-    @discord.ui.button(emoji="📋", style=discord.ButtonStyle.primary, row=1, custom_id="player_show_queue")
     async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
@@ -2781,7 +2836,6 @@ class PlayerView(discord.ui.View):
         except Exception:
             pass
 
-    @discord.ui.button(emoji="🔀", style=discord.ButtonStyle.secondary, row=1, custom_id="player_shuffle")
     async def shuffle(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
             return await safe_respond(interaction, content="❌ Player นี้หมดอายุแล้ว", ephemeral=True)
@@ -2866,12 +2920,9 @@ async def handle_external_voice_disconnect(guild: discord.Guild):
 
     if now_playing_msg:
         try:
-            await now_playing_msg.edit(embed=done_embed, view=None)
-            queue_done_msgs[guild.id] = now_playing_msg
-            return
+            await now_playing_msg.delete()
         except Exception:
             pass
-
     try:
         done_msg = await channel.send(embed=done_embed)
         queue_done_msgs[guild.id] = done_msg
@@ -2961,32 +3012,15 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
                 discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS),
                 volume=get_guild_volume(guild.id),
             )
-            embed = make_now_playing_embed(
-                title, duration, requester, thumbnail,
-                _queue_pos_str(guild.id, next_idx),
-            )
-
             old_view = active_views.get(guild.id)
-            if old_view and old_view.now_playing_msg:
+            if old_view:
                 old_view.current_track = track
                 old_view.current_idx = next_idx
-                view = old_view
-                try:
-                    await view.now_playing_msg.edit(embed=embed, view=view)
-                except Exception:
-                    view.now_playing_msg = None
-                    msg = await channel.send(embed=embed, view=view)
-                    view.now_playing_msg = msg
+                await _refresh_player(guild.id)
             else:
-                view = PlayerView(
-                    guild, channel, loop,
-                    current_track=track,
-                    current_idx=next_idx,
-                    loop_getter=lambda: loop,
-                )
+                view = PlayerView(guild, channel, loop, current_track=track, current_idx=next_idx, loop_getter=lambda: loop)
                 active_views[guild.id] = view
-                msg = await channel.send(embed=embed, view=view)
-                view.now_playing_msg = msg
+                await _refresh_player(guild.id)
 
             token = _next_playback_generation(guild.id)
             session_id = _get_player_session(guild.id)
@@ -3021,26 +3055,15 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             url, title, duration, requester, thumbnail, *_rest = track
             source = discord.PCMVolumeTransformer(
                 discord.FFmpegPCMAudio(url, **FFMPEG_OPTIONS), volume=get_guild_volume(guild.id))
-            embed = make_now_playing_embed(title, duration, requester, thumbnail,
-                                           _queue_pos_str(guild.id, next_idx))
-
             old_view = active_views.get(guild.id)
-            if old_view and old_view.now_playing_msg:
-                # Reuse view เดิม — แค่ edit embed
+            if old_view:
                 old_view.current_track = track
                 old_view.current_idx = next_idx
-                view = old_view
-                try:
-                    await view.now_playing_msg.edit(embed=embed, view=view)
-                except Exception:
-                    view.now_playing_msg = None
-                    msg = await channel.send(embed=embed, view=view)
-                    view.now_playing_msg = msg
+                await _refresh_player(guild.id)
             else:
                 view = PlayerView(guild, channel, loop, current_track=track, current_idx=next_idx, loop_getter=lambda: loop)
                 active_views[guild.id] = view
-                msg = await channel.send(embed=embed, view=view)
-                view.now_playing_msg = msg
+                await _refresh_player(guild.id)
 
             token = _next_playback_generation(guild.id)
             session_id = _get_player_session(guild.id)
@@ -3475,14 +3498,11 @@ def register(tree: app_commands.CommandTree, loop_getter):
         done_embed = make_done_embed()
         if now_playing_msg:
             try:
-                await now_playing_msg.edit(embed=done_embed, view=None)
-                queue_done_msgs[interaction.guild.id] = now_playing_msg
+                await now_playing_msg.delete()
             except Exception:
-                done_msg = await interaction.channel.send(embed=done_embed)
-                queue_done_msgs[interaction.guild.id] = done_msg
-        else:
-            done_msg = await interaction.channel.send(embed=done_embed)
-            queue_done_msgs[interaction.guild.id] = done_msg
+                pass
+        done_msg = await interaction.channel.send(embed=done_embed)
+        queue_done_msgs[interaction.guild.id] = done_msg
 
     @tree.command(name="clear", description="ลบข้อความในช่อง")
     @app_commands.describe(amount="จำนวนข้อความที่ต้องการลบ (1-100) — ไม่ระบุ = ลบสูงสุด 100")
