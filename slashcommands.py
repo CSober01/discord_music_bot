@@ -1670,10 +1670,15 @@ class RadioChoiceView(discord.ui.LayoutView):
             pass
         cancel.callback = self.cancel_btn
 
+        choice_row = discord.ui.ActionRow()
+        choice_row.add_item(single)
+        choice_row.add_item(playlist)
+        cancel_row = discord.ui.ActionRow()
+        cancel_row.add_item(cancel)
         self.add_item(discord.ui.Container(
             discord.ui.TextDisplay("## 📻 YouTube Radio / Mix"),
-            discord.ui.ActionRow(single, playlist),
-            discord.ui.ActionRow(cancel),
+            choice_row,
+            cancel_row,
             accent_colour=0x5865F2,
         ))
 
