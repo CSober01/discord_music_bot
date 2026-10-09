@@ -325,6 +325,18 @@ class _QuietYtDlpLogger:
         return
 
 
+def _quiet_ytdlp(options: dict):
+    """Create a yt-dlp instance that raises errors normally but never prints raw stderr.
+
+    yt-dlp's quiet/logger settings do not suppress every fatal ERROR line. Such a line
+    can overwrite the in-place playlist progress display, so silence terminal output
+    at the instance level while preserving exception handling in callers.
+    """
+    ydl = yt_dlp.YoutubeDL(options)
+    ydl.to_stderr = lambda *args, **kwargs: None
+    return ydl
+
+
 def _bounded_float_env(name: str, default: float, minimum: float, maximum: float) -> float:
     """Read a numeric environment setting safely and clamp it to a sensible range."""
     try:
@@ -489,7 +501,7 @@ def _fetch_spotify_track_from_search(search_query: str):
     opts["retries"] = 2
     opts["fragment_retries"] = 2
     
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    with _quiet_ytdlp(opts) as ydl:
         info = ydl.extract_info(search_query, download=False)
         if "entries" in info:
             info = info["entries"][0]
@@ -666,7 +678,7 @@ def fetch_playlist_tracks(query: str, max_tracks: int = MAX_PLAYLIST_FETCH) -> l
     
     tracks = []
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with _quiet_ytdlp(opts) as ydl:
             info = ydl.extract_info(query, download=False)
             entries = info.get("entries", [])
             
@@ -713,7 +725,7 @@ def _fetch_track_once(query: str):
                 opts["fragment_retries"] = 2
                 
                 try:
-                    with yt_dlp.YoutubeDL(opts) as ydl:
+                    with _quiet_ytdlp(opts) as ydl:
                         info = ydl.extract_info(search_query, download=False)
                         if "entries" in info:
                             info = info["entries"][0]
@@ -749,7 +761,7 @@ def _fetch_track_once(query: str):
     opts["fragment_retries"] = 2
     
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with _quiet_ytdlp(opts) as ydl:
             info = ydl.extract_info(query, download=False)
             if "entries" in info:
                 info = info["entries"][0]
@@ -781,7 +793,7 @@ def search_tracks(query: str, limit: int = 5):
     results = []
     
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with _quiet_ytdlp(opts) as ydl:
             info = ydl.extract_info(query, download=False)
             entries = info.get("entries", [info]) if "entries" in info else [info]
             for entry in entries[:limit]:
@@ -2364,7 +2376,7 @@ def _fetch_playlist_track_sync(track_info: dict, guild_id: int, guild_name: str)
             except Exception as e:
                 if _is_youtube_anti_bot_error(e):
                     glog(guild_id, guild_name,
-                         f"⏸ YouTube ปฏิเสธคำขอ/อยู่ในช่วงพัก ไม่ลองค้นชื่อซ้ำ: {_trunc(orig_title, 40)}",
+                         f"⏸ YouTube ปฏิเสธคำขอ/อยู่ในช่วงพัก ไม่ลองค้นชื่อซ้ำ: {_trunc(orig_title, 40)} [{_reason(e)}]",
                          level="warning", console=False)
                     return None, "anti_bot"
                 glog(guild_id, guild_name,
@@ -2380,7 +2392,7 @@ def _fetch_playlist_track_sync(track_info: dict, guild_id: int, guild_name: str)
                 except Exception as e2:
                     if _is_youtube_anti_bot_error(e2):
                         glog(guild_id, guild_name,
-                             f"⏸ YouTube จำกัดคำขอระหว่างค้นเพลงทดแทน: {_trunc(orig_title, 40)}",
+                             f"⏸ YouTube จำกัดคำขอระหว่างค้นเพลงทดแทน: {_trunc(orig_title, 40)} [{_reason(e2)}]",
                              level="warning", console=False)
                         return None, "anti_bot"
                     glog(guild_id, guild_name,
@@ -2400,7 +2412,7 @@ def _fetch_playlist_track_sync(track_info: dict, guild_id: int, guild_name: str)
     except Exception as e:
         if _is_youtube_anti_bot_error(e):
             glog(guild_id, guild_name,
-                 f"⏸ ข้ามรายการชั่วคราวเพราะ YouTube จำกัดคำขอ: {_trunc(orig_title, 40)}",
+                 f"⏸ ข้ามรายการชั่วคราวเพราะ YouTube จำกัดคำขอ: {_trunc(orig_title, 40)} [{_reason(e)}]",
                  level="warning", console=False)
             return None, "anti_bot"
         glog(guild_id, guild_name,
