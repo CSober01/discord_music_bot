@@ -1465,6 +1465,14 @@ The button contract remains:
 - These are real `discord.ui.Button` components and must not be represented as fake text controls in the Embed.
 - Button state must continue to reflect the actual playback/Queue state.
 
+### Active-only Shuffle / Repeat status and toggle behavior
+
+- The Main Player status area shows `🔀 Shuffle` only while Shuffle is enabled; show its state as `เปิด`.
+- The Main Player shows Repeat only while Repeat is active. `track` is displayed as `🔁 Repeat: วนเพลงนี้`; `queue` is displayed as `🔁 Repeat: วน Queue`.
+- When both are off, neither status label is rendered. Keep the requester/volume row and the approved divider spacing intact.
+- Shuffle is a two-state toggle: off → on (shuffle Upcoming once) and on → off (stop treating Shuffle as active). Pressing while on must not reshuffle Upcoming again.
+- Queue page navigation must call `_sync_buttons()` after changing `page` and before editing the message, so Previous/Next disabled states match the newly displayed page.
+
 ### Queue page layout
 
 Queue page uses one consistent item icon:
