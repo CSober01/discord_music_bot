@@ -33,11 +33,38 @@ class YouTubeResilienceTests(unittest.TestCase):
             with self.subTest(message=message):
                 self.assertTrue(sc._is_youtube_anti_bot_error(RuntimeError(message)))
 
+    def test_spotify_playlist_entries_share_youtube_circuit_breaker_path(self):
+        result = ("stream-url", "Song", "3:30", "thumbnail")
+        track = {"title": "Song", "artist": "Artist"}
+        with patch.object(sc, "fetch_track", return_value=result) as fetch, patch.object(sc, "glog"):
+            self.assertEqual(
+                sc._fetch_playlist_track_sync(track, 123, "Test guild"),
+                (result, "direct"),
+            )
+        fetch.assert_called_once_with("Song Artist")
+
+    def test_spotify_direct_lookup_preserves_youtube_anti_bot_error(self):
+        with patch.object(sc, "extract_spotify_track_id", return_value="spotify-id"), \
+             patch.object(sc, "get_spotify_track_info", return_value={"title": "Song", "artist": "Artist"}), \
+             patch.object(sc, "_fetch_spotify_track_from_search", side_effect=RuntimeError("Sign in to confirm you're not a bot")):
+            with self.assertRaisesRegex(RuntimeError, "Sign in to confirm"):
+                sc._fetch_track_once("https://open.spotify.com/track/spotify-id")
+
+    def test_cooldown_skips_are_counted_separately_from_actual_blocked_requests(self):
+        progress = sc._PlaylistFetchProgress(123, "Test guild", total=2)
+        progress.record("anti_bot")
+        progress.record("cooldown")
+        self.assertEqual(progress.anti_bot_blocks, 1)
+        self.assertEqual(progress.cooldown_skipped, 1)
+        self.assertEqual(progress.skipped, 2)
+
     def test_ydl_options_use_safe_request_pacing_and_ten_second_player_refresh(self):
         options = sc.get_ydl_options()
         self.assertEqual(options["sleep_interval_requests"], 1.0)
         self.assertEqual(sc.PLAYER_PROGRESS_INTERVAL_SECONDS, 10)
         self.assertEqual(sc.PLAYLIST_FETCH_CONCURRENCY, 1)
+        self.assertEqual(sc.PLAYLIST_TRACK_FETCH_DELAY_SECONDS, 5.0)
+        self.assertEqual(sc.get_youtube_playlist_fetch_semaphore()._value, 1)
         with patch.dict("os.environ", {"YTDLP_SLEEP_REQUESTS": "2.5"}):
             self.assertEqual(sc.get_ydl_options()["sleep_interval_requests"], 2.5)
         with patch.dict("os.environ", {"YTDLP_SLEEP_REQUESTS": "invalid"}):
