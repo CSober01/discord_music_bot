@@ -11,3 +11,6 @@ logs/
 # Local Python environments
 .venv/
 venv/
+
+# yt-dlp authentication cookies contain private session credentials
+*cookies*.txt
