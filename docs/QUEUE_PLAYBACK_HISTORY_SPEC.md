@@ -1480,6 +1480,11 @@ The button contract remains:
 - The first playable track still starts as soon as its extraction succeeds; remaining tracks continue through the existing background/concurrent fetch path.
 - Report selection-processing errors through an ephemeral follow-up. Do not silently lose exceptions from the background task.
 
+### Queue divider for a single track
+
+- When the Queue contains exactly one track, render the top divider but omit the bottom `QUEUE_DIVIDER` line.
+- With two or more tracks, preserve the bottom divider as usual.
+
 ### Queue page navigation reliability
 
 - Queue Previous (`◀`) and Next (`▶`) must update the component message through `interaction.response.edit_message(...)` in the same interaction; do not defer and then call `edit_original_response(...)`.
