@@ -2302,6 +2302,11 @@ def _fetch_playlist_track_sync(track_info: dict, guild_id: int, guild_name: str)
                          level="info", console=False)
                     return result, "fallback_ok"
                 except Exception as e2:
+                    if _is_youtube_anti_bot_error(e2):
+                        glog(guild_id, guild_name,
+                             f"⏸ YouTube จำกัดคำขอระหว่างค้นเพลงทดแทน: {_trunc(orig_title, 40)}",
+                             level="warning", console=False)
+                        return None, "anti_bot"
                     glog(guild_id, guild_name,
                          f"❌ ข้ามเพลง [{_reason(e2)}]: {_trunc(orig_title, 40)}",
                          level="error", console=False)
@@ -3072,7 +3077,7 @@ class PlayerView(discord.ui.LayoutView):
             ])
         elif self.player_menu == "playlist_count":
             count = min(len(self.player_menu_tracks), MAX_PLAYLIST_FETCH)
-            fixed_counts = [n for n in (5, 10, 20, 30) if n < count]
+            fixed_counts = [n for n in (5, 10, 20, 30) if n <= count]
             for index, amount in enumerate(fixed_counts[:4]):
                 specs.append((
                     tertiary, f"playlist_count_{amount}", f"{amount} เพลง",
