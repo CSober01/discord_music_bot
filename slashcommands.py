@@ -1868,29 +1868,7 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
             # ตรวจ URL ก่อนเชื่อมต่อ VC เพื่อให้ Radio/Mix แสดงตัวเลือกทันที
             is_url = query_str.startswith("http://") or query_str.startswith("https://")
 
-            # Radio/Mix choices belong to the main player when one is active.
-            if is_url and is_youtube_radio_url(query_str):
-                await _ack_done()
-                await self._delete_done_msg()
-                player = self.player_view or active_views.get(self.guild.id)
-                if player and player.current_track and await _is_current_player(player):
-                    player.radio_mix_query = query_str
-                    player.radio_mix_requester = interaction.user
-                    player.player_menu_requester = interaction.user
-                    player.player_menu = "radio"
-                    await _refresh_player(self.guild.id)
-                    return
-                view = RadioChoiceView(
-                    query_str, self.guild, self.channel, self.loop_getter,
-                    interaction.user, self.loop,
-                )
-                prompt = await interaction.followup.send(
-                    view=view,
-                    ephemeral=True,
-                    wait=True,
-                )
-                view.message = prompt
-                return
+            # YouTube Mix/Radio links are handled by the playlist-count selector below.
 
             # Treat playlist and YouTube Mix/Radio URLs alike: select how many tracks to add.
             if is_url and (is_playlist_url(query_str) or is_youtube_radio_url(query_str)):
@@ -3215,8 +3193,6 @@ class PlayerView(discord.ui.LayoutView):
                 preview.append(f"{pos}. {discord.utils.escape_markdown(shown)} · {track_duration}")
             if preview:
                 parts.append(discord.ui.TextDisplay("\n".join(preview)))
-        elif self.player_menu == "radio":
-            parts.append(discord.ui.TextDisplay("### 📻 YouTube Radio / Mix\nต้องการเล่นแบบไหน?"))
         else:
             hist_start = max(0, idx - 3)
             history_positions = range(idx - 1, hist_start - 1, -1) if q else range(0)
