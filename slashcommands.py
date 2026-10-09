@@ -933,7 +933,7 @@ def make_queue_embed(guild_id: int, current_idx: int = None, page: int = 0):
         if actual_idx == idx:
             lines.append(f"**{line_no:02d} ▶️ {_pad_queue_title(display_title, 31)} `{duration}`**")
         else:
-            lines.append(f"{line_no:02d} 🎵 {_pad_queue_title(display_title, 31)} `{duration}`")
+            lines.append(f"{line_no:02d} ♫ {_pad_queue_title(display_title, 31)} `{duration}`")
 
     # Keep the closing divider only when there is more than one track.
     if len(q) > 1:
