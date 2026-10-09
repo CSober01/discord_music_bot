@@ -740,7 +740,7 @@ def _fetch_track_once(query: str, player_client: str | None = None):
 
 def search_tracks(query: str, limit: int = 5):
     if _is_youtube_cooldown_active():
-        return []
+        raise ValueError("YOUTUBE_ANTI_BOT_COOLDOWN")
 
     opts = get_ydl_options(include_playlist=False)
     opts["extract_flat"] = "in_playlist"
@@ -768,8 +768,9 @@ def search_tracks(query: str, limit: int = 5):
     except Exception as e:
         if _is_youtube_anti_bot_error(e):
             _activate_youtube_anti_bot_cooldown()
+            raise ValueError("YOUTUBE_ANTI_BOT") from e
         logging.getLogger("yt_dlp").warning(
-            "YouTube search failed (%s)", "anti-bot" if _is_youtube_anti_bot_error(e) else type(e).__name__
+            "YouTube search failed (%s)", type(e).__name__
         )
 
     return results
@@ -2243,6 +2244,16 @@ def _is_youtube_anti_bot_error(error: Exception) -> bool:
         or "confirm you're not a bot" in message
         or ("not a bot" in message and "sign in" in message)
         or "login_required" in message
+    )
+
+
+def _youtube_blocked_user_message(error: Exception) -> str | None:
+    """Return a clear user-facing message for a blocked/cooling-down YouTube request."""
+    if not _is_youtube_anti_bot_error(error):
+        return None
+    return (
+        "⏸️ YouTube จำกัดคำขอชั่วคราว บอทพักการเรียก YouTube 3 นาทีเพื่อไม่ให้ถูกบล็อกซ้ำ "
+        "กรุณาลองใหม่ภายหลัง หากยังเกิดซ้ำ ให้ตั้ง YTDLP_COOKIES_FILE เป็นไฟล์ cookies ที่ถูกต้อง"
     )
 
 
