@@ -1598,3 +1598,15 @@ Player หลักใช้ `discord.ui.LayoutView` และ `discord.ui.Conta
 - เมื่อ Stop หรือ external disconnect ให้ลบ Player V2 message แล้วส่งข้อความสรุปแบบ legacy แยกต่างหาก เพราะ V2 message ไม่สามารถเปลี่ยนกลับไปใช้ Embed เดิมในข้อความเดียวกันได้.
 - ต้องทดสอบ callback ของทุกปุ่ม, Previous/Next, queue refresh, repost debounce, natural end, stop และ external disconnect บน Discord จริงก่อน merge.
 - แถบเวลาใน Player เป็นตัวแสดงสถานะตาม implementation ปัจจุบัน; การแสดง elapsed time แบบเคลื่อนไหวต้องมีระบบติดตามเวลาเล่นและ refresh เพิ่มเติม.
+
+
+### Player controls and embedded actions
+- The live Player message uses Discord Components V2; it is not a preview-only mockup.
+- Control row 1: Previous, seek −10 seconds, Pause/Resume, seek +10 seconds, Next.
+- Control row 2: Shuffle, Stop, Repeat.
+- Control row 3: Search, Playlist count, YouTube Radio/Mix, QUEUE, Volume.
+- The Playlist count action accepts a YouTube playlist URL, fetches available tracks, then shows count choices based on tracks actually found.
+- The Radio/Mix action accepts a YouTube Radio/Mix URL and opens the existing single-track or load-from-Mix choices.
+- QUEUE opens the current queue view. Volume opens the volume control modal.
+- Show current playback time and a proportional progress bar, refreshed while audio is playing.
+- Avoid decorative separator lines inside the player container; keep song titles clickable only when a safe YouTube page URL is available.
