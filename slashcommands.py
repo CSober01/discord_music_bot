@@ -2889,7 +2889,7 @@ async def _add_playlist_to_queue(vc, guild, channel, loop_getter, playlist_track
 
 async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_PlaylistFetchProgress",
                          initial_added=None, fetch_token: int = None):
-    """Fetch playlist tracks in batches of four, append each completed batch, and keep UI responsive."""
+    """Fetch remaining playlist tracks concurrently, then append all successful results together."""
     if fetch_token is None:
         fetch_token = playlist_fetch_generation.get(guild.id, 0)
 
@@ -2923,49 +2923,44 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
                 await _refresh_player(guild.id)
             return result
 
-    batch_size = max(1, PLAYLIST_FETCH_CONCURRENCY)
-    for offset in range(0, len(rest_tracks), batch_size):
-        batch = rest_tracks[offset:offset + batch_size]
-        batch_results = await asyncio.gather(*(_fetch_one(track) for track in batch))
+    # Keep up to PLAYLIST_FETCH_CONCURRENCY extractions in flight globally, but do not
+    # publish partial results: wait until every remaining entry has been attempted.
+    # asyncio.gather preserves input order, so successful tracks enter Queue in playlist order.
+    results = await asyncio.gather(*(_fetch_one(track) for track in rest_tracks))
 
+    if fetch_token != playlist_fetch_generation.get(guild.id, 0):
+        print(f"\n[{guild.name}] 🛑 Playlist bg fetch ยกเลิก — session เปลี่ยนระหว่าง fetch")
+        if playlist_loading_status.get(guild.id) is progress:
+            playlist_loading_status.pop(guild.id, None)
+            await _refresh_player(guild.id)
+        return
+
+    fetched = [
+        (url, title, duration, thumbnail)
+        for result in results if result is not None
+        for url, title, duration, thumbnail in [result]
+    ]
+
+    stale_fetch = False
+    async with get_queue_lock(guild.id):
+        # Do not let a stale worker repopulate Queue after Stop/disconnect.
         if fetch_token != playlist_fetch_generation.get(guild.id, 0):
-            print(f"\n[{guild.name}] 🛑 Playlist bg fetch ยกเลิก — session เปลี่ยนระหว่าง fetch")
-            if playlist_loading_status.get(guild.id) is progress:
-                playlist_loading_status.pop(guild.id, None)
-                await _refresh_player(guild.id)
-            return
+            stale_fetch = True
+        else:
+            # Add the successful remainder atomically after every fetch attempt has finished.
+            for url, title, duration, thumbnail in fetched:
+                track = (url, title, duration, requester, thumbnail)
+                add_to_queue(guild.id, track)
+                added.append(track)
 
-        fetched = [
-            (url, title, duration, thumbnail)
-            for result in batch_results if result is not None
-            for url, title, duration, thumbnail in [result]
-        ]
-        if not fetched:
-            continue
+    if stale_fetch:
+        if playlist_loading_status.get(guild.id) is progress:
+            playlist_loading_status.pop(guild.id, None)
+            await _refresh_player(guild.id)
+        return
 
-        stale_batch = False
-        async with get_queue_lock(guild.id):
-            # Do not let a stale worker repopulate Queue after Stop/disconnect.
-            if fetch_token != playlist_fetch_generation.get(guild.id, 0):
-                stale_batch = True
-            else:
-                for url, title, duration, thumbnail in fetched:
-                    track = (url, title, duration, requester, thumbnail)
-                    add_to_queue(guild.id, track)
-                    added.append(track)
-
-        if stale_batch:
-            if playlist_loading_status.get(guild.id) is progress:
-                playlist_loading_status.pop(guild.id, None)
-                await _refresh_player(guild.id)
-            return
-
-        # Publish each completed batch immediately instead of waiting for the whole playlist.
+    if fetched:
         await _start_next_queued_track_if_idle(guild, channel)
-        await asyncio.gather(
-            _refresh_queue_msg(guild.id),
-            _refresh_player(guild.id),
-        )
 
     progress.print_summary()
     if playlist_loading_status.get(guild.id) is progress:
