@@ -3661,10 +3661,10 @@ class PlayerView(discord.ui.LayoutView):
             gap = "\u2007" * max(1, duration_column - sum(_char_display_width(char) for char in prefix) - shown_width)
             return f"{prefix}{_player_track_link(track_url, shown)}{gap}`{track_duration}`"
 
-        for history_no, pos in enumerate(history_positions, start=1):
+        for pos in history_positions:
             track_url, track_title, track_duration, *_ = q[pos]
             history_lines.append(_track_line(
-                history_no, track_url, track_title, track_duration
+                display_no(gid, pos), track_url, track_title, track_duration
             ))
 
         parts.append(discord.ui.TextDisplay(
