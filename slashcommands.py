@@ -3573,12 +3573,7 @@ class PlayerView(discord.ui.LayoutView):
         progress_slots = round((shown_position / duration_seconds) * total_bar) if duration_seconds else 0
         progress_slots = max(0, min(total_bar, progress_slots))
         progress_bar = "━" * progress_slots + ("●" if progress_slots < total_bar else "") + "━" * max(0, total_bar - progress_slots - 1)
-        volume_pct = round(get_guild_volume(gid) * 100)
-        filled = max(0, min(10, round(volume_pct / 10)))
-        volume_bar = "▰" * filled + "▱" * (10 - filled)
-        parts.append(discord.ui.TextDisplay(
-            f"**{elapsed_text}** {progress_bar} **{duration}**\n🔊 {volume_bar}  {volume_pct}%"
-        ))
+        parts.append(discord.ui.TextDisplay(f"**{elapsed_text}** {progress_bar} **{duration}**"))
 
         status = []
         if gid in shuffle_enabled:
@@ -3591,7 +3586,11 @@ class PlayerView(discord.ui.LayoutView):
         if status:
             parts.append(discord.ui.TextDisplay("　".join(status)))
 
+        volume_pct = round(get_guild_volume(gid) * 100)
+        filled = max(0, min(10, round(volume_pct / 10)))
+        volume_bar = "▰" * filled + "▱" * (10 - filled)
         volume_control = discord.ui.Button(
+            label=f"{volume_bar} {volume_pct}%",
             emoji=volume_button,
             style=discord.ButtonStyle.secondary,
             custom_id="player_volume",
@@ -3844,6 +3843,8 @@ class PlayerView(discord.ui.LayoutView):
         for cid, item in self._buttons.items():
             if cid == "player_shuffle":
                 item.style = discord.ButtonStyle.secondary
+                # Shuffling has no effect unless at least two tracks are queued.
+                item.disabled = len(get_full_queue(self.guild.id)) < 2
             elif cid == "player_loop":
                 item.style = discord.ButtonStyle.secondary
                 item.emoji = loop_button
