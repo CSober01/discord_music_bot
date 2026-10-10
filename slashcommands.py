@@ -3508,8 +3508,14 @@ class PlayerView(discord.ui.LayoutView):
         self._build_layout()
 
     def _build_layout(self):
-        """Build the player with two compact control rows and lists below the buttons."""
+        """Build the layout while keeping detached buttons dispatchable during a message edit."""
+        previous_buttons = tuple(self._buttons.values())
         self.clear_items()
+        # discord.py's ViewStore may still reference the previous Button objects until
+        # the HTTP edit finishes. Reattach their view pointer during that hand-off so a
+        # click racing with a refresh is handled instead of discarded as an unknown view.
+        for previous_button in previous_buttons:
+            previous_button._update_view(self)
         self._buttons = {}
         if not self.current_track:
             self.add_item(discord.ui.Container(
@@ -3895,10 +3901,10 @@ class PlayerView(discord.ui.LayoutView):
                     return await safe_respond(interaction, embed=discord.Embed(
                         description="❌ ไม่มีเพลงที่กำลังเล่นอยู่", color=discord.Color.red()), ephemeral=True)
 
-        await asyncio.gather(
-            _refresh_player(guild_id),
-            _refresh_queue_msg(guild_id),
-        )
+            await asyncio.gather(
+                _refresh_player(guild_id),
+                _refresh_queue_msg(guild_id),
+            )
 
     async def seek_back(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._seek_by(interaction, -10)
@@ -3965,8 +3971,8 @@ class PlayerView(discord.ui.LayoutView):
                 if was_paused:
                     vc.pause()
 
-        log("⏩ SEEK", interaction, f"Track: {_trunc(seek_title, 60)}, position={target:.1f}s")
-        await _refresh_player(guild_id)
+            log("⏩ SEEK", interaction, f"Track: {_trunc(seek_title, 60)}, position={target:.1f}s")
+            await _refresh_player(guild_id)
 
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await _is_current_player(self):
