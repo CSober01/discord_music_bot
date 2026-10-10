@@ -3619,12 +3619,8 @@ class PlayerView(discord.ui.LayoutView):
         primary, secondary = discord.ui.ActionRow(), discord.ui.ActionRow()
         repeat_mode = loop_modes.get(gid, "off")
         repeat_button_labels = {"off": "ปิด", "track": "เพลงนี้", "queue": "ทั้งคิว"}
-        repeat_button_emojis = {"off": loop_button, "track": "🔂", "queue": loop_button}
-        repeat_button_styles = {
-            "off": discord.ButtonStyle.secondary,
-            "track": discord.ButtonStyle.primary,
-            "queue": discord.ButtonStyle.success,
-        }
+        repeat_button_emojis = {"off": "▶️", "track": "🔂", "queue": "🔁"}
+        repeat_button_style = discord.ButtonStyle.secondary
         specs = [
             (primary, "player_previous", None, discord.ButtonStyle.secondary, self.previous, prev_button),
             (primary, "player_seek_back", None, discord.ButtonStyle.secondary, self.seek_back, rewind_button),
@@ -3636,7 +3632,7 @@ class PlayerView(discord.ui.LayoutView):
             (secondary, "player_show_queue", None, discord.ButtonStyle.secondary, self.show_queue, queue_button),
             (secondary, "player_stop", None, discord.ButtonStyle.danger, self.stop, stop_button),
             (secondary, "player_shuffle", None, discord.ButtonStyle.secondary, self.shuffle, shuffle_button),
-            (secondary, "player_loop", repeat_button_labels[repeat_mode], repeat_button_styles[repeat_mode], self.loop_btn, repeat_button_emojis[repeat_mode]),
+            (secondary, "player_loop", repeat_button_labels[repeat_mode], repeat_button_style, self.loop_btn, repeat_button_emojis[repeat_mode]),
         ]
         for row, cid, label, style, callback, emoji in specs:
             button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=cid)
@@ -3856,12 +3852,8 @@ class PlayerView(discord.ui.LayoutView):
             elif cid == "player_loop":
                 repeat_mode = loop_modes.get(self.guild.id, "off")
                 item.label = {"off": "ปิด", "track": "เพลงนี้", "queue": "ทั้งคิว"}.get(repeat_mode, "ปิด")
-                item.emoji = {"off": loop_button, "track": "🔂", "queue": loop_button}.get(repeat_mode, loop_button)
-                item.style = {
-                    "off": discord.ButtonStyle.secondary,
-                    "track": discord.ButtonStyle.primary,
-                    "queue": discord.ButtonStyle.success,
-                }.get(repeat_mode, discord.ButtonStyle.secondary)
+                item.emoji = {"off": "▶️", "track": "🔂", "queue": "🔁"}.get(repeat_mode, "▶️")
+                item.style = discord.ButtonStyle.secondary
             elif cid == "player_pause_resume":
                 vc = self.guild.voice_client
                 item.emoji = play_button if vc and vc.is_paused() else pause_button
