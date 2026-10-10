@@ -1618,7 +1618,7 @@ This section supersedes older UI notes above where they conflict with the implem
 - Row 2: Repeat, Search, Queue, Shuffle, Stop (five controls).
 - The speaker button (`volume_button`) is the accessory beside the top volume meter and opens the existing volume modal.
 - Repeat is a real button in the second ActionRow, not an accessory beside the divider.
-- Button icons use the exact Unicode constants in `slashcommands.py` with VS15 (`\\uFE0E`) to request text presentation. Pause/Resume switches between `play_button` and `pause_button`; seek buttons now use text-style Unicode symbols rather than custom emoji IDs.
+- Button icons use the exact Unicode constants in `slashcommands.py` directly as `Button(emoji=...)`, without appending VS15 (`\\uFE0E`). Pause/Resume switches between `play_button` and `pause_button`; seek buttons use the provided Unicode variables rather than custom emoji IDs.
 - Ordinary player controls use Secondary styling rather than blue Primary styling. Stop remains red/Danger. Shuffle and Repeat stay neutral whether on or off; active modes are shown in the status text.
 - The current title is a prominent Markdown heading link when a safe YouTube source URL exists, with no explicit underline markup. Artist/source appears below it, the active playback status appears only when enabled, and the volume meter and requester are separate lines.
 - History (latest three previous tracks, newest first) and Up Next (up to three upcoming tracks) render below both control rows. Previous-track navigation still uses up to 10 retained history entries in Queue state.
