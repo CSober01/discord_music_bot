@@ -146,11 +146,20 @@ def _get_player_session(guild_id: int) -> str | None:
 
 # Serialize user-driven Previous/Next transitions per guild.
 navigation_locks: dict[int, asyncio.Lock] = {}
+player_refresh_locks: dict[int, asyncio.Lock] = {}
+
 
 def get_navigation_lock(guild_id: int) -> asyncio.Lock:
     if guild_id not in navigation_locks:
         navigation_locks[guild_id] = asyncio.Lock()
     return navigation_locks[guild_id]
+
+
+def get_player_refresh_lock(guild_id: int) -> asyncio.Lock:
+    """Serialize LayoutView rebuilds and Discord edits for each guild."""
+    if guild_id not in player_refresh_locks:
+        player_refresh_locks[guild_id] = asyncio.Lock()
+    return player_refresh_locks[guild_id]
 
 def _next_playback_generation(guild_id: int) -> int:
     token = playback_generation.get(guild_id, 0) + 1
@@ -1265,51 +1274,64 @@ def _ensure_player_progress_task(guild_id: int):
         _player_progress_tasks[guild_id] = asyncio.create_task(_player_progress_loop(guild_id))
 
 async def _refresh_player(guild_id: int, repost: bool = False, _from_progress: bool = False):
-    """Refresh the Player; repost=True deletes the old message before sending the new one."""
-    view = active_views.get(guild_id)
-    if not view or not view.current_track:
-        return False
+    """Serialize Player updates; on repost, publish the replacement before deleting the old message."""
+    async with get_player_refresh_lock(guild_id):
+        view = active_views.get(guild_id)
+        if not view or not view.current_track:
+            return False
 
-    try:
-        vc = view.guild.voice_client
-        view.volume_level = get_guild_volume(guild_id)
-        view.refresh_layout()
-        # _build_layout recreates the buttons; sync disabled/style states after rebuilding.
-        view._sync_state_buttons()
-        if not _from_progress:
-            _ensure_player_progress_task(guild_id)
+        old_message = None
+        try:
+            view.volume_level = get_guild_volume(guild_id)
+            view.refresh_layout()
+            # Rebuild the layout, then sync disabled/style state on the newly built buttons.
+            view._sync_state_buttons()
+            if not _from_progress:
+                _ensure_player_progress_task(guild_id)
 
-        if repost and view.now_playing_msg:
-            old_message = view.now_playing_msg
-            view.now_playing_msg = None
-            try:
-                await old_message.delete()
-            except Exception:
-                pass
-
-        if view.now_playing_msg:
-            try:
-                await view.now_playing_msg.edit(view=view)
-                await _refresh_player_queue_views(guild_id)
-                return True
-            except Exception:
+            if repost and view.now_playing_msg:
+                # Keep the old message registered until its replacement has been sent.
+                # This avoids a window where a fast click has no registered View.
+                old_message = view.now_playing_msg
                 view.now_playing_msg = None
 
-        view.now_playing_msg = await view.channel.send(view=view)
-        await _refresh_player_queue_views(guild_id)
-        return True
-    except Exception as exc:
-        try:
-            glog(
-                guild_id,
-                view.guild.name,
-                f"PLAYER_REFRESH_ERROR: {type(exc).__name__}: {_trunc(str(exc), 180)}",
-                level="error",
-                console=True,
-            )
-        except Exception:
-            print(f"[PLAYER REFRESH ERROR] guild={guild_id}: {type(exc).__name__}: {_trunc(str(exc), 180)}")
-        return False
+            if view.now_playing_msg:
+                try:
+                    await view.now_playing_msg.edit(view=view)
+                    await _refresh_player_queue_views(guild_id)
+                    return True
+                except Exception:
+                    view.now_playing_msg = None
+
+            try:
+                new_message = await view.channel.send(view=view)
+            except Exception:
+                # If replacement sending fails, keep tracking the existing message.
+                if old_message is not None:
+                    view.now_playing_msg = old_message
+                raise
+
+            view.now_playing_msg = new_message
+            if old_message is not None:
+                try:
+                    await old_message.delete()
+                except Exception:
+                    pass
+
+            await _refresh_player_queue_views(guild_id)
+            return True
+        except Exception as exc:
+            try:
+                glog(
+                    guild_id,
+                    view.guild.name,
+                    f"PLAYER_REFRESH_ERROR: {type(exc).__name__}: {_trunc(str(exc), 180)}",
+                    level="error",
+                    console=True,
+                )
+            except Exception:
+                print(f"[PLAYER REFRESH ERROR] guild={guild_id}: {type(exc).__name__}: {_trunc(str(exc), 180)}")
+            return False
 
 
 async def _refresh_player_queue_views(guild_id: int):
@@ -3274,8 +3296,11 @@ async def _do_play_at_idx(
     if add_msg:
         asyncio.create_task(_delete_message_quietly(add_msg))
 
-    asyncio.create_task(_refresh_player(guild_id))
-    asyncio.create_task(_refresh_queue_msg(guild_id))
+    # Keep navigation actions serialized until the new Player/Queue view is visible.
+    await asyncio.gather(
+        _refresh_player(guild_id),
+        _refresh_queue_msg(guild_id),
+    )
     return True
 
 
@@ -3582,12 +3607,27 @@ class PlayerView(discord.ui.LayoutView):
         history_start = max(0, idx - 3)
         history_positions = range(idx - 1, history_start - 1, -1) if q else range(0)
         history_lines = []
+        player_row_no = 1
+
+        def _track_line(row_no, track_url, track_title, track_duration):
+            shown = _truncate_display_width(
+                queue_display_titles.get(track_url, track_title), 70
+            )
+            padded = _pad_queue_title(shown, 70)
+            # Keep padding outside the Markdown link so the visible title remains clickable.
+            title_padding = padded[len(shown):]
+            return (
+                f"{row_no:02d}. ♫ {_player_track_link(track_url, shown)}"
+                f"{title_padding} · {track_duration}"
+            )
+
         for pos in history_positions:
             track_url, track_title, track_duration, *_ = q[pos]
-            shown = _truncate_display_width(queue_display_titles.get(track_url, track_title), 70)
-            history_lines.append(
-                f"{display_no(gid, pos)}. ♫ {_player_track_link(track_url, shown)} · {track_duration}"
-            )
+            history_lines.append(_track_line(
+                player_row_no, track_url, track_title, track_duration
+            ))
+            player_row_no += 1
+
         parts.append(discord.ui.TextDisplay(
             "**HISTORY · ประวัติเพลง**\n"
             + ("\n".join(history_lines) if history_lines else "_ยังไม่มีประวัติเพลง_")
@@ -3595,12 +3635,12 @@ class PlayerView(discord.ui.LayoutView):
 
         upcoming = q[idx + 1:idx + 4] if q else []
         upcoming_lines = []
-        for pos, track in enumerate(upcoming, start=idx + 1):
+        for track in upcoming:
             track_url, track_title, track_duration, *_ = track
-            shown = _truncate_display_width(queue_display_titles.get(track_url, track_title), 70)
-            upcoming_lines.append(
-                f"{display_no(gid, pos)}. ♫ {_player_track_link(track_url, shown)} · {track_duration}"
-            )
+            upcoming_lines.append(_track_line(
+                player_row_no, track_url, track_title, track_duration
+            ))
+            player_row_no += 1
         parts.append(discord.ui.TextDisplay(
             "**UP NEXT · เพลงถัดไป**\n"
             + ("\n".join(upcoming_lines) if upcoming_lines else "_ไม่มีเพลงถัดไป_")
