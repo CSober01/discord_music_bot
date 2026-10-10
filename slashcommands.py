@@ -4393,6 +4393,7 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
     queue_end_current_idx = None
     queue_end_view = None
     queue_end_message = None
+    wait_for_playlist_fetch = None
     async with get_queue_lock(guild.id):
         if player_session_id is not None and player_session_id != _get_player_session(guild.id):
             return
@@ -4420,7 +4421,11 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
         else:
             next_idx = current_idx + 1
         has_next = next_idx < len(q)
-        if not has_next:
+        if not has_next and guild.id in playlist_loading_status:
+            # The first track may finish while the rest of its playlist is still
+            # being fetched. Keep the current Player/session alive and defer Queue Done.
+            wait_for_playlist_fetch = playlist_loading_status[guild.id]
+        if not has_next and wait_for_playlist_fetch is None:
             queue_end_token = _next_playback_generation(guild.id)
             queue_end_session_id = _get_player_session(guild.id)
             queue_end_current_idx = current_idx
@@ -4518,7 +4523,29 @@ async def play_next(guild: discord.Guild, channel: discord.TextChannel, loop,
             asyncio.create_task(_refresh_player(guild.id))
             asyncio.create_task(_refresh_queue_msg(guild.id))
 
-    # ── หมดคิวแล้ว (ไม่มีเพลงถัดไป) ──
+    # If playlist extraction is still in progress, wait for its final queue update
+    # before deciding that playback has ended. Re-enter play_next afterward:
+    # it will either start the newly appended track or finalize Queue Done if none succeeded.
+    if wait_for_playlist_fetch is not None:
+        while playlist_loading_status.get(guild.id) is wait_for_playlist_fetch:
+            if (
+                (player_session_id is not None and player_session_id != _get_player_session(guild.id))
+                or (playback_token is not None and playback_token != playback_generation.get(guild.id))
+                or guild.id in guild_stopped
+            ):
+                return
+            await asyncio.sleep(0.1)
+        await play_next(
+            guild, channel, loop,
+            current_track=current_track,
+            current_idx=current_idx,
+            error=error,
+            playback_token=playback_token,
+            player_session_id=player_session_id,
+        )
+        return
+
+    # ── หมหมดคิวแล้ว (ไม่มีเพลงถัดไป) ──
     # ต้องทำ "นอก" queue_lock เสมอ เพราะมี await asyncio.sleep(300) ยาวมาก
     # ถ้าทำในนั้น lock จะถูกถือค้าง 5 นาที ทำให้ /play หรือปุ่มค้นหาเพลงใหม่
     # ขอเพลงไม่ได้เลยจนกว่าจะครบ 300 วิ หรือมีคน /stop (นี่คือ bug ตัวเดิมที่ทำให้ค้าง)
