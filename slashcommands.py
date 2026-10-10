@@ -3602,11 +3602,11 @@ class PlayerView(discord.ui.LayoutView):
 
         volume_control.callback = _run_volume_control
         self._buttons["player_volume"] = volume_control
-        # Place the speaker button beside the volume meter on the same line.
-        parts.append(discord.ui.Section(
-            discord.ui.TextDisplay(f"{volume_bar}  {volume_pct}%"),
-            accessory=volume_control,
-        ))
+        # Components V2 Section accessories render on the right, so they cannot
+        # guarantee the requested button-first order. Keep a real clickable speaker
+        # button in its own ActionRow, followed by the separate meter text.
+        parts.append(discord.ui.ActionRow(volume_control))
+        parts.append(discord.ui.TextDisplay(f"{volume_bar}  {volume_pct}%"))
         who = requester.mention if requester else "ไม่ทราบชื่อ"
         parts.append(discord.ui.TextDisplay(f"👤 {who}"))
 
@@ -3646,38 +3646,35 @@ class PlayerView(discord.ui.LayoutView):
         history_lines = []
         player_row_no = 1
 
-        def _track_line(row_no, track_url, track_title, track_duration):
+        def _track_line(queue_position, track_url, track_title, track_duration):
             shown = _truncate_display_width(
                 queue_display_titles.get(track_url, track_title), 70
             )
-            padded = _pad_queue_title(shown, 70)
-            # Keep padding outside the Markdown link so the visible title remains clickable.
-            title_padding = padded[len(shown):]
+            # Keep titles clickable and put duration on a separate line. Discord's
+            # proportional fonts make whitespace-based fixed-column alignment unreliable.
             return (
-                f"{row_no:02d}. ♫ {_player_track_link(track_url, shown)}"
-                f"{title_padding} · {track_duration}"
+                f"{queue_position:02d}. ♫ {_player_track_link(track_url, shown)}\n"
+                f"    · {track_duration}"
             )
 
         for pos in history_positions:
             track_url, track_title, track_duration, *_ = q[pos]
             history_lines.append(_track_line(
-                player_row_no, track_url, track_title, track_duration
+                display_no(gid, pos), track_url, track_title, track_duration
             ))
-            player_row_no += 1
 
         parts.append(discord.ui.TextDisplay(
             "**HISTORY · ประวัติเพลง**\n"
             + ("\n".join(history_lines) if history_lines else "_ยังไม่มีประวัติเพลง_")
         ))
 
-        upcoming = q[idx + 1:idx + 4] if q else []
+        upcoming_positions = range(idx + 1, min(len(q), idx + 4)) if q else range(0)
         upcoming_lines = []
-        for track in upcoming:
-            track_url, track_title, track_duration, *_ = track
+        for pos in upcoming_positions:
+            track_url, track_title, track_duration, *_ = q[pos]
             upcoming_lines.append(_track_line(
-                player_row_no, track_url, track_title, track_duration
+                display_no(gid, pos), track_url, track_title, track_duration
             ))
-            player_row_no += 1
         parts.append(discord.ui.TextDisplay(
             "**UP NEXT · เพลงถัดไป**\n"
             + ("\n".join(upcoming_lines) if upcoming_lines else "_ไม่มีเพลงถัดไป_")
