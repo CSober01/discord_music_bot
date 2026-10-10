@@ -580,12 +580,14 @@ def make_queue_embed(guild_id: int, current_idx: int = None, limit: int = MAX_QU
     visible = q[:limit]
     for i, t in enumerate(visible):
         no = display_no(guild_id, i)
+        duration = t[2] if len(t) > 2 and t[2] else None
+        duration_suffix = f" · `{duration}`" if duration else ""
         if i == idx:
             t_cut = t[1][:_QUEUE_TITLE_PLAYING - 1] + "…" if len(t[1]) > _QUEUE_TITLE_PLAYING else t[1]
-            lines.append(f"**▶ {no}. {t_cut} ◀ กำลังเล่น**")
+            lines.append(f"**▶ {no}. {t_cut}{duration_suffix} ◀ กำลังเล่น**")
         else:
             t_cut = t[1][:_QUEUE_TITLE_NORMAL - 1] + "…" if len(t[1]) > _QUEUE_TITLE_NORMAL else t[1]
-            lines.append(f"`{no}.` {t_cut}")
+            lines.append(f"`{no}.` {t_cut}{duration_suffix}")
     if len(q) > limit:
         lines.append(f"… และอีก {len(q) - limit} เพลง")
     embed = discord.Embed(title="📋 Queue เพลง", description="\n".join(lines), color=0x5865F2)
@@ -1252,38 +1254,45 @@ async def _prefetch_playlist_background(guild, channel, loop_getter, remaining_t
                 print(f"❌ Background prefetch error: {str(e)}")
                 return None
 
-        # โหลดทีละเพลง (sequential) และเพิ่มเข้า queue ทันที
+        # โหลดพร้อมกันเป็นชุด ชุดละไม่เกิน 5 เพลง แต่เพิ่มเข้า Queue ตามลำดับ playlist
         success_count = 0
         all_added_indices = []
         
-        for idx, track_info in enumerate(remaining_tracks, 1):
+        for batch_start in range(0, len(remaining_tracks), 5):
             # check guild ยังมี queue - ถ้า user stop/clear
             if guild.id not in full_queues or len(get_full_queue(guild.id)) == 0:
                 print(f"🛑 Background fetch ยกเลิก - guild queue ถูกล้าง")
                 break
-            
-            result = await _fetch_one(track_info)
-            if result:
-                url, title, duration, thumbnail = result
-                track = (url, title, duration, requester, thumbnail)
-                
-                # เพิ่มเข้า queue เงียบ ๆ (ไม่แสดงข้อความ)
-                async with get_queue_lock(guild.id):
-                    idx_queued = add_to_queue(guild.id, track)
-                    all_added_indices.append((idx_queued, title))
-                    # update queue message ทุกเพลง (discord chat)
-                    await _refresh_queue_msg(guild.id)
-                    # update now playing embed ทุก 5 เพลง (เครื่องเล่น)
-                    if success_count % 5 == 0:
-                        await _refresh_now_playing_msg(guild.id)
-                
-                success_count += 1
-                print(f"✅ โหลด {idx}/{len(remaining_tracks)}: {_trunc(title, 50)}")
-            else:
-                print(f"⚠️ โหลดไม่ได้ {idx}/{len(remaining_tracks)}")
-            
-            # delay 0.5 วิ เพื่อหลีกเลี่ยง YouTube bot detection
-            await asyncio.sleep(0.5)
+
+            batch = remaining_tracks[batch_start:batch_start + 5]
+            batch_results = await asyncio.gather(
+                *(_fetch_one(track_info) for track_info in batch)
+            )
+
+            # gather คืนผลตามลำดับ input จึงคงลำดับ playlist แม้โหลดเสร็จไม่พร้อมกัน
+            for offset, result in enumerate(batch_results):
+                idx = batch_start + offset + 1
+                if result:
+                    url, title, duration, thumbnail = result
+                    track = (url, title, duration, requester, thumbnail)
+
+                    # ตรวจซ้ำหลังโหลด เพื่อไม่ให้เพลงกลับเข้า Queue หากผู้ใช้ stop/clear ระหว่างรอ
+                    async with get_queue_lock(guild.id):
+                        if guild.id not in full_queues or len(get_full_queue(guild.id)) == 0:
+                            print(f"🛑 Background fetch ยกเลิก - guild queue ถูกล้าง")
+                            break
+                        idx_queued = add_to_queue(guild.id, track)
+                        all_added_indices.append((idx_queued, title))
+                        await _refresh_queue_msg(guild.id)
+
+                    success_count += 1
+                    print(f"✅ โหลด {idx}/{len(remaining_tracks)}: {_trunc(title, 50)}")
+                else:
+                    print(f"⚠️ โหลดไม่ได้ {idx}/{len(remaining_tracks)}")
+
+            # หน่วงระหว่าง batch เพื่อลดการเรียก YouTube ถี่เกินไป
+            if batch_start + 5 < len(remaining_tracks):
+                await asyncio.sleep(0.5)
         
         # แสดงสรุป + ส่งข้อความเดียว เมื่อโหลดครบ
         if all_added_indices:
@@ -1601,7 +1610,7 @@ class PlayerView(discord.ui.View):
         wmsg = await interaction.followup.send(embed=embed, ephemeral=True, wait=True)
         queue_view_msgs[self.guild.id] = wmsg
 
-    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(emoji="🔊", style=discord.ButtonStyle.secondary, row=0)
     async def volume_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_in_voice(interaction): return
         vc = self.guild.voice_client
