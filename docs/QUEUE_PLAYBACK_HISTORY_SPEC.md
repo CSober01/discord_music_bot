@@ -1611,10 +1611,10 @@ This section supersedes older UI notes above where they conflict with the implem
 
 #### Main Player controls
 
-- Row 1: Previous, seek back 10 seconds, Pause/Resume, seek forward 10 seconds, Next.
-- The seek buttons use the requested custom emoji IDs: 1455985625097306142 for back 10 seconds and 1455985627714551839 for forward 10 seconds. There is no additional −10s / +10s label.
-- When an emoji is not available to the bot in the current server and external emoji usage is not permitted, the button falls back to a Unicode seek symbol rather than risking the entire Player message failing to send.
-- Row 2: Search, Queue, Shuffle, Repeat, Stop, in that order; exactly two ActionRows with five controls each.
+- Row 1: Previous, rewind 10 seconds, Pause/Resume, forward 10 seconds, Next.
+- Row 2: Repeat, Search, Queue, Volume, Shuffle.
+- Row 3: Stop. Keep the requested flattened icon order across three ActionRows because Discord supports at most five buttons in each ActionRow.
+- Button icons use the exact Unicode constants in `slashcommands.py` with VS15 (`\\uFE0E`) to request text presentation. Pause/Resume switches between `play_button` and `pause_button`; seek buttons now use text-style Unicode symbols rather than custom emoji IDs.
 - Ordinary player controls use Secondary styling rather than blue Primary styling. Stop remains red/Danger. Shuffle and Repeat stay neutral whether on or off; active modes are shown in the status text.
 - The current title is a prominent Markdown heading link when a safe YouTube source URL exists, with no explicit underline markup. Artist/source appears below it, the active playback status appears only when enabled, and the volume meter and requester are separate lines.
 - History (latest three previous tracks, newest first) and Up Next (up to three upcoming tracks) render below both control rows. Previous-track navigation still uses up to 10 retained history entries in Queue state.
