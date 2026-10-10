@@ -3377,27 +3377,18 @@ class QueueView(discord.ui.View):
 # ─────────────────────────────────────────────
 
 # Text-presentation Unicode controls used by the Main Player.
-prev_button = "\\u23EE\\uFE0E"        # ⏮︎
-rewind_button = "\\u23EA\\uFE0E"      # ⏪︎
-play_button = "\\u25B6\\uFE0E"        # ▶︎
-pause_button = "\\u23F8\\uFE0E"       # ⏸︎
-forward_button = "\\u23E9\\uFE0E"     # ⏩︎
-next_button = "\\u23ED\\uFE0E"        # ⏭︎
-loop_button = "\\U0001F504\\uFE0E"    # 🔄︎
-search_button = "\\U0001F50D\\uFE0E"  # 🔍︎
-queue_button = "\\U0001F4D6\\uFE0E"   # 📖︎
-volume_button = "\\U0001F50A\\uFE0E"  # 🔊︎
-shuffle_button = "\\U0001F500\\uFE0E" # 🔀︎
-stop_button = "\\u23F9\\uFE0E"        # ⏹︎
-
-
-def _player_seek_emoji(guild: discord.Guild, emoji_id: int, name: str, fallback: str):
-    """Use the existing image-based custom emoji for seek controls."""
-    found = guild.get_emoji(emoji_id)
-    if found is not None:
-        return found
-    # Keep the existing custom-emoji image instead of falling back to Unicode.
-    return discord.PartialEmoji(name=name, id=emoji_id)
+prev_button = "\u23EE\uFE0E"        # ⏮︎
+rewind_button = "\u23EA\uFE0E"      # ⏪︎
+play_button = "\u25B6\uFE0E"        # ▶︎
+pause_button = "\u23F8\uFE0E"       # ⏸︎
+forward_button = "\u23E9\uFE0E"     # ⏩︎
+next_button = "\u23ED\uFE0E"        # ⏭︎
+loop_button = "\U0001F504\uFE0E"    # 🔄︎
+search_button = "\U0001F50D\uFE0E"  # 🔍︎
+queue_button = "\U0001F4D1\uFE0E"   # 📑︎
+volume_button = "\U0001F50A\uFE0E"  # 🔊︎
+shuffle_button = "\U0001F500\uFE0E" # 🔀︎
+stop_button = "\u23F9\uFE0E"        # ⏹︎
 
 
 class PlayerQueueView(discord.ui.LayoutView):
