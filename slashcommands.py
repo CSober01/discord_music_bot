@@ -3569,7 +3569,7 @@ class PlayerView(discord.ui.LayoutView):
         duration_seconds = _duration_seconds(duration)
         shown_position = min(position, duration_seconds) if duration_seconds else position
         elapsed_text = f"{int(shown_position // 60)}:{int(shown_position % 60):02d}"
-        total_bar = 16
+        total_bar = 24
         progress_slots = round((shown_position / duration_seconds) * total_bar) if duration_seconds else 0
         progress_slots = max(0, min(total_bar, progress_slots))
         progress_bar = "━" * progress_slots + ("●" if progress_slots < total_bar else "") + "━" * max(0, total_bar - progress_slots - 1)
@@ -3591,6 +3591,7 @@ class PlayerView(discord.ui.LayoutView):
         volume_bar = "▰" * filled + "▱" * (10 - filled)
         volume_control = discord.ui.Button(
             emoji=volume_button,
+            label=f"{volume_bar}  {volume_pct}%",
             style=discord.ButtonStyle.secondary,
             custom_id="player_volume",
         )
@@ -3602,8 +3603,9 @@ class PlayerView(discord.ui.LayoutView):
 
         volume_control.callback = _run_volume_control
         self._buttons["player_volume"] = volume_control
+        # Put the speaker first inside the clickable meter button, followed by the bar and percentage.
         parts.append(discord.ui.Section(
-            discord.ui.TextDisplay(f"{volume_bar}  {volume_pct}%"),
+            discord.ui.TextDisplay(" "),
             accessory=volume_control,
         ))
         who = requester.mention if requester else "ไม่ทราบชื่อ"
