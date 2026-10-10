@@ -1456,19 +1456,19 @@ General rule:
 
 ### Main Player buttons
 
-The actual clickable controls are inside the Main Player Components V2 Container, using exactly two Discord ActionRows (at most five buttons each). Search is always the first button in the second ActionRow, and the speaker remains attached to the top volume-meter Section as a clickable accessory:
+The actual clickable controls are inside the Main Player Components V2 Container, using exactly two Discord ActionRows (at most five buttons each). Search is always the first button in the second ActionRow. The speaker button shows before the volume meter and percentage in its label; clicking it opens the volume modal:
 
 ```
 [ ⏮ ] [ ⏪ ] [ ⏸ / ▶ ] [ ⏩ ] [ ⏭ ]
 [ 🔍 ] [ 📑 ] [ ⏹ ] [ 🔄 ] [ 🔀 ]
 
-Top volume meter: [meter] [ 🔊 ]
+Volume button: [ 🔊 ▰▰▰▰▱▱▱▱▱▱ 40% ]
 ```
 
 The button contract is:
 - Row 0: `prev_button`, `rewind_button`, Pause/Resume, `forward_button`, `next_button`.
 - Row 1: `search_button`, `queue_button`, `stop_button`, `loop_button`, `shuffle_button`.
-- `volume_button` is the Section accessory for the top volume-meter line and opens the existing `VolumeModal`.
+- `volume_button` opens the existing `VolumeModal`; its label places the speaker before the 10-slot meter and percentage. The playback progress bar uses 24 slots for better visual balance.
 - All icon constants are used directly as `Button(emoji=...)` values without appending VS15 (`\\uFE0E`). Pause/Resume switches between `play_button` and `pause_button`.
 - These are real `discord.ui.Button` components and must not be represented as fake text controls in the Embed.
 - Button state must continue to reflect the actual playback/Queue state.
@@ -1616,7 +1616,7 @@ This section supersedes older UI notes above where they conflict with the implem
 
 - Row 1: Previous, rewind 10 seconds, Pause/Resume, forward 10 seconds, Next.
 - Row 2: Search, Queue, Stop, Repeat, Shuffle (five controls).
-- The speaker button (`volume_button`) is the accessory beside the top volume meter and opens the existing volume modal.
+- The speaker button (`volume_button`) places the speaker before the 10-slot volume meter and percentage in its label, and opens the existing volume modal. The playback progress bar is widened to 24 slots.
 - Repeat is a real button in the second ActionRow, not an accessory beside the divider.
 - Button icons use the exact Unicode constants in `slashcommands.py` directly as `Button(emoji=...)`, without appending VS15 (`\\uFE0E`). Pause/Resume switches between `play_button` and `pause_button`; seek buttons use the provided Unicode variables rather than custom emoji IDs.
 - Ordinary player controls use Secondary styling rather than blue Primary styling. Stop remains red/Danger. Shuffle and Repeat stay neutral whether on or off; active modes are shown in the status text.
