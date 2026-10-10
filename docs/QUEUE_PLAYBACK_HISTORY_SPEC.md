@@ -1456,18 +1456,19 @@ General rule:
 
 ### Main Player buttons
 
-The actual clickable Discord buttons are inside the Main Player Components V2 Container in three ActionRows (Discord allows at most five buttons in an ActionRow):
+The actual clickable controls are inside the Main Player Components V2 Container, using exactly two Discord ActionRows (at most five buttons each) plus a Repeat button as a Section accessory at the right side of the divider immediately above them:
 
 ```
+                 [ 🔄︎ ]  (Repeat accessory beside divider)
 [ ⏮︎ ] [ ⏪︎ ] [ ⏸︎ / ▶︎ ] [ ⏩︎ ] [ ⏭︎ ]
-[ 🔄︎ ] [ 🔍︎ ] [ 📑︎ ] [ 🔊︎ ] [ 🔀︎ ]
-[ ⏹︎ ]
+[ 🔍︎ ] [ 📑︎ ] [ 🔊︎ ] [ 🔀︎ ] [ ⏹︎ ]
 ```
 
 The button contract is:
 - Row 0: `prev_button`, `rewind_button`, Pause/Resume, `forward_button`, `next_button`.
-- Row 1: `loop_button`, `search_button`, `queue_button`, `volume_button`, `shuffle_button`.
-- Row 2: `stop_button`.
+- Row 1: `search_button`, `queue_button`, `volume_button`, `shuffle_button`, `stop_button`.
+- `loop_button` is a Section accessory, not a third ActionRow.
+- Button symbols use the requested Unicode values with VS15 (`\\uFE0E`) to request text presentation.
 - Main Player control glyphs use the specified Unicode code points followed by VS15 (`\\uFE0E`) to request text presentation. Pause/Resume switches between `play_button` and `pause_button`.
 - These are real `discord.ui.Button` components and must not be represented as fake text controls in the Embed.
 - Button state must continue to reflect the actual playback/Queue state.
