@@ -3621,9 +3621,9 @@ class PlayerView(discord.ui.LayoutView):
             (primary, "player_pause_resume", None, discord.ButtonStyle.secondary, self.pause_resume, pause_button),
             (primary, "player_seek_forward", None, discord.ButtonStyle.secondary, self.seek_forward, forward_button),
             (primary, "player_skip", None, discord.ButtonStyle.secondary, self.skip, next_button),
-            # Repeat returns to the row as a real button. Volume stays beside the top meter.
-            (secondary, "player_loop", None, discord.ButtonStyle.secondary, self.loop_btn, loop_button),
+            # Search must always be the first control in Row 2; Volume stays beside the top meter.
             (secondary, "player_search", None, discord.ButtonStyle.secondary, self.search, search_button),
+            (secondary, "player_loop", None, discord.ButtonStyle.secondary, self.loop_btn, loop_button),
             (secondary, "player_show_queue", None, discord.ButtonStyle.secondary, self.show_queue, queue_button),
             (secondary, "player_shuffle", None, discord.ButtonStyle.secondary, self.shuffle, shuffle_button),
             (secondary, "player_stop", None, discord.ButtonStyle.danger, self.stop, stop_button),
