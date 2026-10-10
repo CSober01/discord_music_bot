@@ -1816,10 +1816,10 @@ class RadioChoiceView(discord.ui.LayoutView):
         self.message = None
         self._busy = False
 
-        # Keep Radio and Mix choices together; this view has no cancel button.
+        # Single plays the video linked in the URL; Mix fetches the list and opens the count picker.
         single = discord.ui.Button(
             emoji="🎧",
-            label="Radio",
+            label="เล่นเพลงนี้เพลงเดียว",
             style=discord.ButtonStyle.secondary,
             custom_id="youtube_radio_single",
         )
@@ -1827,7 +1827,7 @@ class RadioChoiceView(discord.ui.LayoutView):
 
         playlist = discord.ui.Button(
             emoji="🔀",
-            label="Mix",
+            label="โหลดเพลงจาก Mix",
             style=discord.ButtonStyle.secondary,
             custom_id="youtube_radio_playlist",
         )
@@ -1837,7 +1837,10 @@ class RadioChoiceView(discord.ui.LayoutView):
         choice_row.add_item(single)
         choice_row.add_item(playlist)
         self.add_item(discord.ui.Container(
-            discord.ui.TextDisplay("## 📻 YouTube Radio / Mix"),
+            discord.ui.TextDisplay(
+                "## 📻 เลือกวิธีเล่น YouTube\n"
+                "เล่นเพลงจากลิงก์นี้เพลงเดียว หรือโหลดรายการ Mix แล้วเลือกจำนวนเพลงที่จะเพิ่มเข้าคิว"
+            ),
             choice_row,
             accent_colour=0x5865F2,
         ))
