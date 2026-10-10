@@ -3623,9 +3623,9 @@ class PlayerView(discord.ui.LayoutView):
         repeat_button_style = discord.ButtonStyle.secondary
         specs = [
             (primary, "player_previous", None, discord.ButtonStyle.secondary, self.previous, prev_button),
-            (primary, "player_seek_back", None, discord.ButtonStyle.secondary, self.seek_back, rewind_button),
+            (primary, "player_seek_back", "-10", discord.ButtonStyle.secondary, self.seek_back, rewind_button),
             (primary, "player_pause_resume", None, discord.ButtonStyle.secondary, self.pause_resume, pause_button),
-            (primary, "player_seek_forward", None, discord.ButtonStyle.secondary, self.seek_forward, forward_button),
+            (primary, "player_seek_forward", "+10", discord.ButtonStyle.secondary, self.seek_forward, forward_button),
             (primary, "player_skip", None, discord.ButtonStyle.secondary, self.skip, next_button),
             # Keep the second row in the requested order: Search, Queue, Stop, Shuffle, Loop.
             (secondary, "player_search", None, discord.ButtonStyle.secondary, self.search, search_button),
