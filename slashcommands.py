@@ -3602,11 +3602,11 @@ class PlayerView(discord.ui.LayoutView):
 
         volume_control.callback = _run_volume_control
         self._buttons["player_volume"] = volume_control
-        # Keep the speaker as a dedicated icon-only button; render the meter as plain text.
-        volume_row = discord.ui.ActionRow()
-        volume_row.add_item(volume_control)
-        parts.append(volume_row)
-        parts.append(discord.ui.TextDisplay(f"{volume_bar}  {volume_pct}%"))
+        # Place the speaker button beside the volume meter on the same line.
+        parts.append(discord.ui.Section(
+            discord.ui.TextDisplay(f"{volume_bar}  {volume_pct}%"),
+            accessory=volume_control,
+        ))
         who = requester.mention if requester else "ไม่ทราบชื่อ"
         parts.append(discord.ui.TextDisplay(f"👤 {who}"))
 
