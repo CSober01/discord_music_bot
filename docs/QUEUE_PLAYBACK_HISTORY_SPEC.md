@@ -1355,7 +1355,7 @@ The count-selection View must follow these rules:
 3. **Playlist / playback flow ที่มีอยู่**
    - เพลงแรกของ Playlist ถูก fetch และเริ่มเล่นก่อน
    - เพลงที่เหลือถูก fetch ต่อใน background
-   - จำกัด background fetch ด้วย `PLAYLIST_FETCH_CONCURRENCY = 4`; ดึง/เพิ่มที่เหลือเป็นชุดละไม่เกิน 4 เพลง พร้อม generation guard ป้องกันงานเก่าเติมคิวหลัง Stop/disconnect
+   - จำกัดงานดึงข้อมูลที่เหลือด้วย `PLAYLIST_FETCH_CONCURRENCY = 4` ผ่าน semaphore ใช้ร่วมทุก guild; เก็บผลลัพธ์ตามลำดับ playlist และเพิ่มเพลงที่โหลดสำเร็จทั้งหมดเข้าคิวพร้อมกันเมื่อความพยายามดึงทุกรายการเสร็จ โดยยังมี generation guard ป้องกันงานเก่าเติมคิวหลัง Stop/disconnect
    - มี generation guard ป้องกันงานเก่าจากการเติมเพลงหลัง Stop/disconnect
 
 4. **เอกสารและ acceptance contract**
@@ -1532,7 +1532,7 @@ Page 1 / 1  •  5 songs  •  กำลังเล่น #3
 
 Background playlist fetch must not block playback of the first playable track.
 
-- `PLAYLIST_FETCH_CONCURRENCY = 4` (process-wide across guilds); remaining tracks fetch in batches of up to four and each completed batch is appended to Queue immediately, without an extra five-second inter-track delay.
+- `PLAYLIST_FETCH_CONCURRENCY = 4` (process-wide across guilds); a continuous worker pool keeps at most four remaining-track extractions in flight. Successful results are buffered in playlist order and appended to Queue together only after every remaining fetch attempt finishes. No extra fixed five-second inter-track delay is added.
 - Main Player shows loading status while additional playlist tracks are being fetched:
   `⏳ กำลังโหลดเพลงเพิ่มเติม • X / N`
 - `X` means the number of playlist entries whose fetch attempt has completed, including skipped/failed entries.
@@ -1647,9 +1647,9 @@ The error “Sign in to confirm you're not a bot” is a YouTube access restrict
 
    On Windows, install Deno in PowerShell using `winget install DenoLand.Deno`, then close/reopen the terminal and verify with `deno --version`. After updating the project dependencies, restart the bot process so the Python process picks up the installed runtime. Official instructions: https://docs.deno.com/runtime/getting_started/installation/
 2. Do not rotate to an alternative YouTube player client after a detected challenge. Stop the blocked request immediately, open the shared cooldown, and avoid additional requests that could worsen rate limiting.
-3. Use yt-dlp's sleep_interval_requests pacing (default 1.0 second between internal extraction requests, configurable with YTDLP_SLEEP_REQUESTS from 0 to 10 seconds). Keep retry counts low and fetch remaining playlist entries in batches of up to four globally across guilds, appending each completed batch immediately without an extra five-second gap. The first playable track is still started immediately.
+3. Use yt-dlp's sleep_interval_requests pacing (default 1.0 second between internal extraction requests, configurable with YTDLP_SLEEP_REQUESTS from 0 to 10 seconds). Keep retry counts low and resolve remaining playlist entries with a continuous worker pool capped at four concurrent extractions globally across guilds. Buffer successful results in playlist order and append them to Queue once after all remaining fetch attempts finish. The first playable track still starts immediately.
 4. If a challenge or a recognized rate-limit response such as HTTP 429 hits a YouTube search, playlist listing or track fetch, open a shared 600-second (10-minute) circuit breaker. During that window, new YouTube requests fail fast; do not rotate alternate player clients, retry the blocked request, or search replacement titles for a blocked playlist entry.
-5. Playlist entries are fetched in batches of up to four through a semaphore shared by all guilds. Each completed batch is appended to Queue and refreshed. If the circuit breaker opens, remaining items are counted as cooldown skips without launching more yt-dlp workers. Worker exceptions are caught and counted so cleanup can finish.
+5. Remaining playlist entries use a semaphore shared by all guilds, with at most four extractions in flight. Successful results are buffered in playlist order and added to Queue together after all remaining attempts finish. If the circuit breaker opens, pending items are counted as cooldown skips without making new yt-dlp requests. Worker exceptions are caught and counted so cleanup can finish.
 6. Raw yt-dlp logger output is suppressed so terminal errors cannot append to the carriage-return progress line. The worker still records a short cause in the guild log.
 7. Optional YTDLP_COOKIES_FILE can point to a Netscape/Mozilla-format cookies file on the host. Mount/configure this file outside the repository. Never commit it, print its contents, or paste it into logs. Cookies are sensitive login credentials and can expire. Reference: https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp
 
@@ -1661,7 +1661,7 @@ The error “Sign in to confirm you're not a bot” is a YouTube access restrict
 - [ ] Verify both custom seek emoji render in the target Discord server and seek exactly 10 seconds. If the server cannot use the emojis, verify Unicode fallback.
 - [ ] Verify elapsed time increments every 10 seconds, pauses, resumes, seeks and resets on Next/Previous.
 - [ ] Simulate anti-bot and HTTP 429 errors in track fetch, playlist listing and search; verify the 600-second circuit breaker, no retry/client rotation after a block, and no title-search fallback during a block.
-- [ ] Verify `YTDLP_SLEEP_REQUESTS` is safely parsed and remaining playlist entries are fetched in batches of up to four through the process-wide semaphore, with each completed batch appended and displayed in Queue/Player.
+- [ ] Verify `YTDLP_SLEEP_REQUESTS` is safely parsed and remaining playlist entries use a process-wide four-worker limit; successful results remain buffered and enter Queue together, in playlist order, only after every remaining fetch attempt finishes.
 - [ ] Trigger an anti-bot challenge midway through a playlist and verify remaining entries are marked as cooldown skips, without more extraction attempts or misleading per-track block counts.
 - [ ] Force one background fetch worker to raise unexpectedly and verify the loading status is cleared at completion.
 - [ ] Test all button callbacks in Discord, including Radio/Mix, playlist count, Queue pagination, Stop, and external voice disconnect.
@@ -1685,7 +1685,7 @@ The following scenarios are the acceptance matrix for the playback-race fixes. T
 | F10 — Queue-End then new song | Let Queue finish and issue `/play` before the 5-minute idle timeout | New Player session stays connected and the previous Queue-End task exits without deleting the new Player. |
 | F11 — Shuffle message mapping | Add several tracks, enable Shuffle, and let the shuffled tracks play | Shuffle touches Upcoming only; Queue-add messages remain mapped to their original track and no unrelated message is deleted. |
 | F12 — playlist count choices | Try discovered counts 3, 8, 17, 35, and 120 | Choices follow 3: Add All (3); 8: 5 + Add All (8); 17: 5/10 + Add All (17); 35: 5/10/20/30 + Add All (35); 120 is capped to 50. |
-| F13 — playlist batch pacing | Load a long playlist | First playable track starts promptly; up to four remaining tracks are fetched concurrently per batch and each completed batch is appended to Queue; no added five-second gap; anti-bot cooldown stops further extraction attempts. |
+| F13 — playlist fetch and atomic Queue append | Load a long playlist | First playable track starts promptly; up to four remaining extractions stay in flight globally; Queue receives the successful remainder together in original playlist order only after all remaining attempts finish; no extra fixed five-second gap; anti-bot cooldown stops further requests. |
 | F14 — interaction error | Trigger a stale Player or a handler exception | User receives an expired-player/error response where possible; the error is logged and is not silently mistaken for a successful transition. |
 | F15 — Queue pager | Open Queue, page forward/back, then advance playback while the view remains open | Page boundaries stay valid; paging does not change Current; refreshed page reflects the current marker and logical queue number. |
 
