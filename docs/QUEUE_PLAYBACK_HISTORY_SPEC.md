@@ -1460,7 +1460,7 @@ The actual clickable controls are inside the Main Player Components V2 Container
 
 ```
 [ ⏮ ] [ ⏪ ] [ ⏸ / ▶ ] [ ⏩ ] [ ⏭ ]
-[ 🔍 ] [ 📑 ] [ ⏹ ] [ 🔄 ] [ 🔀 ]
+[ 🔍 ] [ 📑 ] [ 🔀 ] [ 🔄 ] [ ⏹ ]
 
 Volume button: [ 🔊 ▰▰▰▰▱▱▱▱▱▱ 40% ]
 ```
@@ -1615,7 +1615,7 @@ This section supersedes older UI notes above where they conflict with the implem
 #### Main Player controls
 
 - Row 1: Previous, rewind 10 seconds, Pause/Resume, forward 10 seconds, Next.
-- Row 2: Search, Queue, Stop, Repeat, Shuffle (five controls).
+- Row 2: Search, Queue, Shuffle, Repeat, Stop (five controls).
 - The speaker button (`volume_button`) places the speaker before the 10-slot volume meter and percentage in its label, and opens the existing volume modal. The playback progress bar is widened to 24 slots.
 - Repeat is a real button in the second ActionRow, not an accessory beside the divider.
 - Button icons use the exact Unicode constants in `slashcommands.py` directly as `Button(emoji=...)`, without appending VS15 (`\\uFE0E`). Pause/Resume switches between `play_button` and `pause_button`; seek buttons use the provided Unicode variables rather than custom emoji IDs.
