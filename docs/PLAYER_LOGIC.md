@@ -1,6 +1,11 @@
 # Music Player and YouTube Fetch Logic
 
-This document describes the expected behavior and operational safeguards in `slashcommands.py`.
+> **Document Version:** 1.0.0  
+> **Last Updated:** 2026-10-10  
+> **Source of truth:** `docs/IMPLEMENTATION_SPEC.md` (DMB-IMPL-SPEC v1.0.0)  
+> When requirements in this document conflict with the implementation specification, follow the implementation specification.
+
+This document describes the expected behavior and operational safeguards in `slashcommands.py`. The versioned implementation requirements for playlist concurrency/status timing and Player presentation are defined in `docs/IMPLEMENTATION_SPEC.md`.
 
 ## Playback UI
 
@@ -12,11 +17,11 @@ This document describes the expected behavior and operational safeguards in `sla
 - Main Player controls use the named Unicode constants in `slashcommands.py` directly as `discord.ui.Button(emoji=...)`; the constants use the supplied code points without VS15 (`\\uFE0E`).
 - The divider before the controls uses the shared `QUEUE_DIVIDER` constant so its length remains consistent.
 - The Main Player shows a prominent Markdown-heading link for the current YouTube track; no explicit underline styling is applied. The title opens the source-page URL only when yt-dlp provides a safe URL. Artist/source appears below it, followed by playback position, active shuffle/repeat indicators (hidden when off), volume meter, and requester on separate lines.
-- The Main Player uses exactly two ActionRows: Row 1 = Previous, rewind, Pause/Resume, forward, Next; Row 2 = Search, Queue, Shuffle, Repeat, Stop. The Repeat control is a real `Button(emoji=loop_button)` in Row 2, not a Section accessory. Volume remains a clickable speaker button; the speaker appears before the 10-slot meter and percentage in the button label, and opens the existing `VolumeModal`. The playback progress bar is widened to 24 slots. Ordinary buttons use Secondary styling; Stop remains red/Danger.
+- The Main Player uses exactly two ActionRows: Row 1 = Previous, rewind, Pause/Resume, forward, Next; Row 2 = Search, Queue, Shuffle, Repeat, Stop. The Repeat control is a real `Button(emoji=loop_button)` in Row 2, not a Section accessory. Volume is a separate icon-only clickable speaker button that opens the existing `VolumeModal`; do not include the speaker glyph in the meter text or rely on a combined label to imitate a separate button. The 10-slot meter and percentage are ordinary text. Discord Components V2 may not support a button before text on the same line; use only supported layout and document the verified fallback. The playback progress bar is widened to 24 slots. Ordinary buttons use Secondary styling; Stop remains red/Danger.
 - Main Player icon variables (`prev_button`, `rewind_button`, `play_button`, `pause_button`, `forward_button`, `next_button`, `loop_button`, `search_button`, `queue_button`, `volume_button`, `shuffle_button`, `stop_button`) are used directly for button emoji without appending VS15. Pause/Resume switches between `play_button` and `pause_button`.
 - History and Up Next are displayed below both control rows, with up to three recent history tracks and three upcoming tracks. Their titles are YouTube links when a safe page URL exists. Queue and playlist-count pages, plus Radio/Mix choices, are separate ephemeral views rather than submenus embedded in the Main Player. These views have no Cancel button; they expire and close automatically.
 - Main Player History/Next rows use display-local numbering beginning at `01` in visible order; these labels are not logical Queue numbers. History is newest-first, and Next continues the numbering after the visible History rows (`01–03` then `04–06` when both sections are full).
-- Player History/Next duration labels use a fixed-width title column with non-collapsible figure spaces; padding is outside the Markdown link so the song title remains clickable.
+- History/Next titles remain clickable when a safe YouTube page URL exists. Do not rely on figure-space padding for fixed-width duration alignment; use a supported, readable layout. If Discord Components V2 cannot provide aligned text columns while preserving links, put each duration on a separate line and document the limitation.
 - Serialize per-guild Player layout edits. During a rebuild, temporarily keep the previous button objects attached to the View until Discord's message edit can replace their dispatch mappings. The same hand-off applies to the ephemeral Components V2 Queue pager. Navigation, seek, and pause/resume keep the navigation lock until the resulting Player refresh completes.
 - When reposting to move the Player below a summary, send and register the replacement Player first, then delete the old message. This avoids a gap where a rapid button interaction has no registered View.
 - The Radio/Mix choice page is titled “เลือกวิธีเล่น YouTube” and explains the two actions: “เล่นเพลงนี้เพลงเดียว” plays only the video in the supplied link, while “โหลดเพลงจาก Mix” fetches the Mix list and opens the track-count selector.
@@ -27,7 +32,7 @@ This document describes the expected behavior and operational safeguards in `sla
 
 - A playlist import is capped at `MAX_PLAYLIST_FETCH = 50` entries.
 - The first playable entry is resolved first so playback can begin before the entire playlist has been processed.
-- After the first playable track starts (or is appended if another track is already active), remaining entries are resolved by a continuous worker pool with at most four in-flight yt-dlp extractions globally across all guilds. Successful results stay buffered in playlist order and are appended to Queue together only after all remaining fetch attempts finish; the progress indicator may update while Queue stays unchanged. There is no added fixed five-second inter-track delay. yt-dlp's configured internal request pacing and the shared anti-bot cooldown remain in place.
+- After the first playable track starts (or is appended if another track is already active), remaining entries are resolved by a continuous worker pool with at most five in-flight yt-dlp extractions globally across all guilds. Successful results stay buffered in playlist order and are appended to Queue together only after all remaining fetch attempts finish. The loading status refreshes on a 10-second timer, not on completed-track count thresholds; start/completion/cancellation transitions refresh immediately. There is no added fixed five-second inter-track delay. yt-dlp's configured internal request pacing and the shared anti-bot cooldown remain in place.
 - When the public `📋 เพิ่มเข้า Queue แล้ว` playlist summary is successfully sent, schedule the existing debounced Player repost so the Main Player appears below that summary. If the summary send fails, preserve the current message order.
 - Playlist progress is an in-place console line. yt-dlp's raw stderr is suppressed so a fatal `ERROR: [youtube]...` line cannot overwrite the progress display; exceptions still propagate and are recorded in the guild log. A fetch run prints its final summary after all remaining entries finish; a run invalidated by stop/disconnect must not print a false completion summary.
 - The player queue page contains 10 tracks. Previous/next controls are disabled at the page boundaries.
@@ -97,7 +102,7 @@ Before merging or deploying changes, verify:
 - [ ] Pause/resume freezes and resumes the displayed elapsed time.
 - [ ] Seek controls move exactly 10 seconds and do not cause the next track to start unexpectedly.
 - [ ] A 20-track queue has two pages; previous/next controls disable at the correct boundaries.
-- [ ] A long playlist resolves up to four remaining entries concurrently across the process, keeps successful results buffered in playlist order, and appends the full successful remainder only after all fetch attempts finish; stop/disconnect must prevent stale results from entering Queue.
+- [ ] A long playlist resolves up to five remaining entries concurrently process-wide across all guilds, keeps successful results buffered in playlist order, and appends the full successful remainder only after all fetch attempts finish; stop/disconnect must prevent stale results from entering Queue. Loading progress refreshes every 10 seconds and is not triggered by every 5 or 10 completed entries.
 - [ ] Stop/disconnect during playlist loading prevents stale workers from issuing more requests.
 - [ ] Simulated `Sign in to confirm you're not a bot` opens cooldown, skips title fallback, and produces a readable user message.
 - [ ] No cookie file or token appears in logs, commits, or repository files.
