@@ -3170,7 +3170,11 @@ async def _send_playlist_added_summary(guild_id: int, channel, requester, tracks
         pub_msg = await channel.send(embed=embed)
         last_idx = added_positions[-1][0]
         queue_add_msgs.setdefault(guild_id, {})[last_idx] = pub_msg
+        # Keep the public "added to Queue" summary above the Main Player.
+        # Repost only after the summary was sent successfully.
+        await _schedule_player_repost(guild_id)
     except Exception:
+        # Preserve the existing message order if the summary cannot be sent.
         pass
 
 
