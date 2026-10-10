@@ -2948,8 +2948,8 @@ async def _bg_fetch_rest(guild, channel, rest_tracks, requester, progress: "_Pla
                              level="error", console=False)
                         result, outcome = None, "fallback_fail"
             progress.record(outcome)
-            if progress.done % 5 == 0 or progress.done == progress.total:
-                await _refresh_player(guild.id)
+            # Do not refresh the Player every five fetched entries. Publish the
+            # completed batch once below; the progress loop handles 10-second updates.
             return result
 
     # Keep up to PLAYLIST_FETCH_CONCURRENCY extractions in flight globally, but do not
@@ -3573,7 +3573,12 @@ class PlayerView(discord.ui.LayoutView):
         progress_slots = round((shown_position / duration_seconds) * total_bar) if duration_seconds else 0
         progress_slots = max(0, min(total_bar, progress_slots))
         progress_bar = "━" * progress_slots + ("●" if progress_slots < total_bar else "") + "━" * max(0, total_bar - progress_slots - 1)
-        parts.append(discord.ui.TextDisplay(f"**{elapsed_text}** {progress_bar} **{duration}**"))
+        volume_pct = round(get_guild_volume(gid) * 100)
+        filled = max(0, min(10, round(volume_pct / 10)))
+        volume_bar = "▰" * filled + "▱" * (10 - filled)
+        parts.append(discord.ui.TextDisplay(
+            f"**{elapsed_text}** {progress_bar} **{duration}**\n🔊 {volume_bar}  {volume_pct}%"
+        ))
 
         status = []
         if gid in shuffle_enabled:
@@ -3586,9 +3591,6 @@ class PlayerView(discord.ui.LayoutView):
         if status:
             parts.append(discord.ui.TextDisplay("　".join(status)))
 
-        volume_pct = round(get_guild_volume(gid) * 100)
-        filled = max(0, min(10, round(volume_pct / 10)))
-        volume_bar = "▰" * filled + "▱" * (10 - filled)
         volume_control = discord.ui.Button(
             emoji=volume_button,
             style=discord.ButtonStyle.secondary,
@@ -3607,7 +3609,6 @@ class PlayerView(discord.ui.LayoutView):
         volume_row = discord.ui.ActionRow()
         volume_row.add_item(volume_control)
         parts.append(volume_row)
-        parts.append(discord.ui.TextDisplay(f"{volume_bar}  {volume_pct}%"))
         who = requester.mention if requester else "ไม่ทราบชื่อ"
         parts.append(discord.ui.TextDisplay(f"👤 {who}"))
 
@@ -3650,12 +3651,11 @@ class PlayerView(discord.ui.LayoutView):
             shown = _truncate_display_width(
                 queue_display_titles.get(track_url, track_title), 70
             )
-            # Keep titles clickable and put duration on a separate line. Discord's
-            # proportional fonts make whitespace-based fixed-column alignment unreliable.
-            return (
-                f"{queue_position:02d}. ♫ {_player_track_link(track_url, shown)}\n"
-                f"    · {track_duration}"
-            )
+            # Pad by the visible title width so durations align at the right edge.
+            # Compute width from the visible title, not Markdown link syntax/URL.
+            shown_width = sum(_char_display_width(char) for char in shown)
+            gap = "\u2007" * max(1, 32 - shown_width)
+            return f"{queue_position:02d}. ♫ {_player_track_link(track_url, shown)}{gap}`{track_duration}`"
 
         for pos in history_positions:
             track_url, track_title, track_duration, *_ = q[pos]
