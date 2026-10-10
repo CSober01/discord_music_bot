@@ -3603,11 +3603,6 @@ class PlayerView(discord.ui.LayoutView):
 
         volume_control.callback = _run_volume_control
         self._buttons["player_volume"] = volume_control
-        # Keep the clickable speaker button in its own ActionRow. Components V2
-        # does not support placing a text meter beside a button in the same row.
-        volume_row = discord.ui.ActionRow()
-        volume_row.add_item(volume_control)
-        parts.append(volume_row)
         who = requester.mention if requester else "ไม่ทราบชื่อ"
         parts.append(discord.ui.TextDisplay(f"👤 {who}"))
 
@@ -3628,7 +3623,7 @@ class PlayerView(discord.ui.LayoutView):
             (primary, "player_seek_forward", "+10", discord.ButtonStyle.secondary, self.seek_forward, forward_button),
             (primary, "player_skip", None, discord.ButtonStyle.secondary, self.skip, next_button),
             # Keep the second row in the requested order: Search, Queue, Stop, Shuffle, Loop.
-            (secondary, "player_search", None, discord.ButtonStyle.secondary, self.search, search_button),
+            (secondary, "player_search", "เพิ่มเพลง", discord.ButtonStyle.secondary, self.search, search_button),
             (secondary, "player_show_queue", None, discord.ButtonStyle.secondary, self.show_queue, queue_button),
             (secondary, "player_stop", None, discord.ButtonStyle.danger, self.stop, stop_button),
             (secondary, "player_shuffle", None, discord.ButtonStyle.secondary, self.shuffle, shuffle_button),
@@ -3644,6 +3639,10 @@ class PlayerView(discord.ui.LayoutView):
             self._buttons[cid] = button
 
         parts.extend((primary, secondary))
+        # Volume control is the third control row, below the main playback buttons.
+        volume_row = discord.ui.ActionRow()
+        volume_row.add_item(volume_control)
+        parts.append(volume_row)
         parts.append(discord.ui.TextDisplay(QUEUE_DIVIDER))
 
         history_start = max(0, idx - 3)
@@ -3654,11 +3653,13 @@ class PlayerView(discord.ui.LayoutView):
             shown = _truncate_display_width(
                 queue_display_titles.get(track_url, track_title), 70
             )
-            # Pad by the visible title width so durations align at the right edge.
-            # Compute width from the visible title, not Markdown link syntax/URL.
+            # Reserve a fixed display column for duration, including the row prefix.
+            # Count only visible text, not Markdown link syntax or the URL.
+            prefix = f"{queue_position:02d}. ♫ "
             shown_width = sum(_char_display_width(char) for char in shown)
-            gap = "\u2007" * max(1, 32 - shown_width)
-            return f"{queue_position:02d}. ♫ {_player_track_link(track_url, shown)}{gap}`{track_duration}`"
+            duration_column = 44
+            gap = "\u2007" * max(1, duration_column - sum(_char_display_width(char) for char in prefix) - shown_width)
+            return f"{prefix}{_player_track_link(track_url, shown)}{gap}`{track_duration}`"
 
         for history_no, pos in enumerate(history_positions, start=1):
             track_url, track_title, track_duration, *_ = q[pos]
