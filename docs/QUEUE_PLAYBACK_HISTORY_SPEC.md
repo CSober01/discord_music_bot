@@ -1617,7 +1617,7 @@ This section supersedes older UI notes above where they conflict with the implem
 - History (latest three previous tracks, newest first) and Up Next (up to three upcoming tracks) render below both control rows. Previous-track navigation still uses up to 10 retained history entries in Queue state.
 - Main Player History/Next rows use display-local numbering: the first visible row is `01`; numbering increments across History and then Next (`01–03` then `04–06` when both sections are full). These row labels must not use `display_no()`/logical Queue numbers; the footer and Queue page continue to use logical Queue numbering.
 - Pad the visible title column with non-collapsible figure spaces outside the clickable Markdown link, so Player row durations align while titles remain clickable; preserve the current title truncation limit.
-- Serialize Player layout edits per guild and keep previous Button objects dispatchable while a rebuilt LayoutView is being edited. Navigation, seek, and pause/resume should hold the navigation lock through the refresh. For Player reposts, send/register the replacement message before deleting the old one to reduce unknown-View interaction races.
+- Serialize Player layout edits per guild and keep previous Button objects dispatchable while a rebuilt LayoutView is being edited. Apply the same dispatch hand-off to the ephemeral Queue pager. Navigation, seek, and pause/resume should hold the navigation lock through the refresh. For Player reposts, send/register the replacement message before deleting the old one to reduce unknown-View interaction races.
 
 #### Queue page
 
