@@ -1456,18 +1456,18 @@ General rule:
 
 ### Main Player buttons
 
-The actual clickable controls are inside the Main Player Components V2 Container, using exactly two Discord ActionRows (at most five buttons each). Repeat is restored as the first button in Row 1, and the speaker remains attached to the top volume-meter Section as a clickable accessory:
+The actual clickable controls are inside the Main Player Components V2 Container, using exactly two Discord ActionRows (at most five buttons each). Search is always the first button in the second ActionRow, and the speaker remains attached to the top volume-meter Section as a clickable accessory:
 
 ```
 [ ⏮ ] [ ⏪ ] [ ⏸ / ▶ ] [ ⏩ ] [ ⏭ ]
-[ 🔄 ] [ 🔍 ] [ 📑 ] [ 🔀 ] [ ⏹ ]
+[ 🔍 ] [ 🔄 ] [ 📑 ] [ 🔀 ] [ ⏹ ]
 
 Top volume meter: [meter] [ 🔊 ]
 ```
 
 The button contract is:
 - Row 0: `prev_button`, `rewind_button`, Pause/Resume, `forward_button`, `next_button`.
-- Row 1: `loop_button`, `search_button`, `queue_button`, `shuffle_button`, `stop_button`.
+- Row 1: `search_button`, `loop_button`, `queue_button`, `shuffle_button`, `stop_button`.
 - `volume_button` is the Section accessory for the top volume-meter line and opens the existing `VolumeModal`.
 - All icon constants are used directly as `Button(emoji=...)` values without appending VS15 (`\\uFE0E`). Pause/Resume switches between `play_button` and `pause_button`.
 - These are real `discord.ui.Button` components and must not be represented as fake text controls in the Embed.
@@ -1615,7 +1615,7 @@ This section supersedes older UI notes above where they conflict with the implem
 #### Main Player controls
 
 - Row 1: Previous, rewind 10 seconds, Pause/Resume, forward 10 seconds, Next.
-- Row 2: Repeat, Search, Queue, Shuffle, Stop (five controls).
+- Row 2: Search, Repeat, Queue, Shuffle, Stop (five controls).
 - The speaker button (`volume_button`) is the accessory beside the top volume meter and opens the existing volume modal.
 - Repeat is a real button in the second ActionRow, not an accessory beside the divider.
 - Button icons use the exact Unicode constants in `slashcommands.py` directly as `Button(emoji=...)`, without appending VS15 (`\\uFE0E`). Pause/Resume switches between `play_button` and `pause_button`; seek buttons use the provided Unicode variables rather than custom emoji IDs.
