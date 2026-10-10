@@ -3586,10 +3586,27 @@ class PlayerView(discord.ui.LayoutView):
         if status:
             parts.append(discord.ui.TextDisplay("　".join(status)))
 
-        filled = max(0, min(10, round(get_guild_volume(gid) * 10)))
+        volume_pct = round(get_guild_volume(gid) * 100)
+        filled = max(0, min(10, round(volume_pct / 10)))
         volume_bar = "▰" * filled + "▱" * (10 - filled)
+        volume_control = discord.ui.Button(
+            emoji=volume_button,
+            style=discord.ButtonStyle.secondary,
+            custom_id="player_volume",
+        )
+
+        async def _run_volume_control(interaction, btn=volume_control):
+            await _safe_player_button_callback(
+                interaction, self.volume_btn, btn, "player_volume"
+            )
+
+        volume_control.callback = _run_volume_control
+        self._buttons["player_volume"] = volume_control
+        parts.append(discord.ui.Section(
+            discord.ui.TextDisplay(f"{volume_bar}  {volume_pct}%"),
+            accessory=volume_control,
+        ))
         who = requester.mention if requester else "ไม่ทราบชื่อ"
-        parts.append(discord.ui.TextDisplay(f"🔊 {volume_bar}"))
         parts.append(discord.ui.TextDisplay(f"👤 {who}"))
 
         loading = playlist_loading_status.get(gid)
@@ -3626,7 +3643,6 @@ class PlayerView(discord.ui.LayoutView):
             (primary, "player_skip", None, discord.ButtonStyle.secondary, self.skip, next_button),
             (secondary, "player_search", None, discord.ButtonStyle.secondary, self.search, search_button),
             (secondary, "player_show_queue", None, discord.ButtonStyle.secondary, self.show_queue, queue_button),
-            (secondary, "player_volume", None, discord.ButtonStyle.secondary, self.volume_btn, volume_button),
             (secondary, "player_shuffle", None, discord.ButtonStyle.secondary, self.shuffle, shuffle_button),
             (secondary, "player_stop", None, discord.ButtonStyle.danger, self.stop, stop_button),
         ]
