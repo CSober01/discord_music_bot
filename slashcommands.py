@@ -3646,7 +3646,7 @@ class PlayerView(discord.ui.LayoutView):
         parts.append(discord.ui.TextDisplay(QUEUE_DIVIDER))
 
         history_start = max(0, idx - 3)
-        history_positions = range(idx - 1, history_start - 1, -1) if q else range(0)
+        history_positions = range(history_start, idx) if q else range(0)
         history_lines = []
 
         def _track_line(queue_position, track_url, track_title, track_duration):
