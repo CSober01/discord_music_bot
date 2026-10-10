@@ -906,14 +906,18 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
         embed.description += f"{QUEUE_DIVIDER}\n"
 
         queue_lines = []
+        # Main Player rows use local display numbering (01, 02, ...), not logical
+        # Queue numbers. History is shown newest-first, followed by upcoming tracks.
+        player_row_no = 1
         if history:
             queue_lines.append("📚 *History*")
             for offset in history:
                 url, track_title, track_duration, _requester, *_rest = q[offset]
                 queue_title = _truncate_display_width(queue_display_titles.get(url, track_title), 31)
                 queue_lines.append(
-                    f"{display_no(guild_id, offset):02d} ♫ {_pad_queue_title(queue_title, 31)} `{track_duration}`"
+                    f"{player_row_no:02d} ♫ {_pad_queue_title(queue_title, 31)} `{track_duration}`"
                 )
+                player_row_no += 1
 
         if upcoming:
             if history:
@@ -923,8 +927,9 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
                 url, track_title, track_duration, _requester, *_rest = track
                 queue_title = _truncate_display_width(queue_display_titles.get(url, track_title), 31)
                 queue_lines.append(
-                    f"{display_no(guild_id, offset):02d} ♫ {_pad_queue_title(queue_title, 31)} `{track_duration}`"
+                    f"{player_row_no:02d} ♫ {_pad_queue_title(queue_title, 31)} `{track_duration}`"
                 )
+                player_row_no += 1
 
         loading = playlist_loading_status.get(guild_id)
         if loading and loading.done < loading.total:
@@ -952,11 +957,13 @@ def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queu
     return embed
 
 def _pad_queue_title(text: str, width: int) -> str:
-    """Pad queue text by estimated display width for a stable Discord layout."""
+    """Pad queue titles with non-collapsible figure spaces so durations align in Discord."""
     current_width = sum(_char_display_width(char) for char in text)
     if current_width >= width:
         return text
-    return text + " " * (width - current_width)
+    # Ordinary spaces may collapse in Discord's Markdown renderer. Figure spaces
+    # preserve a stable gap, keeping track durations on the same visual column.
+    return text + "\u2007" * (width - current_width)
 def make_done_embed():
     return discord.Embed(
         description="⏹ หยุดเพลงและออกจาก Voice Channel แล้ว",
