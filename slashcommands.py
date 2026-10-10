@@ -3591,7 +3591,6 @@ class PlayerView(discord.ui.LayoutView):
         volume_bar = "▰" * filled + "▱" * (10 - filled)
         volume_control = discord.ui.Button(
             emoji=volume_button,
-            label=f"{volume_bar}  {volume_pct}%",
             style=discord.ButtonStyle.secondary,
             custom_id="player_volume",
         )
@@ -3603,11 +3602,11 @@ class PlayerView(discord.ui.LayoutView):
 
         volume_control.callback = _run_volume_control
         self._buttons["player_volume"] = volume_control
-        # Put the speaker first inside the clickable meter button, followed by the bar and percentage.
-        parts.append(discord.ui.Section(
-            discord.ui.TextDisplay("\u200b"),
-            accessory=volume_control,
-        ))
+        # Keep the speaker as a dedicated icon-only button; render the meter as plain text.
+        volume_row = discord.ui.ActionRow()
+        volume_row.add_item(volume_control)
+        parts.append(volume_row)
+        parts.append(discord.ui.TextDisplay(f"{volume_bar}  {volume_pct}%"))
         who = requester.mention if requester else "ไม่ทราบชื่อ"
         parts.append(discord.ui.TextDisplay(f"👤 {who}"))
 
