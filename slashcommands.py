@@ -3626,9 +3626,9 @@ class PlayerView(discord.ui.LayoutView):
             # Keep the second row in this exact order; Volume stays beside the top meter.
             (secondary, "player_search", None, discord.ButtonStyle.secondary, self.search, search_button),
             (secondary, "player_show_queue", None, discord.ButtonStyle.secondary, self.show_queue, queue_button),
-            (secondary, "player_stop", None, discord.ButtonStyle.danger, self.stop, stop_button),
-            (secondary, "player_loop", None, discord.ButtonStyle.secondary, self.loop_btn, loop_button),
             (secondary, "player_shuffle", None, discord.ButtonStyle.secondary, self.shuffle, shuffle_button),
+            (secondary, "player_loop", None, discord.ButtonStyle.secondary, self.loop_btn, loop_button),
+            (secondary, "player_stop", None, discord.ButtonStyle.danger, self.stop, stop_button),
         ]
         for row, cid, label, style, callback, emoji in specs:
             button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=cid)
