@@ -1,5 +1,10 @@
 # Queue / Playback History Specification
 
+> **Document Version:** 1.0.0  
+> **Last Updated:** 2026-10-10  
+> **Source of truth:** `docs/IMPLEMENTATION_SPEC.md` (DMB-IMPL-SPEC v1.0.0)  
+> This specification remains authoritative for queue/history semantics; `docs/IMPLEMENTATION_SPEC.md` overrides conflicting requirements only for playlist concurrency/status timing and the specified Player UI areas.
+
 > **สถานะ:** Design Specification / Source of Truth สำหรับการพัฒนาระบบ Queue ต่อไป
 >
 > เอกสารนี้กำหนดพฤติกรรมของ Queue, Playback History, Previous, Queue UI และ Player UI
@@ -1468,7 +1473,7 @@ Volume button: [ 🔊 ▰▰▰▰▱▱▱▱▱▱ 40% ]
 The button contract is:
 - Row 0: `prev_button`, `rewind_button`, Pause/Resume, `forward_button`, `next_button`.
 - Row 1: `search_button`, `queue_button`, `stop_button`, `loop_button`, `shuffle_button`.
-- `volume_button` opens the existing `VolumeModal`; its label places the speaker before the 10-slot meter and percentage. The playback progress bar uses 24 slots for better visual balance.
+- `volume_button` is a separate icon-only clickable speaker button that opens the existing `VolumeModal`. The 10-slot meter and percentage are ordinary text, not part of the button label. The playback progress bar uses 24 slots for better visual balance. Discord Components V2 may not support the exact button-first same-line arrangement; follow the supported-layout fallback in `docs/IMPLEMENTATION_SPEC.md`.
 - All icon constants are used directly as `Button(emoji=...)` values without appending VS15 (`\\uFE0E`). Pause/Resume switches between `play_button` and `pause_button`.
 - These are real `discord.ui.Button` components and must not be represented as fake text controls in the Embed.
 - Button state must continue to reflect the actual playback/Queue state.
@@ -1538,12 +1543,12 @@ Page 1 / 1  •  5 songs  •  กำลังเล่น #3
 
 Background playlist fetch must not block playback of the first playable track.
 
-- `PLAYLIST_FETCH_CONCURRENCY = 4` (process-wide across guilds); a continuous worker pool keeps at most four remaining-track extractions in flight. Successful results are buffered in playlist order and appended to Queue together only after every remaining fetch attempt finishes. No extra fixed five-second inter-track delay is added.
+- `PLAYLIST_FETCH_CONCURRENCY = 5` (process-wide across guilds); a continuous worker pool keeps at most five remaining-track extractions in flight. Successful results are buffered in playlist order and appended to Queue together only after every remaining fetch attempt finishes. No extra fixed five-second inter-track delay is added.
 - After successfully sending the public `📋 เพิ่มเข้า Queue แล้ว` playlist summary, schedule a debounced Main Player repost so the player is the newest message below the summary; if sending the summary fails, leave message order unchanged.
 - Main Player shows loading status while additional playlist tracks are being fetched:
   `⏳ กำลังโหลดเพลงเพิ่มเติม • X / N`
 - `X` means the number of playlist entries whose fetch attempt has completed, including skipped/failed entries.
-- Update the Player loading status every 5 completed entries.
+- Refresh the Player loading status on a 10-second timer while loading continues. Do not trigger progress refreshes at every 5 or 10 completed entries. Refresh immediately on start and terminal transitions (completion, failure, cancellation, or invalidation).
 - When the background fetch finishes, refresh Player and Queue immediately.
 - When loading finishes, remove the temporary loading line.
 - If a playlist has only one playable entry and no background work remains, no loading line is shown.
@@ -1616,14 +1621,14 @@ This section supersedes older UI notes above where they conflict with the implem
 
 - Row 1: Previous, rewind 10 seconds, Pause/Resume, forward 10 seconds, Next.
 - Row 2: Search, Queue, Shuffle, Repeat, Stop (five controls).
-- The speaker button (`volume_button`) places the speaker before the 10-slot volume meter and percentage in its label, and opens the existing volume modal. The playback progress bar is widened to 24 slots.
+- The speaker button (`volume_button`) is a separate icon-only button that opens the existing volume modal; do not combine the speaker glyph with the meter text. The meter and percentage are ordinary text. Use only a verified, supported Discord Components V2 layout; see `docs/IMPLEMENTATION_SPEC.md` for the placement limitation and fallback. The playback progress bar is widened to 24 slots.
 - Repeat is a real button in the second ActionRow, not an accessory beside the divider.
 - Button icons use the exact Unicode constants in `slashcommands.py` directly as `Button(emoji=...)`, without appending VS15 (`\\uFE0E`). Pause/Resume switches between `play_button` and `pause_button`; seek buttons use the provided Unicode variables rather than custom emoji IDs.
 - Ordinary player controls use Secondary styling rather than blue Primary styling. Stop remains red/Danger. Shuffle and Repeat stay neutral whether on or off; active modes are shown in the status text.
 - The current title is a prominent Markdown heading link when a safe YouTube source URL exists, with no explicit underline markup. Artist/source appears below it, the active playback status appears only when enabled, and the volume meter and requester are separate lines.
 - History (latest three previous tracks, newest first) and Up Next (up to three upcoming tracks) render below both control rows. Previous-track navigation still uses up to 10 retained history entries in Queue state.
 - Main Player History/Next rows use display-local numbering: the first visible row is `01`; numbering increments across History and then Next (`01–03` then `04–06` when both sections are full). These row labels must not use `display_no()`/logical Queue numbers; the footer and Queue page continue to use logical Queue numbering.
-- Pad the visible title column with non-collapsible figure spaces outside the clickable Markdown link, so Player row durations align while titles remain clickable; preserve the current title truncation limit.
+- Keep safe YouTube title links clickable and preserve the current title truncation limit. Do not rely on non-collapsible figure spaces to guarantee fixed-column alignment. If supported Discord Components V2 components cannot provide an aligned duration column while retaining clickable titles, display each duration on a separate line as specified in `docs/IMPLEMENTATION_SPEC.md`.
 - Serialize Player layout edits per guild and keep previous Button objects dispatchable while a rebuilt LayoutView is being edited. Apply the same dispatch hand-off to the ephemeral Queue pager. Navigation, seek, and pause/resume should hold the navigation lock through the refresh. For Player reposts, send/register the replacement message before deleting the old one to reduce unknown-View interaction races.
 
 #### Queue page
@@ -1658,9 +1663,9 @@ The error “Sign in to confirm you're not a bot” is a YouTube access restrict
 
    On Windows, install Deno in PowerShell using `winget install DenoLand.Deno`, then close/reopen the terminal and verify with `deno --version`. After updating the project dependencies, restart the bot process so the Python process picks up the installed runtime. Official instructions: https://docs.deno.com/runtime/getting_started/installation/
 2. Do not rotate to an alternative YouTube player client after a detected challenge. Stop the blocked request immediately, open the shared cooldown, and avoid additional requests that could worsen rate limiting.
-3. Use yt-dlp's sleep_interval_requests pacing (default 1.0 second between internal extraction requests, configurable with YTDLP_SLEEP_REQUESTS from 0 to 10 seconds). Keep retry counts low and resolve remaining playlist entries with a continuous worker pool capped at four concurrent extractions globally across guilds. Buffer successful results in playlist order and append them to Queue once after all remaining fetch attempts finish. The first playable track still starts immediately.
+3. Use yt-dlp's sleep_interval_requests pacing (default 1.0 second between internal extraction requests, configurable with YTDLP_SLEEP_REQUESTS from 0 to 10 seconds). Keep retry counts low and resolve remaining playlist entries with a continuous worker pool capped at five concurrent extractions globally across guilds. Buffer successful results in playlist order and append them to Queue once after all remaining fetch attempts finish. The first playable track still starts immediately.
 4. If a challenge or a recognized rate-limit response such as HTTP 429 hits a YouTube search, playlist listing or track fetch, open a shared 600-second (10-minute) circuit breaker. During that window, new YouTube requests fail fast; do not rotate alternate player clients, retry the blocked request, or search replacement titles for a blocked playlist entry.
-5. Remaining playlist entries use a semaphore shared by all guilds, with at most four extractions in flight. Successful results are buffered in playlist order and added to Queue together after all remaining attempts finish. If the circuit breaker opens, pending items are counted as cooldown skips without making new yt-dlp requests. Worker exceptions are caught and counted so cleanup can finish.
+5. Remaining playlist entries use a semaphore shared by all guilds, with at most five extractions in flight. Successful results are buffered in playlist order and added to Queue together after all remaining attempts finish. If the circuit breaker opens, pending items are counted as cooldown skips without making new yt-dlp requests. Worker exceptions are caught and counted so cleanup can finish.
 6. Raw yt-dlp logger output is suppressed so terminal errors cannot append to the carriage-return progress line. The worker still records a short cause in the guild log.
 7. Optional YTDLP_COOKIES_FILE can point to a Netscape/Mozilla-format cookies file on the host. Mount/configure this file outside the repository. Never commit it, print its contents, or paste it into logs. Cookies are sensitive login credentials and can expire. Reference: https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp
 
@@ -1672,7 +1677,7 @@ The error “Sign in to confirm you're not a bot” is a YouTube access restrict
 - [ ] Verify both custom seek emoji render in the target Discord server and seek exactly 10 seconds. If the server cannot use the emojis, verify Unicode fallback.
 - [ ] Verify elapsed time increments every 10 seconds, pauses, resumes, seeks and resets on Next/Previous.
 - [ ] Simulate anti-bot and HTTP 429 errors in track fetch, playlist listing and search; verify the 600-second circuit breaker, no retry/client rotation after a block, and no title-search fallback during a block.
-- [ ] Verify `YTDLP_SLEEP_REQUESTS` is safely parsed and remaining playlist entries use a process-wide four-worker limit; successful results remain buffered and enter Queue together, in playlist order, only after every remaining fetch attempt finishes.
+- [ ] Verify `YTDLP_SLEEP_REQUESTS` is safely parsed and remaining playlist entries use a process-wide five-worker limit; successful results remain buffered and enter Queue together, in playlist order, only after every remaining fetch attempt finishes. Verify loading progress refreshes every 10 seconds, with no count-based refresh at 5 or 10 completed entries.
 - [ ] Trigger an anti-bot challenge midway through a playlist and verify remaining entries are marked as cooldown skips, without more extraction attempts or misleading per-track block counts.
 - [ ] Force one background fetch worker to raise unexpectedly and verify the loading status is cleared at completion.
 - [ ] Test all button callbacks in Discord, including Radio/Mix, playlist count, Queue pagination, Stop, and external voice disconnect.
@@ -1696,7 +1701,7 @@ The following scenarios are the acceptance matrix for the playback-race fixes. T
 | F10 — Queue-End then new song | Let Queue finish and issue `/play` before the 5-minute idle timeout | New Player session stays connected and the previous Queue-End task exits without deleting the new Player. |
 | F11 — Shuffle message mapping | Add several tracks, enable Shuffle, and let the shuffled tracks play | Shuffle touches Upcoming only; Queue-add messages remain mapped to their original track and no unrelated message is deleted. |
 | F12 — playlist count choices | Try discovered counts 3, 8, 17, 35, and 120 | Choices follow 3: Add All (3); 8: 5 + Add All (8); 17: 5/10 + Add All (17); 35: 5/10/20/30 + Add All (35); 120 is capped to 50. |
-| F13 — playlist fetch and atomic Queue append | Load a long playlist | First playable track starts promptly; up to four remaining extractions stay in flight globally; Queue receives the successful remainder together in original playlist order only after all remaining attempts finish; no extra fixed five-second gap; anti-bot cooldown stops further requests. |
+| F13 — playlist fetch and atomic Queue append | Load a long playlist | First playable track starts promptly; up to five remaining extractions stay in flight globally; Queue receives the successful remainder together in original playlist order only after all remaining attempts finish; no extra fixed five-second gap; anti-bot cooldown stops further requests. |
 | F14 — interaction error | Trigger a stale Player or a handler exception | User receives an expired-player/error response where possible; the error is logged and is not silently mistaken for a successful transition. |
 | F15 — Queue pager | Open Queue, page forward/back, then advance playback while the view remains open | Page boundaries stay valid; paging does not change Current; refreshed page reflects the current marker and logical queue number. |
 | F16 — rapid Main Player interactions | Rapidly press Previous/Next, seek and Pause/Resume while the progress refresh or Player repost is pending | Every accepted interaction is handled once; actions serialize against the live Current track; no `unknown view` warning is produced by the temporary layout rebuild hand-off. | 
