@@ -1533,6 +1533,7 @@ Page 1 / 1  •  5 songs  •  กำลังเล่น #3
 Background playlist fetch must not block playback of the first playable track.
 
 - `PLAYLIST_FETCH_CONCURRENCY = 4` (process-wide across guilds); a continuous worker pool keeps at most four remaining-track extractions in flight. Successful results are buffered in playlist order and appended to Queue together only after every remaining fetch attempt finishes. No extra fixed five-second inter-track delay is added.
+- After successfully sending the public `📋 เพิ่มเข้า Queue แล้ว` playlist summary, schedule a debounced Main Player repost so the player is the newest message below the summary; if sending the summary fails, leave message order unchanged.
 - Main Player shows loading status while additional playlist tracks are being fetched:
   `⏳ กำลังโหลดเพลงเพิ่มเติม • X / N`
 - `X` means the number of playlist entries whose fetch attempt has completed, including skipped/failed entries.
