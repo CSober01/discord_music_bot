@@ -3385,7 +3385,7 @@ forward_button = "\u23E9"     # ⏩
 next_button = "\u23ED"        # ⏭
 loop_button = "\U0001F504"    # 🔄
 search_button = "\U0001F50D"  # 🔍
-queue_button = "\U0001F4D6"   # 📑
+queue_button = "\U0001F3B6"   # 🎶
 volume_button = "\U0001F50A"  # 🔊
 shuffle_button = "\U0001F500" # 🔀
 stop_button = "\u23F9"        # ⏹
@@ -3622,12 +3622,12 @@ class PlayerView(discord.ui.LayoutView):
             (primary, "player_pause_resume", None, discord.ButtonStyle.secondary, self.pause_resume, pause_button),
             (primary, "player_seek_forward", None, discord.ButtonStyle.secondary, self.seek_forward, forward_button),
             (primary, "player_skip", None, discord.ButtonStyle.secondary, self.skip, next_button),
-            # Keep the second row in this exact order; Volume stays beside the top meter.
+            # Keep the second row in the requested order: Search, Queue, Stop, Shuffle, Loop.
             (secondary, "player_search", None, discord.ButtonStyle.secondary, self.search, search_button),
             (secondary, "player_show_queue", None, discord.ButtonStyle.secondary, self.show_queue, queue_button),
+            (secondary, "player_stop", None, discord.ButtonStyle.danger, self.stop, stop_button),
             (secondary, "player_shuffle", None, discord.ButtonStyle.secondary, self.shuffle, shuffle_button),
             (secondary, "player_loop", None, discord.ButtonStyle.secondary, self.loop_btn, loop_button),
-            (secondary, "player_stop", None, discord.ButtonStyle.danger, self.stop, stop_button),
         ]
         for row, cid, label, style, callback, emoji in specs:
             button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=cid)
