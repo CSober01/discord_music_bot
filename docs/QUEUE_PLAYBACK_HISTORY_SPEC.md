@@ -1628,7 +1628,7 @@ This section supersedes older UI notes above where they conflict with the implem
 
 - Playlist choices are 5, 10, 20 and 30 whenever the found count is greater than or equal to that choice. Add All always uses the actual available count capped at 50. The cap applies to selected tracks, not just the button label.
 - The playlist-count submenu has no “กลับเครื่องเล่น” button.
-- Radio/Mix presents Radio and Mix choices side-by-side on a separate ephemeral page. Playlist choice and count selection also use separate ephemeral views, not inline player submenus. No Cancel buttons are displayed; unused selection pages close automatically on timeout.
+- Radio/Mix opens a separate ephemeral page titled “เลือกวิธีเล่น YouTube”, with helper text explaining both actions. “🎧 เล่นเพลงนี้เพลงเดียว” plays only the video in the supplied URL; “🔀 โหลดเพลงจาก Mix” fetches the Mix track list and then opens the count selector. The button labels describe the actual callbacks. Playlist choice and count selection also use separate ephemeral views, not inline player submenus. No Cancel buttons are displayed; unused selection pages close automatically on timeout.
 - The Queue submenu has no Back button; its pager uses arrow-only controls.
 
 #### Playback clock and button-state synchronization
