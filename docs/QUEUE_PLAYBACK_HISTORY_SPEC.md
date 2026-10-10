@@ -1456,21 +1456,22 @@ General rule:
 
 ### Main Player buttons
 
-The actual clickable controls are inside the Main Player Components V2 Container, using exactly two Discord ActionRows (at most five buttons each) plus a Repeat button as a Section accessory at the right side of the divider immediately above them:
+The actual clickable controls are inside the Main Player Components V2 Container, using exactly two Discord ActionRows (at most five buttons each). Repeat is restored as the first button in Row 1, and the speaker remains attached to the top volume-meter Section as a clickable accessory:
 
 ```
-                 [ 🔄︎ ]  (Repeat accessory beside divider)
-[ ⏮︎ ] [ ⏪︎ ] [ ⏸︎ / ▶︎ ] [ ⏩︎ ] [ ⏭︎ ]
-[ 🔍︎ ] [ 📑︎ ] [ 🔊︎ ] [ 🔀︎ ] [ ⏹︎ ]
+[ ⏮ ] [ ⏪ ] [ ⏸ / ▶ ] [ ⏩ ] [ ⏭ ]
+[ 🔄 ] [ 🔍 ] [ 📑 ] [ 🔀 ] [ ⏹ ]
+
+Top volume meter: [meter] [ 🔊 ]
 ```
 
 The button contract is:
 - Row 0: `prev_button`, `rewind_button`, Pause/Resume, `forward_button`, `next_button`.
-- Row 1: `search_button`, `queue_button`, `shuffle_button`, `stop_button` (four controls; volume is no longer in an ActionRow).
+- Row 1: `loop_button`, `search_button`, `queue_button`, `shuffle_button`, `stop_button`.
 - `volume_button` is the Section accessory for the top volume-meter line and opens the existing `VolumeModal`.
-- `loop_button` is a Section accessory beside the divider immediately above the two ActionRows.
-- Button symbols use the requested Unicode values with VS15 (`\\uFE0E`) to request text presentation.
-- Main Player control glyphs use the specified Unicode code points followed by VS15 (`\\uFE0E`) to request text presentation. Pause/Resume switches between `play_button` and `pause_button`.
+- All icon constants are used directly as `Button(emoji=...)` values without appending VS15 (`\\uFE0E`). Pause/Resume switches between `play_button` and `pause_button`.
+- These are real `discord.ui.Button` components and must not be represented as fake text controls in the Embed.
+- Button state must continue to reflect the actual playback/Queue state.
 - These are real `discord.ui.Button` components and must not be represented as fake text controls in the Embed.
 - Button state must continue to reflect the actual playback/Queue state.
 
@@ -1614,9 +1615,9 @@ This section supersedes older UI notes above where they conflict with the implem
 #### Main Player controls
 
 - Row 1: Previous, rewind 10 seconds, Pause/Resume, forward 10 seconds, Next.
-- Row 2: Search, Queue, Shuffle, Stop (four controls; Volume is removed from this row).
+- Row 2: Repeat, Search, Queue, Shuffle, Stop (five controls).
 - The speaker button (`volume_button`) is the accessory beside the top volume meter and opens the existing volume modal.
-- Repeat is a Section accessory beside the divider directly above the two ActionRows, preserving all controls without adding a third ActionRow.
+- Repeat is a real button in the second ActionRow, not an accessory beside the divider.
 - Button icons use the exact Unicode constants in `slashcommands.py` with VS15 (`\\uFE0E`) to request text presentation. Pause/Resume switches between `play_button` and `pause_button`; seek buttons now use text-style Unicode symbols rather than custom emoji IDs.
 - Ordinary player controls use Secondary styling rather than blue Primary styling. Stop remains red/Danger. Shuffle and Repeat stay neutral whether on or off; active modes are shown in the status text.
 - The current title is a prominent Markdown heading link when a safe YouTube source URL exists, with no explicit underline markup. Artist/source appears below it, the active playback status appears only when enabled, and the volume meter and requester are separate lines.
