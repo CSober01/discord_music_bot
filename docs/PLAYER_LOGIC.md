@@ -22,8 +22,8 @@ This document describes the expected behavior and operational safeguards in `sla
 
 - A playlist import is capped at `MAX_PLAYLIST_FETCH = 50` entries.
 - The first playable entry is resolved first so playback can begin before the entire playlist has been processed.
-- Remaining entries are fetched four at a time under one process-wide semaphore shared across all guilds. Each completed batch is appended to the Queue and displayed immediately; there is no extra five-second delay between playlist entries. yt-dlp's configured internal request pacing and the shared anti-bot cooldown remain in place.
-- Playlist progress is an in-place console line. yt-dlp's raw stderr is suppressed so a fatal `ERROR: [youtube]...` line cannot overwrite the progress display; exceptions still propagate and are recorded in the guild log. A completed batch prints a summary; a batch invalidated by stop/disconnect must not print a false completion summary.
+- After the first playable track starts (or is appended if another track is already active), remaining entries are resolved by a continuous worker pool with at most four in-flight yt-dlp extractions globally across all guilds. Successful results stay buffered in playlist order and are appended to Queue together only after all remaining fetch attempts finish; the progress indicator may update while Queue stays unchanged. There is no added fixed five-second inter-track delay. yt-dlp's configured internal request pacing and the shared anti-bot cooldown remain in place.
+- Playlist progress is an in-place console line. yt-dlp's raw stderr is suppressed so a fatal `ERROR: [youtube]...` line cannot overwrite the progress display; exceptions still propagate and are recorded in the guild log. A fetch run prints its final summary after all remaining entries finish; a run invalidated by stop/disconnect must not print a false completion summary.
 - The player queue page contains 10 tracks. Previous/next controls are disabled at the page boundaries.
 - Previously played entries are retained in the queue up to `HISTORY_LIMIT = 10`; the player displays the latest three previous entries and up to three upcoming entries.
 
@@ -91,7 +91,7 @@ Before merging or deploying changes, verify:
 - [ ] Pause/resume freezes and resumes the displayed elapsed time.
 - [ ] Seek controls move exactly 10 seconds and do not cause the next track to start unexpectedly.
 - [ ] A 20-track queue has two pages; previous/next controls disable at the correct boundaries.
-- [ ] A playlist with more than four entries appends additional tracks in batches of up to four and updates Queue/Player after each batch, without a fixed five-second delay.
+- [ ] A long playlist resolves up to four remaining entries concurrently across the process, keeps successful results buffered in playlist order, and appends the full successful remainder only after all fetch attempts finish; stop/disconnect must prevent stale results from entering Queue.
 - [ ] Stop/disconnect during playlist loading prevents stale workers from issuing more requests.
 - [ ] Simulated `Sign in to confirm you're not a bot` opens cooldown, skips title fallback, and produces a readable user message.
 - [ ] No cookie file or token appears in logs, commits, or repository files.
