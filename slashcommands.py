@@ -3542,6 +3542,23 @@ class PlayerView(discord.ui.LayoutView):
         gid = self.guild.id
         q = get_full_queue(gid)
         idx = max(0, min(get_now_idx(gid), len(q) - 1)) if q else 0
+        if q:
+            # Prefer the index associated with this PlayerView's actual track.
+            # The guild-wide index can briefly be ahead of the track shown in the UI.
+            view_idx = self.current_idx
+            if (
+                isinstance(view_idx, int)
+                and 0 <= view_idx < len(q)
+                and q[view_idx][0] == url
+            ):
+                idx = view_idx
+            elif not (0 <= idx < len(q) and q[idx][0] == url):
+                matching_positions = [
+                    pos for pos, queued_track in enumerate(q)
+                    if queued_track[0] == url
+                ]
+                if matching_positions:
+                    idx = min(matching_positions, key=lambda pos: abs(pos - idx))
         display_title = _clean_player_title(title)
         artist = "YouTube"
         if q and 0 <= idx < len(q):
