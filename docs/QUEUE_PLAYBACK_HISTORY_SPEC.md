@@ -1615,6 +1615,8 @@ This section supersedes older UI notes above where they conflict with the implem
 - Ordinary player controls use Secondary styling rather than blue Primary styling. Stop remains red/Danger. Shuffle and Repeat stay neutral whether on or off; active modes are shown in the status text.
 - The current title is a prominent Markdown heading link when a safe YouTube source URL exists, with no explicit underline markup. Artist/source appears below it, the active playback status appears only when enabled, and the volume meter and requester are separate lines.
 - History (latest three previous tracks, newest first) and Up Next (up to three upcoming tracks) render below both control rows. Previous-track navigation still uses up to 10 retained history entries in Queue state.
+- Main Player History/Next rows use display-local numbering: the first visible row is `01`; numbering increments across History and then Next. These row labels must not use `display_no()`/logical Queue numbers; the footer and Queue page continue to use logical Queue numbering.
+- Pad titles with non-collapsible figure spaces so the duration starts in a consistent column even when Discord renders Markdown; keep title truncation at the existing display-width limit.
 
 #### Queue page
 
