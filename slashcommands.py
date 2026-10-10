@@ -139,25 +139,46 @@ def clear_guild(guild_id: int):
 def _queue_pos_str(guild_id: int, idx: int) -> str:
     return f"กำลังเล่น #{display_no(guild_id, idx)} จาก {get_total_added(guild_id)} เพลง"
 
+def _bounded_float_env(name: str, default: float, minimum: float, maximum: float) -> float:
+    """Read a numeric environment setting safely and clamp it to a sensible range."""
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(value, maximum))
+
+
 def get_ydl_options(include_playlist: bool = False) -> dict:
+    """Build yt-dlp options with conservative request pacing and optional cookies.
+
+    Leave YouTube client selection to yt-dlp so it can choose a compatible
+    extraction client as YouTube changes.
+    """
     opts = {
         "format": "bestaudio/best",
         "quiet": True,
-        "no_warnings": True,  # ปิด warnings
+        "no_warnings": True,
         "default_search": "ytsearch",
         "source_address": "0.0.0.0",
         "remote_components": ["ejs:github"],
-        "socket_timeout": 60,  # เพิ่ม timeout
-        "retries": 5,  # เพิ่ม retries
-        "fragment_retries": 5,
+        "socket_timeout": 60,
+        "retries": 2,
+        "fragment_retries": 2,
+        "file_access_retries": 2,
+        "extractor_retries": 1,
+        "sleep_interval_requests": _bounded_float_env("YTDLP_SLEEP_REQUESTS", 1.0, 0.0, 10.0),
         "skip_unavailable_fragments": True,
-        "extractor_args": {"youtube": {
-            "client_name": "web",  # ระบุ client อย่างชัดเจน เพื่อหลีกเลี่ยง web_safari
-            "player_skip": ["webpage", "configs"],
-            "skip": ["hls", "dash"],
-        }},
     }
-    # ถ้า include_playlist เป็น True จะดึง playlist ทั้งหมด
+
+    # Optional authentication for machines where YouTube requires a signed-in
+    # session. Prefer a cookie file; browser cookies are an explicit opt-in.
+    cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
+    cookies_browser = os.environ.get("YTDLP_COOKIES_FROM_BROWSER", "").strip().lower()
+    if cookies_file:
+        opts["cookiefile"] = cookies_file
+    elif cookies_browser in {"brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale"}:
+        opts["cookiesfrombrowser"] = (cookies_browser, None, None, None)
+
     opts["noplaylist"] = not include_playlist
     return opts
 
@@ -256,8 +277,8 @@ def _fetch_spotify_track_from_search(search_query: str):
     """
     opts = get_ydl_options(include_playlist=False)
     opts["socket_timeout"] = 30
-    opts["retries"] = 5
-    opts["fragment_retries"] = 5
+    opts["retries"] = 2
+    opts["fragment_retries"] = 2
     
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(search_query, download=False)
@@ -398,8 +419,8 @@ def fetch_playlist_tracks(query: str, max_tracks: int = 50) -> list:
     
     opts = get_ydl_options(include_playlist=True)
     opts["socket_timeout"] = 30
-    opts["retries"] = 5
-    opts["fragment_retries"] = 5
+    opts["retries"] = 2
+    opts["fragment_retries"] = 2
     opts["playlistend"] = max_tracks
     opts["extract_flat"] = "in_playlist"
     
@@ -446,8 +467,8 @@ def fetch_track(query: str):
                 
                 opts = get_ydl_options(include_playlist=False)
                 opts["socket_timeout"] = 30
-                opts["retries"] = 5
-                opts["fragment_retries"] = 5
+                opts["retries"] = 2
+                opts["fragment_retries"] = 2
                 
                 try:
                     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -474,8 +495,8 @@ def fetch_track(query: str):
     
     opts = get_ydl_options(include_playlist=False)
     opts["socket_timeout"] = 30
-    opts["retries"] = 5
-    opts["fragment_retries"] = 5
+    opts["retries"] = 2
+    opts["fragment_retries"] = 2
     
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -499,8 +520,8 @@ def search_tracks(query: str, limit: int = 5):
     opts["extract_flat"] = "in_playlist"
     opts["default_search"] = "ytsearch5"
     opts["socket_timeout"] = 30
-    opts["retries"] = 5
-    opts["fragment_retries"] = 5
+    opts["retries"] = 2
+    opts["fragment_retries"] = 2
     results = []
     
     try:
