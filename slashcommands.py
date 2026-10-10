@@ -3618,7 +3618,7 @@ class PlayerView(discord.ui.LayoutView):
         parts.append(discord.ui.TextDisplay(QUEUE_DIVIDER))
         primary, secondary = discord.ui.ActionRow(), discord.ui.ActionRow()
         repeat_mode = loop_modes.get(gid, "off")
-        repeat_button_labels = {"off": None, "track": "วนเพลงปัจจุบัน", "queue": "วนทั้งคิว"}
+        repeat_button_labels = {"off": None, "track": None, "queue": None}
         repeat_button_emojis = {"off": "🔁", "track": "🔂", "queue": "🔁"}
         repeat_button_style = discord.ButtonStyle.secondary
         specs = [
@@ -3851,7 +3851,7 @@ class PlayerView(discord.ui.LayoutView):
                 item.disabled = len(get_full_queue(self.guild.id)) < 2
             elif cid == "player_loop":
                 repeat_mode = loop_modes.get(self.guild.id, "off")
-                item.label = {"off": None, "track": "วนเพลงปัจจุบัน", "queue": "วนทั้งคิว"}.get(repeat_mode)
+                item.label = None
                 item.emoji = {"off": "🔁", "track": "🔂", "queue": "🔁"}.get(repeat_mode, "🔁")
                 item.style = discord.ButtonStyle.secondary
             elif cid == "player_pause_resume":
