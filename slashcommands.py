@@ -3605,7 +3605,7 @@ class PlayerView(discord.ui.LayoutView):
         self._buttons["player_volume"] = volume_control
         # Put the speaker first inside the clickable meter button, followed by the bar and percentage.
         parts.append(discord.ui.Section(
-            discord.ui.TextDisplay(" "),
+            discord.ui.TextDisplay("\u200b"),
             accessory=volume_control,
         ))
         who = requester.mention if requester else "ไม่ทราบชื่อ"
