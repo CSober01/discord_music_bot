@@ -3396,7 +3396,15 @@ class PlayerQueueView(discord.ui.LayoutView):
         self._build_layout()
 
     def _build_layout(self):
+        previous_buttons = tuple(
+            item for item in self.walk_children()
+            if isinstance(item, discord.ui.Button)
+        )
         self.clear_items()
+        # Keep old pager buttons dispatchable until the edited message registers
+        # the replacement components, just like the Main Player controls.
+        for previous_button in previous_buttons:
+            previous_button._update_view(self)
         gid = self.guild.id
         queue = get_full_queue(gid)
         total_pages = max(1, (len(queue) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
