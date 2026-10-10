@@ -3602,9 +3602,8 @@ class PlayerView(discord.ui.LayoutView):
 
         volume_control.callback = _run_volume_control
         self._buttons["player_volume"] = volume_control
-        # Components V2 Section accessories render on the right, so they cannot
-        # guarantee the requested button-first order. Keep a real clickable speaker
-        # button in its own ActionRow, followed by the separate meter text.
+        # Keep the clickable speaker button in its own ActionRow. Components V2
+        # does not support placing a text meter beside a button in the same row.
         volume_row = discord.ui.ActionRow()
         volume_row.add_item(volume_control)
         parts.append(volume_row)
