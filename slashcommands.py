@@ -3376,6 +3376,21 @@ class QueueView(discord.ui.View):
 #  Player View
 # ─────────────────────────────────────────────
 
+# Text-presentation Unicode controls used by the Main Player.
+prev_button = "\\u23EE\\uFE0E"        # ⏮︎
+rewind_button = "\\u23EA\\uFE0E"      # ⏪︎
+play_button = "\\u25B6\\uFE0E"        # ▶︎
+pause_button = "\\u23F8\\uFE0E"       # ⏸︎
+forward_button = "\\u23E9\\uFE0E"     # ⏩︎
+next_button = "\\u23ED\\uFE0E"        # ⏭︎
+loop_button = "\\U0001F504\\uFE0E"    # 🔄︎
+search_button = "\\U0001F50D\\uFE0E"  # 🔍︎
+queue_button = "\\U0001F4D6\\uFE0E"   # 📖︎
+volume_button = "\\U0001F50A\\uFE0E"  # 🔊︎
+shuffle_button = "\\U0001F500\\uFE0E" # 🔀︎
+stop_button = "\\u23F9\\uFE0E"        # ⏹︎
+
+
 def _player_seek_emoji(guild: discord.Guild, emoji_id: int, name: str, fallback: str):
     """Use the existing image-based custom emoji for seek controls."""
     found = guild.get_emoji(emoji_id)
@@ -3591,20 +3606,25 @@ class PlayerView(discord.ui.LayoutView):
             parts.append(discord.ui.TextDisplay(f"⏳ กำลังโหลดเพลงเพิ่มเติม · {loading.done}/{loading.total}"))
 
         parts.append(discord.ui.TextDisplay(QUEUE_DIVIDER))
-        primary, secondary = discord.ui.ActionRow(), discord.ui.ActionRow()
+        primary, secondary, tertiary = (
+            discord.ui.ActionRow(),
+            discord.ui.ActionRow(),
+            discord.ui.ActionRow(),
+        )
+        # Discord ActionRow supports at most five buttons. Keep the requested
+        # flattened order and place Stop on a third row rather than dropping controls.
         specs = [
-            (primary, "player_previous", None, discord.ButtonStyle.secondary, self.previous, "⏮️"),
-            (primary, "player_seek_back", None, discord.ButtonStyle.secondary, self.seek_back,
-             _player_seek_emoji(self.guild, 1455985625097306142, "backward10", "⏪")),
-            (primary, "player_pause_resume", None, discord.ButtonStyle.secondary, self.pause_resume, "⏸️"),
-            (primary, "player_seek_forward", None, discord.ButtonStyle.secondary, self.seek_forward,
-             _player_seek_emoji(self.guild, 1455985627714551839, "forward10", "⏩")),
-            (primary, "player_skip", None, discord.ButtonStyle.secondary, self.skip, "⏭️"),
-            (secondary, "player_search", None, discord.ButtonStyle.secondary, self.search, "🔍"),
-            (secondary, "player_show_queue", None, discord.ButtonStyle.secondary, self.show_queue, "📋"),
-            (secondary, "player_shuffle", None, discord.ButtonStyle.secondary, self.shuffle, "🔀"),
-            (secondary, "player_loop", None, discord.ButtonStyle.secondary, self.loop_btn, "🔁"),
-            (secondary, "player_stop", None, discord.ButtonStyle.danger, self.stop, "⏹️"),
+            (primary, "player_previous", None, discord.ButtonStyle.secondary, self.previous, prev_button),
+            (primary, "player_seek_back", None, discord.ButtonStyle.secondary, self.seek_back, rewind_button),
+            (primary, "player_pause_resume", None, discord.ButtonStyle.secondary, self.pause_resume, pause_button),
+            (primary, "player_seek_forward", None, discord.ButtonStyle.secondary, self.seek_forward, forward_button),
+            (primary, "player_skip", None, discord.ButtonStyle.secondary, self.skip, next_button),
+            (secondary, "player_loop", None, discord.ButtonStyle.secondary, self.loop_btn, loop_button),
+            (secondary, "player_search", None, discord.ButtonStyle.secondary, self.search, search_button),
+            (secondary, "player_show_queue", None, discord.ButtonStyle.secondary, self.show_queue, queue_button),
+            (secondary, "player_volume", None, discord.ButtonStyle.secondary, self.volume_btn, volume_button),
+            (secondary, "player_shuffle", None, discord.ButtonStyle.secondary, self.shuffle, shuffle_button),
+            (tertiary, "player_stop", None, discord.ButtonStyle.danger, self.stop, stop_button),
         ]
         for row, cid, label, style, callback, emoji in specs:
             button = discord.ui.Button(label=label, emoji=emoji, style=style, custom_id=cid)
@@ -3615,7 +3635,7 @@ class PlayerView(discord.ui.LayoutView):
             row.add_item(button)
             self._buttons[cid] = button
 
-        parts.extend((primary, secondary))
+        parts.extend((primary, secondary, tertiary))
         parts.append(discord.ui.TextDisplay(QUEUE_DIVIDER))
 
         history_start = max(0, idx - 3)
@@ -3825,12 +3845,11 @@ class PlayerView(discord.ui.LayoutView):
             if cid == "player_shuffle":
                 item.style = discord.ButtonStyle.secondary
             elif cid == "player_loop":
-                mode = loop_modes.get(self.guild.id, "off")
                 item.style = discord.ButtonStyle.secondary
-                item.emoji = {"off":"🔁","track":"🔂","queue":"🔁"}[mode]
+                item.emoji = loop_button
             elif cid == "player_pause_resume":
                 vc = self.guild.voice_client
-                item.emoji = "▶️" if vc and vc.is_paused() else "⏸️"
+                item.emoji = play_button if vc and vc.is_paused() else pause_button
             elif cid == "player_previous":
                 item.disabled = get_now_idx(self.guild.id) <= 0
             elif cid == "player_skip":
