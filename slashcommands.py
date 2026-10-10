@@ -3605,7 +3605,9 @@ class PlayerView(discord.ui.LayoutView):
         # Components V2 Section accessories render on the right, so they cannot
         # guarantee the requested button-first order. Keep a real clickable speaker
         # button in its own ActionRow, followed by the separate meter text.
-        parts.append(discord.ui.ActionRow(volume_control))
+        volume_row = discord.ui.ActionRow()
+        volume_row.add_item(volume_control)
+        parts.append(volume_row)
         parts.append(discord.ui.TextDisplay(f"{volume_bar}  {volume_pct}%"))
         who = requester.mention if requester else "ไม่ทราบชื่อ"
         parts.append(discord.ui.TextDisplay(f"👤 {who}"))
@@ -3644,7 +3646,6 @@ class PlayerView(discord.ui.LayoutView):
         history_start = max(0, idx - 3)
         history_positions = range(idx - 1, history_start - 1, -1) if q else range(0)
         history_lines = []
-        player_row_no = 1
 
         def _track_line(queue_position, track_url, track_title, track_duration):
             shown = _truncate_display_width(
