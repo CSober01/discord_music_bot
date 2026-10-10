@@ -3376,19 +3376,19 @@ class QueueView(discord.ui.View):
 #  Player View
 # ─────────────────────────────────────────────
 
-# Text-presentation Unicode controls used by the Main Player.
-prev_button = "\u23EE\uFE0E"        # ⏮︎
-rewind_button = "\u23EA\uFE0E"      # ⏪︎
-play_button = "\u25B6\uFE0E"        # ▶︎
-pause_button = "\u23F8\uFE0E"       # ⏸︎
-forward_button = "\u23E9\uFE0E"     # ⏩︎
-next_button = "\u23ED\uFE0E"        # ⏭︎
-loop_button = "\U0001F504\uFE0E"    # 🔄︎
-search_button = "\U0001F50D\uFE0E"  # 🔍︎
-queue_button = "\U0001F4D1\uFE0E"   # 📑︎
-volume_button = "\U0001F50A\uFE0E"  # 🔊︎
-shuffle_button = "\U0001F500\uFE0E" # 🔀︎
-stop_button = "\u23F9\uFE0E"        # ⏹︎
+# Unicode control icons used by the Main Player.
+prev_button = "\u23EE"        # ⏮
+rewind_button = "\u23EA"      # ⏪
+play_button = "\u25B6"        # ▶
+pause_button = "\u23F8"       # ⏸
+forward_button = "\u23E9"     # ⏩
+next_button = "\u23ED"        # ⏭
+loop_button = "\U0001F504"    # 🔄
+search_button = "\U0001F50D"  # 🔍
+queue_button = "\U0001F4D6"   # 📑
+volume_button = "\U0001F50A"  # 🔊
+shuffle_button = "\U0001F500" # 🔀
+stop_button = "\u23F9"        # ⏹
 
 
 class PlayerQueueView(discord.ui.LayoutView):
@@ -3613,27 +3613,7 @@ class PlayerView(discord.ui.LayoutView):
         if loading and loading.done < loading.total:
             parts.append(discord.ui.TextDisplay(f"⏳ กำลังโหลดเพลงเพิ่มเติม · {loading.done}/{loading.total}"))
 
-        # Six transport/repeat controls were requested in the first visual group,
-        # but Discord permits at most five buttons in an ActionRow. Keep exactly two
-        # ActionRows and place Repeat as a Section accessory beside the divider.
-        loop_control = discord.ui.Button(
-            emoji=loop_button,
-            style=discord.ButtonStyle.secondary,
-            custom_id="player_loop",
-        )
-
-        async def _run_loop_control(interaction, btn=loop_control):
-            await _safe_player_button_callback(
-                interaction, self.loop_btn, btn, "player_loop"
-            )
-
-        loop_control.callback = _run_loop_control
-        self._buttons["player_loop"] = loop_control
-
-        parts.append(discord.ui.Section(
-            discord.ui.TextDisplay(QUEUE_DIVIDER),
-            accessory=loop_control,
-        ))
+        parts.append(discord.ui.TextDisplay(QUEUE_DIVIDER))
         primary, secondary = discord.ui.ActionRow(), discord.ui.ActionRow()
         specs = [
             (primary, "player_previous", None, discord.ButtonStyle.secondary, self.previous, prev_button),
@@ -3641,6 +3621,8 @@ class PlayerView(discord.ui.LayoutView):
             (primary, "player_pause_resume", None, discord.ButtonStyle.secondary, self.pause_resume, pause_button),
             (primary, "player_seek_forward", None, discord.ButtonStyle.secondary, self.seek_forward, forward_button),
             (primary, "player_skip", None, discord.ButtonStyle.secondary, self.skip, next_button),
+            # Repeat returns to the row as a real button. Volume stays beside the top meter.
+            (secondary, "player_loop", None, discord.ButtonStyle.secondary, self.loop_btn, loop_button),
             (secondary, "player_search", None, discord.ButtonStyle.secondary, self.search, search_button),
             (secondary, "player_show_queue", None, discord.ButtonStyle.secondary, self.show_queue, queue_button),
             (secondary, "player_shuffle", None, discord.ButtonStyle.secondary, self.shuffle, shuffle_button),
