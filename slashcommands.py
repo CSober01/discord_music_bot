@@ -99,6 +99,10 @@ queue_add_msgs: dict[int, dict[int, object]] = {}
 queue_view_msgs: dict[tuple[int, int], tuple[object, "QueueView"]] = {}
 player_queue_view_msgs: dict[tuple[int, int], tuple[object, "PlayerQueueView"]] = {}
 search_result_msgs: dict[int, list] = {}
+_search_request_versions: dict[tuple[int, int], int] = {}
+_search_result_locks: dict[tuple[int, int], asyncio.Lock] = {}
+_search_result_views: dict[tuple[int, int], "SearchResultView"] = {}
+_voice_connect_locks: dict[int, asyncio.Lock] = {}
 player_repost_tasks: dict[int, asyncio.Task] = {}
 
 # เก็บชื่อแบบสั้นสำหรับแสดงใน Queue โดยผูกกับ stream URL
@@ -820,24 +824,62 @@ def search_tracks(query: str, limit: int = 5):
 
     return results
 
+def begin_search_request(guild_id: int, requester_id: int) -> int:
+    """Start a new, versioned search request for one user in one guild."""
+    key = (guild_id, requester_id)
+    token = _search_request_versions.get(key, 0) + 1
+    _search_request_versions[key] = token
+    return token
+
+
+def _get_search_result_lock(key: tuple[int, int]) -> asyncio.Lock:
+    lock = _search_result_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _search_result_locks[key] = lock
+    return lock
+
+
+async def _close_previous_search_result(guild_id: int, requester_id: int):
+    key = (guild_id, requester_id)
+    async with _get_search_result_lock(key):
+        previous_view = _search_result_views.get(key)
+        if previous_view:
+            await previous_view._close_message()
+
+
 async def send_search_results(results, guild, channel, loop, loop_getter, requester,
-                              done_msg_ref=None):
-    lines = []
-    for i, r in enumerate(results):
-        line = f"`{i+1}.` {_trunc(r['title'], 55)}"
-        duration = r.get("duration")
-        if duration:
-            line += f" | `{duration}`"
-        lines.append(line)
-    embed = discord.Embed(title="🔍 ผลการค้นหา", description="\n".join(lines), color=0x1a1a2e)
-    embed.set_footer(text=f"กำลังรอ {requester.display_name} เลือกเพลง • หมดเวลาใน 30 วินาที")
-    search_view = SearchResultView(results, guild, channel, loop, loop_getter,
-                                   requester=requester, done_msg_ref=done_msg_ref)
-    pub_msg = await channel.send(
-        content=f"🎵 {requester.mention} กำลังเลือกเพลง", embed=embed, view=search_view)
-    search_view.message = pub_msg
-    search_result_msgs.setdefault(guild.id, []).append(pub_msg)
-    return pub_msg
+                              done_msg_ref=None, request_token=None):
+    key = (guild.id, requester.id)
+    if request_token is None:
+        request_token = begin_search_request(*key)
+
+    async with _get_search_result_lock(key):
+        # Ignore a slow, older search if the requester has already started another.
+        if _search_request_versions.get(key) != request_token:
+            return None
+
+        previous_view = _search_result_views.get(key)
+        if previous_view:
+            await previous_view._close_message()
+
+        lines = []
+        for i, r in enumerate(results):
+            line = f"`{i+1}.` {_trunc(r['title'], 55)}"
+            duration = r.get("duration")
+            if duration:
+                line += f" | `{duration}`"
+            lines.append(line)
+        embed = discord.Embed(title="🔍 ผลการค้นหา", description="\n".join(lines), color=0x1a1a2e)
+        embed.set_footer(text=f"กำลังรอ {requester.display_name} เลือกเพลง • หมดเวลาใน 30 วินาที")
+        search_view = SearchResultView(results, guild, channel, loop, loop_getter,
+                                       requester=requester, done_msg_ref=done_msg_ref)
+        pub_msg = await channel.send(
+            content=f"🎵 {requester.mention} กำลังเลือกเพลง", embed=embed, view=search_view)
+        search_view.message = pub_msg
+        search_result_msgs.setdefault(guild.id, []).append(pub_msg)
+        _search_result_views[key] = search_view
+        return pub_msg
 
 
 def make_now_playing_embed(title, duration, requester=None, thumbnail=None, queue_pos=None):
@@ -1124,28 +1166,49 @@ VOICE_CONNECT_RETRIES = 3       # ลองเชื่อมต่อ VC สู
 VOICE_CONNECT_RETRY_DELAY = 1.5  # วินาที รอก่อนลองใหม่แต่ละรอบ (กันยิงรัวตอนเน็ตแกว่ง)
 
 async def _connect_with_retry(voice_channel: discord.VoiceChannel):
-    """เชื่อมต่อ Voice Channel พร้อม retry — กัน ConnectionClosed (1006) ตอนเน็ตบอทไม่เสถียร
-    ถ้า handshake หลุดกลางทาง discord.py จะโยน ConnectionClosed/asyncio.TimeoutError ออกมาทันที
-    โดยไม่ retry เอง จึงต้องดักแล้วลองใหม่ที่นี่แทน ไม่งั้น /play จะพังทันทีตั้งแต่ครั้งแรกที่เน็ตสะดุด
-    คืนค่า VoiceClient ถ้าสำเร็จ, โยน exception เดิมกลับไปถ้าลองครบทุกครั้งแล้วยังไม่ผ่าน
+    """Serialize Voice handshakes per guild and recover stale VoiceClient sessions.
+
+    Discord close code 4006 means the previous voice session is no longer valid.
+    Retry with a fresh handshake and prevent concurrent connect attempts per guild.
     """
-    last_error = None
-    for attempt in range(1, VOICE_CONNECT_RETRIES + 1):
-        try:
-            vc = await voice_channel.connect()
-            return vc
-        except (discord.errors.ConnectionClosed, asyncio.TimeoutError) as e:
-            last_error = e
-            print(f"⚠ Voice connect ล้มเหลว (ครั้งที่ {attempt}/{VOICE_CONNECT_RETRIES}): {e}")
-            # เช็คว่ามี voice_client ค้างอยู่จาก attempt ก่อนหน้าไหม (บาง state discord.py
-            # จะสร้าง VoiceClient ไว้ก่อนแล้วค่อยพังตอน handshake) ต้อง disconnect ทิ้งก่อนลองใหม่
-            stale_vc = voice_channel.guild.voice_client
-            if stale_vc:
-                try: await stale_vc.disconnect(force=True)
-                except Exception: pass
-            if attempt < VOICE_CONNECT_RETRIES:
-                await asyncio.sleep(VOICE_CONNECT_RETRY_DELAY)
-    raise last_error
+    guild = voice_channel.guild
+    lock = _voice_connect_locks.get(guild.id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _voice_connect_locks[guild.id] = lock
+
+    async with lock:
+        existing_vc = guild.voice_client
+        if existing_vc and existing_vc.is_connected():
+            if existing_vc.channel != voice_channel:
+                await existing_vc.move_to(voice_channel)
+            return existing_vc
+        if existing_vc:
+            try:
+                await existing_vc.disconnect(force=True)
+            except Exception:
+                pass
+
+        last_error = None
+        for attempt in range(1, VOICE_CONNECT_RETRIES + 1):
+            try:
+                return await voice_channel.connect()
+            except (discord.errors.ConnectionClosed, asyncio.TimeoutError) as e:
+                last_error = e
+                close_code = getattr(e, "code", None)
+                print(
+                    f"⚠ Voice connect ล้มเหลว (ครั้งที่ {attempt}/{VOICE_CONNECT_RETRIES}, "
+                    f"close_code={close_code}): {e}"
+                )
+                stale_vc = guild.voice_client
+                if stale_vc:
+                    try:
+                        await stale_vc.disconnect(force=True)
+                    except Exception:
+                        pass
+                if attempt < VOICE_CONNECT_RETRIES:
+                    await asyncio.sleep(VOICE_CONNECT_RETRY_DELAY)
+        raise last_error
 
 async def check_in_voice(interaction: discord.Interaction) -> bool:
     vc = interaction.guild.voice_client
@@ -1361,6 +1424,10 @@ async def _schedule_player_repost(guild_id: int, delay: float = 0.8):
 
 async def _delete_search_result_msgs(guild_id: int):
     msgs = search_result_msgs.pop(guild_id, [])
+    for key, view in list(_search_result_views.items()):
+        if key[0] == guild_id:
+            _search_result_views.pop(key, None)
+            view.stop()
     if not msgs:
         return
     async def _safe_delete(m):
@@ -2030,6 +2097,8 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
 
     async def on_submit(self, interaction: discord.Interaction):
         query_str = str(self.query).strip()
+        request_token = begin_search_request(self.guild.id, interaction.user.id)
+        await _close_previous_search_result(self.guild.id, interaction.user.id)
         log("🔍 SEARCH", interaction, f"query: {_trunc(query_str, 50)}")
         await interaction.response.send_message(
             embed=discord.Embed(description=f"🔍 กำลังค้นหา **{query_str}**", color=0x1a1a2e))
@@ -2081,27 +2150,9 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                 choice_view.message = prompt
                 return
 
-            vc = self.guild.voice_client
-            if not vc:
-                if not interaction.user.voice:
-                    await _ack_done()
-                    await _send_error("❌ กรุณาเข้า Voice Channel ก่อน")
-                    return
-                try:
-                    vc = await _connect_with_retry(interaction.user.voice.channel)
-                except Exception as connect_error:
-                    log("🔍 SEARCH CONNECT ERROR", interaction, str(connect_error))
-                    await _ack_done()
-                    await _send_error("❌ เชื่อมต่อ Voice Channel ไม่สำเร็จ (เน็ตบอทไม่เสถียร) กรุณาลองใหม่")
-                    return
-            elif interaction.user.voice and interaction.user.voice.channel != vc.channel:
-                try:
-                    await vc.move_to(interaction.user.voice.channel)
-                except Exception as move_error:
-                    log("🔍 SEARCH MOVE ERROR", interaction, str(move_error))
-                    await _ack_done()
-                    await _send_error("❌ ไม่สามารถย้ายบอทไป Voice Channel ของคุณได้")
-                    return
+            # Search by name does not require a voice connection. A direct track
+            # connects only after metadata has been resolved; result selection connects
+            # when the user chooses a song.
 
             # ตรวจสอบว่าเป็น URL หรือไม่
             is_url = query_str.startswith("http://") or query_str.startswith("https://")
@@ -2172,6 +2223,14 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
                     return
                 
                 await self._delete_done_msg()
+                vc = self.guild.voice_client
+                if not vc:
+                    if not interaction.user.voice:
+                        await _send_error("❌ กรุณาเข้า Voice Channel ก่อน")
+                        return
+                    vc = await _connect_with_retry(interaction.user.voice.channel)
+                elif interaction.user.voice and interaction.user.voice.channel != vc.channel:
+                    await vc.move_to(interaction.user.voice.channel)
                 track = (url, title, duration, interaction.user, thumbnail)
                 await _add_and_play(vc, self.guild, self.channel, self.loop_getter, track)
                 await _ack_done()
@@ -2189,7 +2248,8 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
 
             await send_search_results(results, self.guild, self.channel, self.loop,
                                       self.loop_getter, interaction.user,
-                                      done_msg_ref=self.done_msg_ref)
+                                      done_msg_ref=self.done_msg_ref,
+                                      request_token=request_token)
 
         except Exception as e:
             log("🔍 SEARCH SUBMIT ERROR", interaction, str(e))
@@ -2348,6 +2408,10 @@ class SearchResultView(discord.ui.View):
         msgs = search_result_msgs.get(self.guild.id, [])
         if self.message and self.message in msgs:
             msgs.remove(self.message)
+        if self.requester:
+            key = (self.guild.id, self.requester.id)
+            if _search_result_views.get(key) is self:
+                _search_result_views.pop(key, None)
 
     async def _close_message(self):
         self._remove_self_from_registry()
@@ -2416,12 +2480,11 @@ class SearchResultView(discord.ui.View):
     @discord.ui.button(emoji="✖", label="ปิด", style=discord.ButtonStyle.danger, row=1,
                        custom_id="search_result_close")
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self._remove_self_from_registry()
         try:
             await interaction.response.defer()
-            if self.message: await self.message.delete(); self.message = None
-        except Exception: pass
-        self.stop()
+        except Exception:
+            pass
+        await self._close_message()
 
     async def select_callback(self, interaction: discord.Interaction):
         if not await self._check_requester(interaction): return
@@ -4746,6 +4809,8 @@ def register(tree: app_commands.CommandTree, loop_getter):
             return await safe_respond(interaction, embed=discord.Embed(
                 description="❌ กรุณาเข้า Voice Channel ก่อนนะ!", color=discord.Color.red()), ephemeral=True)
         log("▶️ /play", interaction, f"query: {_trunc(query, 50)}")
+        request_token = begin_search_request(interaction.guild.id, interaction.user.id)
+        await _close_previous_search_result(interaction.guild.id, interaction.user.id)
 
         # ลบข้อความเก่าของบอทใน channel นี้
         asyncio.create_task(_cleanup_channel(interaction.channel))
@@ -4798,20 +4863,8 @@ def register(tree: app_commands.CommandTree, loop_getter):
                 choice_view.message = prompt
                 return
 
-            # OLAK / playlist processing continues with the existing voice connection flow.
-            voice_channel = interaction.user.voice.channel
-            vc = interaction.guild.voice_client
-            if not vc:
-                try:
-                    vc = await _connect_with_retry(voice_channel)
-                except Exception as connect_error:
-                    log("▶️ /play CONNECT ERROR", interaction, str(connect_error))
-                    await _del_search()
-                    return await interaction.followup.send(embed=discord.Embed(
-                        description="❌ เชื่อมต่อ Voice Channel ไม่สำเร็จ (เน็ตบอทไม่เสถียร) กรุณาลองใหม่อีกครั้ง",
-                        color=discord.Color.red()), ephemeral=True)
-            elif vc.channel != voice_channel:
-                await vc.move_to(voice_channel)
+            # Name-based search is independent from Voice Connection. Direct-track
+            # playback connects only after metadata has been resolved.
 
             # ตรวจ URL scheme ผิด เช่น ttps:// หรือ htp://
             looks_like_url = re.search(r'^[a-zA-Z]{2,10}://', query.strip())
@@ -4900,6 +4953,15 @@ def register(tree: app_commands.CommandTree, loop_getter):
                     else:
                         raise
                 
+                vc = interaction.guild.voice_client
+                if not vc:
+                    if not interaction.user.voice:
+                        await _del_search()
+                        return await interaction.followup.send(
+                            "❌ กรุณาเข้า Voice Channel ก่อน", ephemeral=True)
+                    vc = await _connect_with_retry(interaction.user.voice.channel)
+                elif interaction.user.voice and interaction.user.voice.channel != vc.channel:
+                    await vc.move_to(interaction.user.voice.channel)
                 track = (url, title, duration, interaction.user, thumbnail)
                 await _add_and_play(vc, interaction.guild, interaction.channel, loop_getter, track)
                 await _del_search()
@@ -4913,7 +4975,8 @@ def register(tree: app_commands.CommandTree, loop_getter):
                     description="❌ ไม่พบเพลง", color=discord.Color.red()), ephemeral=True)
             await _del_search()
             await send_search_results(results, interaction.guild, interaction.channel,
-                                      loop_getter(), loop_getter, interaction.user)
+                                      loop_getter(), loop_getter, interaction.user,
+                                      request_token=request_token)
 
         except Exception as e:
             err = str(e)
