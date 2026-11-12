@@ -2098,11 +2098,11 @@ class SearchModal(discord.ui.Modal, title="🔍 ค้นหาเพลง"):
     async def on_submit(self, interaction: discord.Interaction):
         query_str = str(self.query).strip()
         request_token = begin_search_request(self.guild.id, interaction.user.id)
-        await _close_previous_search_result(self.guild.id, interaction.user.id)
         log("🔍 SEARCH", interaction, f"query: {_trunc(query_str, 50)}")
         await interaction.response.send_message(
             embed=discord.Embed(description=f"🔍 กำลังค้นหา **{query_str}**", color=0x1a1a2e))
         searching_msg = await interaction.original_response()
+        await _close_previous_search_result(self.guild.id, interaction.user.id)
 
         async def _ack_done():
             try: await searching_msg.delete()
@@ -4810,7 +4810,6 @@ def register(tree: app_commands.CommandTree, loop_getter):
                 description="❌ กรุณาเข้า Voice Channel ก่อนนะ!", color=discord.Color.red()), ephemeral=True)
         log("▶️ /play", interaction, f"query: {_trunc(query, 50)}")
         request_token = begin_search_request(interaction.guild.id, interaction.user.id)
-        await _close_previous_search_result(interaction.guild.id, interaction.user.id)
 
         # ลบข้อความเก่าของบอทใน channel นี้
         asyncio.create_task(_cleanup_channel(interaction.channel))
@@ -4826,6 +4825,7 @@ def register(tree: app_commands.CommandTree, loop_getter):
                 description=f"🔍 กำลังค้นหา **{query}**", color=discord.Color.blurple()))
             searching_msg = await interaction.original_response()
         except Exception: pass
+        await _close_previous_search_result(interaction.guild.id, interaction.user.id)
 
         async def _del_search():
             if searching_msg:
