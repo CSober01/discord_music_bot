@@ -1,0 +1,13 @@
+# Discord Bot และ Voice Support
+discord.py[voice]>=2.6.0,<3.0.0
+
+# YouTube extraction
+yt-dlp>=2025.1.15
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# HTTP requests
+requests>=2.31.0
+
+

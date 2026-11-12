@@ -1,16 +1,34 @@
-.env
-.agents
-__pycache__/*.pyc
-logs/guilds/*.log
 
-# Runtime-generated files
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# AI agent configuration
+.agents/
+
+# Python cache
 __pycache__/
 *.py[cod]
-logs/
+*$py.class
 
 # Local Python environments
 .venv/
 venv/
+env/
 
-# yt-dlp authentication cookies contain private session credentials
+# Runtime logs
+logs/
+*.log
+
+# yt-dlp authentication cookies
 *cookies*.txt
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE and editor settings
+.vscode/
+.idea/
