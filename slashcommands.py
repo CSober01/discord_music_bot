@@ -1,8 +1,3 @@
-"""
-slashcommands.py — ไฟล์กลางสำหรับ slash commands
-ถูก import โดยทั้ง bot.py และ register.py
-"""
-
 import discord
 from discord import app_commands
 import yt_dlp
