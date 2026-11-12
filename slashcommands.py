@@ -2402,6 +2402,13 @@ class SearchResultView(discord.ui.View):
                 description="❌ เฉพาะผู้ค้นหาเท่านั้นที่เลือกได้", color=discord.Color.red()),
                 ephemeral=True)
             return False
+        if self.requester:
+            key = (self.guild.id, self.requester.id)
+            if _search_result_views.get(key) is not self:
+                await interaction.response.send_message(embed=discord.Embed(
+                    description="❌ ผลการค้นหานี้หมดอายุแล้ว กรุณาค้นหาใหม่", color=discord.Color.red()),
+                    ephemeral=True)
+                return False
         return True
 
     def _remove_self_from_registry(self):
