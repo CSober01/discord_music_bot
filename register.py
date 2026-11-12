@@ -1,8 +1,3 @@
-"""
-register.py — รันครั้งเดียวเพื่อ register slash commands กับ Discord
-รันด้วย: python register.py
-"""
-
 import discord
 from discord.ext import commands
 import asyncio
