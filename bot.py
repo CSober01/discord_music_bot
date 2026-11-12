@@ -1,6 +1,5 @@
 import discord
 from discord.ext import commands
-import asyncio
 import os
 from dotenv import load_dotenv
 import slashcommands
@@ -14,6 +13,13 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 slashcommands.register(bot.tree, lambda: bot.loop)
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    # ถ้าถูก kick/disconnect จาก VC ให้ยุติ playback และเก็บสถานะเหมือนกดปุ่มหยุด
+    if bot.user and member.id == bot.user.id and before.channel and not after.channel:
+        await slashcommands.handle_external_voice_disconnect(member.guild)
 
 
 @bot.event
